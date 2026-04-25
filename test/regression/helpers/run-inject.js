@@ -27,7 +27,10 @@ export function loadFixtureResponse(name) {
   const respPath = path.join(FIXTURES_DIR, `${name}.response.txt`);
   // .response.txt 末尾的尾隨 \n 是 editor 自動加的,canned LLM 回應裡不應該
   // 帶它,否則會在 deserializer 後面留下多餘的空白文字節點。
-  return fs.readFileSync(respPath, 'utf8').replace(/\n+$/, '');
+  return fs.readFileSync(respPath, 'utf8')
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .replace(/\n+$/, '');
 }
 
 export async function getShinkansenEvaluator(page) {

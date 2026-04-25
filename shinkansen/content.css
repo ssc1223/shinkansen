@@ -1,8 +1,28 @@
 /* content.css — Shinkansen
- * 譯文以「原地替換」方式寫入原本的元素，完全繼承網站既有樣式，
- * 因此不需要任何 .shinkansen-translation 區塊樣式。
- * 本檔保留給未來可能的全域樣式微調使用（例如 Toast host 定位）。
+ * 一般網頁譯文以雙語對照方式插在原文下方；YouTube 字幕走獨立邏輯。
  */
+
+.shinkansen-translation {
+  display: block !important;
+  margin: 0.35em 0 0.85em !important;
+  color: inherit !important;
+  font: inherit !important;
+  line-height: inherit !important;
+  white-space: normal !important;
+}
+
+li > .shinkansen-translation,
+td > .shinkansen-translation,
+th > .shinkansen-translation,
+dd > .shinkansen-translation,
+dt > .shinkansen-translation,
+figcaption > .shinkansen-translation {
+  margin-bottom: 0.35em !important;
+}
+
+pre.shinkansen-translation {
+  white-space: pre-wrap !important;
+}
 
 /* v1.0.3: 編輯譯文模式 — 淡色虛線框標示可編輯區塊 */
 .shinkansen-editable {

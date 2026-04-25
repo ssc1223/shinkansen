@@ -168,6 +168,85 @@ browser.tabs.onUpdated.addListener((tabId, changeInfo) => {
   }
 });
 
+// ─── 右鍵選單 ──────────────────────────────────────────────
+// Chrome 會在 extension context menu entry 旁顯示目前 extension icon。
+const CONTEXT_MENU_TRANSLATE_ID = 'shinkansen-translate-zh-tw';
+const CONTEXT_MENU_TRANSLATE_TITLE = '翻譯為繁體中文-台灣';
+const CONTEXT_MENU_RESTORE_TITLE = '顯示原文';
+
+function createTranslateContextMenu() {
+  if (!browser.contextMenus) return;
+  try {
+    browser.contextMenus.create({
+      id: CONTEXT_MENU_TRANSLATE_ID,
+      title: CONTEXT_MENU_TRANSLATE_TITLE,
+      contexts: ['page', 'selection', 'link'],
+    }, () => {
+      const err = browser.runtime?.lastError;
+      if (err) {
+        debugLog('warn', 'system', 'context menu create failed', { error: err.message });
+      }
+    });
+  } catch (err) {
+    debugLog('warn', 'system', 'context menu create failed', { error: err?.message || String(err) });
+  }
+}
+
+function updateTranslateContextMenuTitle(translated) {
+  if (!browser.contextMenus) return;
+  const title = translated ? CONTEXT_MENU_RESTORE_TITLE : CONTEXT_MENU_TRANSLATE_TITLE;
+  try {
+    browser.contextMenus.update(CONTEXT_MENU_TRANSLATE_ID, { title }, () => {
+      void browser.runtime?.lastError;
+      browser.contextMenus.refresh?.();
+    });
+  } catch (err) {
+    debugLog('warn', 'system', 'context menu update failed', { error: err?.message || String(err) });
+  }
+}
+
+async function getTabTranslatedState(tabId) {
+  if (tabId == null) return false;
+  try {
+    const state = await browser.tabs.sendMessage(tabId, { type: 'GET_STATE' });
+    return state?.translated === true;
+  } catch {
+    return false;
+  }
+}
+
+function setupContextMenu() {
+  if (!browser.contextMenus) return;
+  try {
+    browser.contextMenus.remove(CONTEXT_MENU_TRANSLATE_ID, () => {
+      // remove() 會在項目不存在時設 lastError，這裡只需要確保接著重建。
+      void browser.runtime?.lastError;
+      createTranslateContextMenu();
+    });
+  } catch {
+    createTranslateContextMenu();
+  }
+}
+
+setupContextMenu();
+
+browser.contextMenus?.onShown?.addListener(async (_info, tab) => {
+  updateTranslateContextMenuTitle(await getTabTranslatedState(tab?.id));
+});
+
+browser.contextMenus?.onClicked?.addListener(async (info, tab) => {
+  if (info.menuItemId !== CONTEXT_MENU_TRANSLATE_ID || !tab?.id) return;
+  const wasTranslated = await getTabTranslatedState(tab.id);
+  browser.tabs.sendMessage(tab.id, {
+    type: 'TRANSLATE_PRESET',
+    payload: { slot: 2 },
+  }).then(() => {
+    updateTranslateContextMenuTitle(!wasTranslated);
+  }).catch(() => {
+    updateTranslateContextMenuTitle(false);
+  });
+});
+
 // ─── v1.4.11 跨 tab sticky 翻譯（v1.4.12 改存 preset slot） ──────────
 // 使用者在 tab A 按任一 preset 快速鍵翻譯後，從 A 點連結開到 tab B 會自動翻譯，
 // 跟著 openerTabId 樹傳遞。跳到無 opener 的新 tab（手動打網址 / bookmark）不繼承。
@@ -800,6 +879,7 @@ browser.commands.onCommand.addListener(async (command) => {
 // ─── 安裝/更新事件 ─────────────────────────────────────────
 browser.runtime.onInstalled.addListener(async ({ reason }) => {
   debugLog('info', 'system', `extension ${reason}`, { version: browser.runtime.getManifest().version });
+  setupContextMenu();
   // 安裝/更新時也檢查一次版本（雙重保險，SW 啟動時已經跑過一次）
   const currentVersion = browser.runtime.getManifest().version;
   await cache.checkVersionAndClear(currentVersion);

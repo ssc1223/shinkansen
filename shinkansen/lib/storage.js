@@ -101,6 +101,7 @@ export const DEFAULT_SETTINGS = {
   },
   domainRules: { whitelist: [] },
   autoTranslate: false,
+  replaceOriginal: false,
   debugLog: false,
   // v1.2.11: YouTube 字幕翻譯設定
   ytSubtitle: {

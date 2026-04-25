@@ -27,6 +27,17 @@ const EXTENSION_PATH = path.resolve(__dirname, '../../shinkansen');
 // 回歸測試的靜態 fixture 目錄（HTML / canned LLM response 等）
 const REGRESSION_FIXTURES_DIR = path.resolve(__dirname, '../regression/fixtures');
 
+function optionalChromeWindowArgs() {
+  const args = [];
+  if (/^-?\d+,-?\d+$/.test(process.env.PW_WINDOW_POSITION || '')) {
+    args.push(`--window-position=${process.env.PW_WINDOW_POSITION}`);
+  }
+  if (/^\d+,\d+$/.test(process.env.PW_WINDOW_SIZE || '')) {
+    args.push(`--window-size=${process.env.PW_WINDOW_SIZE}`);
+  }
+  return args;
+}
+
 export const test = base.extend({
   // eslint-disable-next-line no-empty-pattern
   context: async ({}, use) => {
@@ -42,6 +53,7 @@ export const test = base.extend({
         `--load-extension=${EXTENSION_PATH}`,
         '--no-first-run',
         '--no-default-browser-check',
+        ...optionalChromeWindowArgs(),
       ],
     });
 

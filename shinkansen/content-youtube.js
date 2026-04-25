@@ -741,8 +741,10 @@
   //     讓容器永遠以自身寬度的一半為中心點對齊 left: 50%。
 
   function expandCaptionLine(el) {
-    // 方法 A：segment 自身設 nowrap，覆蓋 YouTube 預設的 pre-wrap
-    el.style.whiteSpace = 'nowrap';
+    // 方法 A：segment 自身設 nowrap，覆蓋 YouTube 預設的 pre-wrap。
+    // 雙語字幕需要保留原文/譯文之間的換行，但仍不要自動折行。
+    el.style.whiteSpace = el.dataset.shinkansenBilingual === '1' ? 'pre' : 'nowrap';
+    el.style.textAlign = 'center';
     // 方法 B + C：向上走所有 block 容器
     let node = el.parentElement;
     while (node && !node.classList.contains('ytp-caption-window-container')) {
@@ -762,10 +764,29 @@
     }
   }
 
+  function formatBilingualCaption(original, translation) {
+    const src = (original || '').trim();
+    const dst = (translation || '').trim();
+    if (!dst) return '';
+    if (!src || normText(src) === normText(dst)) return dst;
+    return `${src}\n${dst}`;
+  }
+
+  function writeCaptionText(el, original, translation) {
+    const text = formatBilingualCaption(original, translation);
+    el.dataset.shinkansenCaptionKey = normText(original || '');
+    el.dataset.shinkansenCaptionText = text;
+    el.dataset.shinkansenBilingual = text.includes('\n') ? '1' : '0';
+    el.textContent = text;
+    return text;
+  }
+
   function replaceSegmentEl(el) {
     if (!SK.YT.active) return;
     const original = el.textContent.trim();
     if (!original) return;
+    // 我們剛寫入的雙語字幕會觸發 characterData mutation；內容未變時直接跳過。
+    if (el.dataset.shinkansenCaptionText === original) return;
     // 已含中日韓字元 → 這是我們設置的譯文被 characterData mutation 觸發回呼，直接跳過
     if (RE_CJK.test(original)) return;
     const key = normText(original);
@@ -773,7 +794,8 @@
     // 快取命中 → 瞬間替換
     const cached = SK.YT.captionMap.get(key);
     if (cached !== undefined) {
-      if (el.textContent !== cached) {
+      const nextText = formatBilingualCaption(original, cached);
+      if (el.textContent !== nextText) {
         // v1.2.51: 第一次 cache hit = 使用者第一次「看到」翻譯字幕的時刻
         const YT = SK.YT;
         if (cached && !YT._firstCacheHitLogged) {
@@ -789,7 +811,7 @@
         // 修正：seek 後 _firstCacheHitLogged 已為 true，但 showCaptionStatus 可能已再次顯示，
         // 只靠 !_firstCacheHitLogged gate 會導致新顯示的提示永遠不被移除。
         if (cached) hideCaptionStatus();
-        el.textContent = cached;
+        writeCaptionText(el, original, cached);
         // 同步展開字幕框（不用 rAF——新版 expandCaptionLine 純設 style，不需量測 layout；
         // 若用 rAF，瀏覽器會先 paint 出「中文 + 舊 315px 容器」再展開，造成一幀閃爍）
         if (cached) expandCaptionLine(el);
@@ -849,7 +871,8 @@
         YT.captionMap.set(key, trans);
         for (const el of (queue.get(key) || [])) {
           if (document.contains(el) && normText(el.textContent) === key) {
-            el.textContent = trans;
+            writeCaptionText(el, el.textContent, trans);
+            if (trans) expandCaptionLine(el);
           }
         }
       }

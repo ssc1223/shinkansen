@@ -93,9 +93,10 @@ async function init() {
   refreshShortcutHint();
 
   // v0.62 起：autoTranslate 仍走 sync（跨裝置同步），apiKey 改走 local（不同步）
-  const { autoTranslate = false } = await browser.storage.sync.get(['autoTranslate']);
+  const { autoTranslate = false, replaceOriginal = false } = await browser.storage.sync.get(['autoTranslate', 'replaceOriginal']);
   const { apiKey = '' } = await browser.storage.local.get(['apiKey']);
   $('auto').checked = autoTranslate;
+  $('replace-original-toggle').checked = replaceOriginal;
 
   // v0.73: 術語表一致化開關（讀 browser.storage.sync 的 glossary.enabled）
   try {
@@ -145,6 +146,10 @@ $('translate-btn').addEventListener('click', async () => {
 
 $('auto').addEventListener('change', async (e) => {
   await browser.storage.sync.set({ autoTranslate: e.target.checked });
+});
+
+$('replace-original-toggle').addEventListener('change', async (e) => {
+  await browser.storage.sync.set({ replaceOriginal: e.target.checked });
 });
 
 // v0.73: 術語表一致化開關 — 寫入 browser.storage.sync 的 glossary.enabled

@@ -30,6 +30,11 @@ if (window.__shinkansen_loaded) {
     originalHTML: new Map(), // el → originalHTML
     // v1.0.14: 儲存翻譯後的 innerHTML，用於偵測框架覆寫並重新套用。
     translatedHTML: new Map(), // el → translatedHTML
+    // 雙語模式插入的譯文節點。還原/SPA reset 時需要移除這些 sibling/child nodes。
+    insertedTranslations: new Set(),
+    translationNodeBySource: new WeakMap(),
+    // false = 原文與譯文並列；true = 以譯文替換原文。
+    replaceOriginal: false,
     // v1.0.23: 續翻模式
     stickyTranslate: false,
     // v1.4.12: 記錄本次翻譯使用的 preset slot（1/2/3），供 SPA 導航續翻 + 跨 tab sticky 用。

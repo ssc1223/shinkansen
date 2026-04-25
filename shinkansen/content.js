@@ -192,7 +192,12 @@
 
   // ─── translateUnits ──────────────────────────────────
 
-  SK.translateUnits = async function translateUnits(units, { onProgress, glossary, signal, modelOverride } = {}) {
+  function getInjectOptions(replaceOriginal) {
+    const shouldReplace = replaceOriginal ?? STATE.replaceOriginal;
+    return shouldReplace ? {} : { mode: 'bilingual' };
+  }
+
+  SK.translateUnits = async function translateUnits(units, { onProgress, glossary, signal, modelOverride, replaceOriginal = null } = {}) {
     const total = units.length;
     const serialized = units.map(unit => {
       if (unit.kind === 'fragment') {
@@ -274,7 +279,8 @@
         }
         if (response.rpdExceeded) rpdWarning = true;
         if (response.hadMismatch) hadAnyMismatch = true;
-        translations.forEach((tr, j) => SK.injectTranslation(job.units[j], tr, job.slots[j]));
+        const injectOptions = getInjectOptions(replaceOriginal);
+        translations.forEach((tr, j) => SK.injectTranslation(job.units[j], tr, job.slots[j], injectOptions));
         done += job.texts.length;
         if (onProgress) onProgress(done, total, hadAnyMismatch);
       } catch (err) {
@@ -352,6 +358,7 @@
     try {
       settings = await browser.storage.sync.get(null);
     } catch (_) { /* 讀取失敗用 default */ }
+    STATE.replaceOriginal = settings.replaceOriginal === true;
 
     // 頁面層級繁中偵測
     {
@@ -511,6 +518,7 @@
         glossary,
         signal: abortSignal,
         modelOverride: options.modelOverride || null,
+        replaceOriginal: STATE.replaceOriginal,
         onProgress: (d, t, mismatch) => SK.showToast('loading', `${labelPrefix}翻譯中… ${d} / ${t}`, {
           progress: d / t,
           mismatch: !!mismatch,
@@ -520,9 +528,11 @@
       if (abortSignal.aborted) {
         SK.sendLog('info', 'translate', 'translation aborted', { done, total });
         if (STATE.originalHTML.size > 0) {
+          SK.removeInsertedTranslations?.();
           STATE.originalHTML.forEach((originalHTML, el) => {
             el.innerHTML = originalHTML;
             el.removeAttribute('data-shinkansen-translated');
+            el.removeAttribute('data-shinkansen-source-translated');
           });
           STATE.originalHTML.clear();
         }
@@ -641,9 +651,11 @@
     if (editModeActive) toggleEditMode(false);
     SK.cancelRescan();
     SK.stopSpaObserver();
+    SK.removeInsertedTranslations?.();
     STATE.originalHTML.forEach((originalHTML, el) => {
       el.innerHTML = originalHTML;
       el.removeAttribute('data-shinkansen-translated');
+      el.removeAttribute('data-shinkansen-source-translated');
     });
     STATE.originalHTML.clear();
     STATE.translatedHTML.clear();
@@ -665,7 +677,7 @@
   // <a> 連結（【N】/【/N】）與 atomic 元素（【*N】），其餘 span/b/i/abbr 直接取文字。
   // 相比 v1.4.1 的 serializeWithPlaceholders+⟦→【 轉換，本版大幅減少標記數量
   // （通常 2-4 個，而非 10+），Google MT 不再被過多標記搞亂位置。
-  SK.translateUnitsGoogle = async function translateUnitsGoogle(units, { onProgress, signal } = {}) {
+  SK.translateUnitsGoogle = async function translateUnitsGoogle(units, { onProgress, signal, replaceOriginal = null } = {}) {
     const total = units.length;
 
     // ── 序列化：只標 <a> 連結與 atomic 元素（footnote sup 等），其餘取純文字 ──
@@ -713,7 +725,7 @@
           const restored = slots?.length
             ? SK.restoreGoogleTranslateMarkers(tr)
             : tr;
-          SK.injectTranslation(unit, restored, slots || []);
+          SK.injectTranslation(unit, restored, slots || [], getInjectOptions(replaceOriginal));
         });
         done += job.texts.length;
         if (onProgress) onProgress(done, total);
@@ -761,6 +773,7 @@
     // 繁中偵測（與 Gemini 相同邏輯）
     let settings = {};
     try { settings = await browser.storage.sync.get(null); } catch (_) {}
+    STATE.replaceOriginal = settings.replaceOriginal === true;
     {
       const skipCheck = settings.skipTraditionalChinesePage === false;
       if (!skipCheck) {
@@ -806,6 +819,7 @@
     try {
       const { done, failures, chars } = await SK.translateUnitsGoogle(units, {
         signal: abortSignal,
+        replaceOriginal: STATE.replaceOriginal,
         onProgress: (d, t) => SK.showToast('loading', `${labelPrefix}Google 翻譯中… ${d} / ${t}`, {
           progress: d / t,
         }),
@@ -813,9 +827,11 @@
 
       if (abortSignal.aborted) {
         if (STATE.originalHTML.size > 0) {
+          SK.removeInsertedTranslations?.();
           STATE.originalHTML.forEach((originalHTML, el) => {
             el.innerHTML = originalHTML;
             el.removeAttribute('data-shinkansen-translated');
+            el.removeAttribute('data-shinkansen-source-translated');
           });
           STATE.originalHTML.clear();
         }

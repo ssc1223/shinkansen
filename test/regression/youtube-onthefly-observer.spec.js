@@ -4,7 +4,7 @@
 //   (1) 新加入 DOM 的 `.ytp-caption-segment` 被 MutationObserver 偵測到
 //   (2) replaceSegmentEl 對快取未命中且 config.onTheFly = true 的字幕加入 pendingQueue
 //   (3) 300ms setTimeout 後 flushOnTheFly 送出 TRANSLATE_SUBTITLE_BATCH
-//   (4) sendMessage resolve 後 captionMap 填入 + DOM element 的 textContent 被替換
+//   (4) sendMessage resolve 後 captionMap 填入 + DOM element 的 textContent 顯示原文/譯文
 //
 // 觸發條件（結構通則）：
 //   - YT.active = true（translateYouTubeSubtitles 已啟動）
@@ -14,7 +14,7 @@
 //
 // 若 v1.2.7 的 observer 流程失效（例如觀察 root 設錯、`replaceSegmentEl` 的
 // pendingQueue/flush 連結斷裂、或 onTheFly guard 誤判），測試會在
-// sendMessage 計數或 textContent 比對上 fail。
+// sendMessage 計數或雙語 textContent 比對上 fail。
 //
 // SANITY CHECK 已完成（2026-04-16，Claude Code 端）：
 //   把 `startCaptionObserver` 內的 `document.querySelector('.ytp-caption-window-container')`
@@ -27,7 +27,7 @@ import { getShinkansenEvaluator } from './helpers/run-inject.js';
 
 const FIXTURE = 'youtube-onthefly-observer';
 
-test('youtube-onthefly-observer: 新增 caption segment 經 observer → on-the-fly flush → textContent 被替換', async ({
+test('youtube-onthefly-observer: 新增 caption segment 經 observer → on-the-fly flush → 顯示原文與譯文', async ({
   context,
   localServer,
 }) => {
@@ -112,8 +112,47 @@ test('youtube-onthefly-observer: 新增 caption segment 經 observer → on-the-
   ).toBe('[ZH] hello world');
   expect(
     result.segmentText,
-    'segment 的 textContent 應被替換為譯文',
-  ).toBe('[ZH] hello world');
+    'segment 的 textContent 應顯示原文 + 換行 + 譯文',
+  ).toBe('Hello world\n[ZH] hello world');
+
+  await page.close();
+});
+
+test('youtube-onthefly-observer: captionMap 命中時顯示原文與譯文', async ({
+  context,
+  localServer,
+}) => {
+  const page = await context.newPage();
+  await page.goto(`${localServer.baseUrl}/${FIXTURE}.html`, { waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('.ytp-caption-window-container', { timeout: 10_000, state: 'attached' });
+
+  const { evaluate } = await getShinkansenEvaluator(page);
+
+  await evaluate(`(async () => {
+    window.__SK.isYouTubePage = () => true;
+    chrome.runtime.sendMessage = async function() { return { ok: true }; };
+    await window.__SK.translateYouTubeSubtitles();
+    window.__SK.YT.captionMap.set('hello world', '你好世界');
+
+    const container = document.querySelector('.ytp-caption-window-container');
+    const span = document.createElement('span');
+    span.className = 'ytp-caption-segment';
+    span.id = 'cached-segment';
+    span.textContent = 'Hello world';
+    container.appendChild(span);
+  })()`);
+
+  await page.waitForTimeout(100);
+
+  const result = await evaluate(`({
+    segmentText: document.getElementById('cached-segment').textContent,
+    whiteSpace: document.getElementById('cached-segment').style.whiteSpace,
+    bilingual: document.getElementById('cached-segment').dataset.shinkansenBilingual,
+  })`);
+
+  expect(result.segmentText).toBe('Hello world\n你好世界');
+  expect(result.whiteSpace).toBe('pre');
+  expect(result.bilingual).toBe('1');
 
   await page.close();
 });

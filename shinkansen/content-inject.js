@@ -135,10 +135,78 @@
     return frag;
   }
 
+  function cloneContent(content) {
+    if (typeof content === 'string') {
+      return content.includes('\n')
+        ? buildFragmentFromTextWithBr(content)
+        : document.createTextNode(content);
+    }
+    return content;
+  }
+
+  function isListOrCellContext(el) {
+    return ['LI', 'DD', 'DT', 'TD', 'TH', 'FIGCAPTION', 'CAPTION', 'SUMMARY'].includes(el.tagName);
+  }
+
+  function createTranslationWrapper(sourceEl, content) {
+    const doc = sourceEl.ownerDocument || document;
+    const tag = sourceEl.tagName === 'P'
+      ? 'p'
+      : sourceEl.tagName === 'PRE'
+        ? 'pre'
+        : (SK.isPreservableInline(sourceEl) ? 'span' : 'div');
+    const wrapper = doc.createElement(tag);
+    wrapper.className = 'shinkansen-translation';
+    wrapper.setAttribute('data-shinkansen-translation', '1');
+    wrapper.setAttribute('data-shinkansen-translated', '1');
+    wrapper.setAttribute('lang', 'zh-Hant');
+    wrapper.appendChild(cloneContent(content));
+    return wrapper;
+  }
+
+  SK.removeInsertedTranslations = function removeInsertedTranslations() {
+    for (const node of STATE.insertedTranslations) {
+      if (node && node.parentNode) node.parentNode.removeChild(node);
+    }
+    STATE.insertedTranslations.clear();
+  };
+
+  function insertBilingualTranslation(unit, content) {
+    const source = unit.kind === 'fragment' ? unit.startNode : unit.el;
+    if (!source) return;
+
+    const old = STATE.translationNodeBySource.get(source);
+    if (old && old.parentNode) old.parentNode.removeChild(old);
+    if (old) STATE.insertedTranslations.delete(old);
+
+    const sourceEl = unit.kind === 'fragment' ? unit.el : unit.el;
+    const wrapper = createTranslationWrapper(sourceEl, content);
+
+    if (unit.kind === 'fragment') {
+      const anchor = unit.endNode ? unit.endNode.nextSibling : null;
+      unit.el.insertBefore(wrapper, anchor);
+      unit.el.setAttribute('data-shinkansen-source-translated', '1');
+    } else if (isListOrCellContext(sourceEl)) {
+      sourceEl.appendChild(wrapper);
+      sourceEl.setAttribute('data-shinkansen-source-translated', '1');
+    } else {
+      sourceEl.parentNode?.insertBefore(wrapper, sourceEl.nextSibling);
+      sourceEl.setAttribute('data-shinkansen-source-translated', '1');
+    }
+
+    STATE.translationNodeBySource.set(source, wrapper);
+    STATE.insertedTranslations.add(wrapper);
+    STATE.translatedHTML.set(sourceEl, sourceEl.innerHTML);
+  }
+
   /**
    * slot 配對失敗 fallback 用的純文字注入。
    */
-  function plainTextFallback(el, cleaned) {
+  function plainTextFallback(el, cleaned, options) {
+    if (options?.mode === 'bilingual') {
+      insertBilingualTranslation({ kind: 'element', el }, cleaned);
+      return;
+    }
     const target = resolveWriteTarget(el);
     injectIntoTarget(target, cleaned);
   }
@@ -146,7 +214,11 @@
   /**
    * 無 slots 路徑的純文字注入。
    */
-  function replaceTextInPlace(el, translation) {
+  function replaceTextInPlace(el, translation, options) {
+    if (options?.mode === 'bilingual') {
+      insertBilingualTranslation({ kind: 'element', el }, translation);
+      return;
+    }
     if (translation && translation.includes('\n')) {
       const frag = buildFragmentFromTextWithBr(translation);
       replaceNodeInPlace(el, frag);
@@ -159,7 +231,11 @@
   /**
    * slots 路徑的 fragment 注入。
    */
-  function replaceNodeInPlace(el, frag) {
+  function replaceNodeInPlace(el, frag, options) {
+    if (options?.mode === 'bilingual') {
+      insertBilingualTranslation({ kind: 'element', el }, frag);
+      return;
+    }
     const target = resolveWriteTarget(el);
     injectIntoTarget(target, frag);
   }
@@ -228,7 +304,7 @@
     return frag;
   }
 
-  SK.injectTranslation = function injectTranslation(unit, translation, slots) {
+  SK.injectTranslation = function injectTranslation(unit, translation, slots, options = {}) {
     if (!translation) return;
     // v1.4.8: 統一在注入入口規範化字面 \n（反斜線+n，兩字元）→ 真正換行符（U+000A）。
     // v1.4.6 在 deserializeWithPlaceholders（有 slots 路徑）加了同樣的規範化，
@@ -236,7 +312,7 @@
     // 導致字面 \n 殘留可見 DOM 字元。在此入口統一處理，覆蓋所有後續路徑。
     if (translation.includes('\\n')) translation = translation.replace(/\\n/g, '\n');
     if (unit.kind === 'fragment') {
-      return injectFragmentTranslation(unit, translation, slots);
+      return injectFragmentTranslation(unit, translation, slots, options);
     }
     const el = unit.el;
     SK.snapshotOnce(el);
@@ -244,8 +320,8 @@
     if (slots && slots.length > 0) {
       const { frag, ok } = SK.deserializeWithPlaceholders(translation, slots);
       if (ok) {
-        replaceNodeInPlace(el, frag);
-        el.setAttribute('data-shinkansen-translated', '1');
+        replaceNodeInPlace(el, frag, options);
+        if (options.mode !== 'bilingual') el.setAttribute('data-shinkansen-translated', '1');
         STATE.translatedHTML.set(el, el.innerHTML);
         return;
       }
@@ -253,23 +329,23 @@
       // v1.2.3: ok=false 時，嘗試從原始 DOM 找回 <a> 連結文字並重建連結結構
       const recovered = tryRecoverLinkSlots(el, cleaned, slots);
       if (recovered) {
-        replaceNodeInPlace(el, recovered);
-        el.setAttribute('data-shinkansen-translated', '1');
+        replaceNodeInPlace(el, recovered, options);
+        if (options.mode !== 'bilingual') el.setAttribute('data-shinkansen-translated', '1');
         STATE.translatedHTML.set(el, el.innerHTML);
         return;
       }
-      plainTextFallback(el, cleaned);
-      el.setAttribute('data-shinkansen-translated', '1');
+      plainTextFallback(el, cleaned, options);
+      if (options.mode !== 'bilingual') el.setAttribute('data-shinkansen-translated', '1');
       STATE.translatedHTML.set(el, el.innerHTML);
       return;
     }
 
-    replaceTextInPlace(el, translation);
-    el.setAttribute('data-shinkansen-translated', '1');
+    replaceTextInPlace(el, translation, options);
+    if (options.mode !== 'bilingual') el.setAttribute('data-shinkansen-translated', '1');
     STATE.translatedHTML.set(el, el.innerHTML);
   };
 
-  function injectFragmentTranslation(unit, translation, slots) {
+  function injectFragmentTranslation(unit, translation, slots, options = {}) {
     if (!translation) return;
     const { el, startNode, endNode } = unit;
 
@@ -293,6 +369,11 @@
       } else {
         newContent = document.createTextNode(translation);
       }
+    }
+
+    if (options.mode === 'bilingual') {
+      insertBilingualTranslation(unit, newContent);
+      return;
     }
 
     const anchor = endNode ? endNode.nextSibling : null;
