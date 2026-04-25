@@ -228,6 +228,57 @@ function setupContextMenu() {
   }
 }
 
+async function cleanupStaleDualDomInOpenTabs(reason) {
+  if (!browser.scripting?.executeScript) return;
+  let tabs = [];
+  try {
+    tabs = await browser.tabs.query({});
+  } catch (err) {
+    debugLog('warn', 'system', 'cleanup stale dual DOM: query tabs failed', { reason, error: err.message });
+    return;
+  }
+
+  let cleanedTabs = 0;
+  let cleanedWrappers = 0;
+  let cleanedSources = 0;
+  await Promise.allSettled(tabs.map(async (tab) => {
+    if (tab?.id == null) return;
+    const results = await browser.scripting.executeScript({
+      target: { tabId: tab.id, allFrames: true },
+      func: () => {
+        const wrappers = document.querySelectorAll('shinkansen-translation');
+        const sources = document.querySelectorAll('[data-shinkansen-dual-source]');
+        if (wrappers.length === 0 && sources.length === 0) {
+          return { wrappers: 0, sources: 0 };
+        }
+        wrappers.forEach(node => node.remove());
+        sources.forEach(el => el.removeAttribute('data-shinkansen-dual-source'));
+        return { wrappers: wrappers.length, sources: sources.length };
+      },
+    });
+    let tabWrappers = 0;
+    let tabSources = 0;
+    for (const result of results || []) {
+      tabWrappers += result?.result?.wrappers || 0;
+      tabSources += result?.result?.sources || 0;
+    }
+    if (tabWrappers || tabSources) {
+      cleanedTabs++;
+      cleanedWrappers += tabWrappers;
+      cleanedSources += tabSources;
+    }
+  }));
+
+  if (cleanedTabs > 0) {
+    debugLog('info', 'system', 'stale dual DOM cleaned in open tabs', {
+      reason,
+      cleanedTabs,
+      cleanedWrappers,
+      cleanedSources,
+    });
+  }
+}
+
 setupContextMenu();
 
 browser.contextMenus?.onShown?.addListener(async (_info, tab) => {
@@ -873,6 +924,9 @@ browser.commands.onCommand.addListener(async (command) => {
 browser.runtime.onInstalled.addListener(async ({ reason }) => {
   debugLog('info', 'system', `extension ${reason}`, { version: browser.runtime.getManifest().version });
   setupContextMenu();
+  cleanupStaleDualDomInOpenTabs(reason).catch(err => {
+    debugLog('warn', 'system', 'cleanup stale dual DOM failed', { reason, error: err.message });
+  });
   // 安裝/更新時也檢查一次版本（雙重保險，SW 啟動時已經跑過一次）
   const currentVersion = browser.runtime.getManifest().version;
   await cache.checkVersionAndClear(currentVersion);

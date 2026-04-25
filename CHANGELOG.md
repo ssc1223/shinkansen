@@ -7,6 +7,8 @@
 
 ## v1.5.x
 
+**v1.5.6** — 修正雙語對照模式的 rescan 會把 `<shinkansen-translation>` wrapper 內的中英混合譯文再次當成翻譯候選，造成 BBC byline/caption 與 Gmail email header/body 連續疊出多行相同譯文的問題。雙語 wrapper 現在會標記 `data-shinkansen-translation` / `data-shinkansen-translated` / `lang="zh-Hant"`，段落偵測器也明確排除 `<shinkansen-translation>` 與其所有後代；新增 regression 覆蓋「BBC Radio 4《Inside Health》」這類含英文專名的譯文不得被 rescan 重新收集。
+
 **v1.5.5** — 停用跨 tab / 新視窗的 sticky 翻譯繼承。過去在已翻譯的 tab A 點連結開 tab B 時，background 會依 `openerTabId` 把 A 的 preset slot 複製給 B，導致切換視窗或開新分頁後頁面未經使用者操作就自動翻譯。現在 sticky 狀態只保留在原本 tab；同一分頁內 SPA 導航仍可續翻，但新 tab / 新視窗不再自動帶入翻譯狀態。更新 regression，鎖定 `window.open` 新 tab 回 `shouldTranslate=false`。
 
 **v1.5.4** — 修正重新載入 extension 後，Gmail / email 類頁面可能保留上一輪雙語對照 DOM，但新的 content script 狀態已重置為未翻譯，導致下一次翻譯把殘留譯文一起當成頁面內容、或在原文附近再次疊加譯文的問題。content script 啟動與下一次翻譯前會清除孤兒 `<shinkansen-translation>` wrapper 與 `data-shinkansen-dual-source` 標記；新增 regression 覆蓋「狀態遺失但 dual DOM 殘留」的清理路徑。

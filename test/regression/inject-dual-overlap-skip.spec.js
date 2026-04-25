@@ -140,3 +140,39 @@ test('dual-stale-cleanup: extension reload 後殘留的 dual DOM 應在下次翻
 
   await page.close();
 });
+
+test('dual-rescan-skip: collectParagraphs 不應把雙語 wrapper 內譯文再次收進翻譯候選', async ({
+  context,
+  localServer,
+}) => {
+  const page = await context.newPage();
+  await page.goto(`${localServer.baseUrl}/dual.html`, { waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('#overlap-inner', { timeout: 10_000 });
+
+  const { evaluate } = await getShinkansenEvaluator(page);
+
+  await evaluate(`(() => {
+    window.__shinkansen.testInjectDual(
+      document.querySelector('#overlap-inner'),
+      'BBC Radio 4《Inside Health》的節目主持人'
+    );
+  })()`);
+
+  const result = await evaluate(`(() => {
+    const report = window.__shinkansen.collectParagraphsWithStats();
+    return {
+      wrapperCount: document.querySelectorAll('shinkansen-translation').length,
+      wrapperMarked: document.querySelector('shinkansen-translation')?.getAttribute('data-shinkansen-translation'),
+      leakedTranslationUnits: report.units.filter(u => (u.textPreview || '').includes('節目主持人')),
+    };
+  })()`);
+
+  expect(result.wrapperCount).toBe(1);
+  expect(result.wrapperMarked).toBe('1');
+  expect(
+    result.leakedTranslationUnits,
+    'rescan 不應把 <shinkansen-translation> 裡的中英混合譯文再當成候選，否則 BBC/Gmail 會疊出多行重複譯文',
+  ).toEqual([]);
+
+  await page.close();
+});

@@ -556,6 +556,9 @@
     const tag = original.tagName;
     const inner = buildDualInner(tag, original, translation, slots);
     const wrapper = original.ownerDocument.createElement(SK.TRANSLATION_WRAPPER_TAG);
+    wrapper.setAttribute('data-shinkansen-translation', '1');
+    wrapper.setAttribute('data-shinkansen-translated', '1');
+    wrapper.setAttribute('lang', 'zh-Hant');
     const mark = SK.currentMarkStyle && SK.VALID_MARK_STYLES.has(SK.currentMarkStyle)
       ? SK.currentMarkStyle
       : SK.DEFAULT_MARK_STYLE;

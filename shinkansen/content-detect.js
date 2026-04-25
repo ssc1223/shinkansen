@@ -85,6 +85,13 @@
     return false;
   }
 
+  function isInsideTranslationOutput(el) {
+    return !!(
+      el?.closest?.('[data-shinkansen-translation], shinkansen-translation') ||
+      el?.tagName === SK.TRANSLATION_WRAPPER_TAG?.toUpperCase?.()
+    );
+  }
+
   function isInteractiveWidgetContainer(el) {
     if (!el.querySelector('button, [role="button"]')) return false;
     const textLen = (el.innerText || '').trim().length;
@@ -182,7 +189,7 @@
           if (stats) stats.alreadyTranslated = (stats.alreadyTranslated || 0) + 1;
           return NodeFilter.FILTER_REJECT;
         }
-        if (el.hasAttribute('data-shinkansen-source-translated') || el.closest?.('[data-shinkansen-translation]')) {
+        if (el.hasAttribute('data-shinkansen-source-translated') || isInsideTranslationOutput(el)) {
           if (stats) stats.alreadyTranslated = (stats.alreadyTranslated || 0) + 1;
           return NodeFilter.FILTER_REJECT;
         }
@@ -339,7 +346,7 @@
     document.querySelectorAll(SK.INCLUDE_BY_SELECTOR).forEach(el => {
       if (seen.has(el)) return;
       if (el.hasAttribute('data-shinkansen-translated')) return;
-      if (el.hasAttribute('data-shinkansen-source-translated') || el.closest?.('[data-shinkansen-translation]')) return;
+      if (el.hasAttribute('data-shinkansen-source-translated') || isInsideTranslationOutput(el)) return;
       if (isInsideExcludedContainer(el)) return;
       if (isInteractiveWidgetContainer(el)) return;
       if (!SK.isVisible(el)) return;
@@ -352,7 +359,7 @@
     document.querySelectorAll('a').forEach(a => {
       if (seen.has(a)) return;
       if (a.hasAttribute('data-shinkansen-translated')) return;
-      if (a.hasAttribute('data-shinkansen-source-translated') || a.closest?.('[data-shinkansen-translation]')) return;
+      if (a.hasAttribute('data-shinkansen-source-translated') || isInsideTranslationOutput(a)) return;
       let cur = a.parentElement;
       let hasBlockAncestor = false;
       while (cur && cur !== document.body) {
@@ -376,7 +383,7 @@
     document.querySelectorAll('div, span').forEach(d => {
       if (seen.has(d)) return;
       if (d.hasAttribute('data-shinkansen-translated')) return;
-      if (d.hasAttribute('data-shinkansen-source-translated') || d.closest?.('[data-shinkansen-translation]')) return;
+      if (d.hasAttribute('data-shinkansen-source-translated') || isInsideTranslationOutput(d)) return;
       if (d.children.length > 0) return;
       let cur = d.parentElement;
       let hasBlockAncestor = false;
@@ -401,12 +408,12 @@
       const tdText = (td.innerText || '').trim();
       if (tdText.length < 20) return;
       if (td.hasAttribute('data-shinkansen-translated')) return;
-      if (td.hasAttribute('data-shinkansen-source-translated') || td.closest?.('[data-shinkansen-translation]')) return;
+      if (td.hasAttribute('data-shinkansen-source-translated') || isInsideTranslationOutput(td)) return;
 
       td.querySelectorAll('*').forEach(el => {
         if (seen.has(el)) return;
         if (el.hasAttribute('data-shinkansen-translated')) return;
-        if (el.hasAttribute('data-shinkansen-source-translated') || el.closest?.('[data-shinkansen-translation]')) return;
+        if (el.hasAttribute('data-shinkansen-source-translated') || isInsideTranslationOutput(el)) return;
 
         for (const child of el.children) {
           if ((child.innerText || '').trim().length >= 15) return;
