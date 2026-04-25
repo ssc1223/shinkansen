@@ -425,6 +425,51 @@
   // 暴露給 content-spa.js（Content Guard dual 分支）使用
   SK.findBlockAncestor = findBlockAncestor;
 
+  function normalizeDualDedupeText(text) {
+    return (text || '').replace(/\s+/g, ' ').trim();
+  }
+
+  function hasUsefulRect(rect) {
+    return rect && rect.width > 0 && rect.height > 0;
+  }
+
+  function rectsLikelySameVisualLine(a, b) {
+    if (!hasUsefulRect(a) || !hasUsefulRect(b)) return false;
+    const verticalOverlap = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
+    const horizontalOverlap = Math.min(a.right, b.right) - Math.max(a.left, b.left);
+    const minHeight = Math.min(a.height, b.height);
+    const minWidth = Math.min(a.width, b.width);
+    if (verticalOverlap >= minHeight * 0.6 && horizontalOverlap >= minWidth * 0.6) return true;
+    return Math.abs(a.top - b.top) <= 4 && Math.abs(a.left - b.left) <= 4;
+  }
+
+  function isLikelyDuplicateDualInjection(original, translation) {
+    const sourceText = normalizeDualDedupeText(original.innerText || original.textContent || '');
+    const translationText = normalizeDualDedupeText(translation);
+    if (!translationText) return false;
+
+    for (const [existingSource, record] of STATE.translationCache || []) {
+      const existingWrapper = record?.wrapper;
+      if (!existingSource?.isConnected || !existingWrapper?.isConnected) continue;
+      const existingTranslation = normalizeDualDedupeText(existingWrapper.textContent || '');
+      if (existingTranslation !== translationText) continue;
+
+      const existingText = normalizeDualDedupeText(existingSource.innerText || existingSource.textContent || '');
+      const sameSourceText = sourceText && existingText && (
+        sourceText === existingText ||
+        sourceText.includes(existingText) ||
+        existingText.includes(sourceText)
+      );
+      if (!sameSourceText) continue;
+
+      if (existingSource.contains(original) || original.contains(existingSource)) return true;
+      const existingRect = existingSource.getBoundingClientRect?.();
+      const currentRect = original.getBoundingClientRect?.();
+      if (rectsLikelySameVisualLine(existingRect, currentRect)) return true;
+    }
+    return false;
+  }
+
   /** 依原段落 tag 決定 wrapper 內部要用哪個 element + 是否需繼承 heading 字級 */
   function buildDualInner(originalTag, originalEl, translation, slots) {
     let innerTag;
@@ -502,6 +547,11 @@
       anc = anc.parentElement;
     }
     if (original.querySelector && original.querySelector('[data-shinkansen-dual-source]')) return;
+    // Gmail / email layouts often expose the same visual line through multiple overlapping
+    // wrapper elements. The ancestor/descendant guard above does not catch sibling clones,
+    // so skip when an already-injected source has the same text/translation at the same
+    // visual position.
+    if (isLikelyDuplicateDualInjection(original, translation)) return;
 
     const tag = original.tagName;
     const inner = buildDualInner(tag, original, translation, slots);

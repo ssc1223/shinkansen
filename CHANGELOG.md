@@ -7,6 +7,8 @@
 
 ## v1.5.x
 
+**v1.5.3** — 修正 Gmail / email 類頁面在雙語對照模式下同一行譯文重複插入多次的問題。根因：部分郵件 UI 會用多層或 sibling wrapper 暴露同一段可見文字，v1.5.1 的祖先/後代去重只能擋巢狀重複，無法擋同一視覺位置的 sibling clone。`SK.injectDual` 新增同文同譯且視覺位置重疊的去重檢查，避免同一封信中 salutation、subject 等短段落連續疊出多個 `<shinkansen-translation>` wrapper。新增 regression 覆蓋 email-like sibling clone。
+
 **v1.5.2** — 同步 upstream `jimmysu0309/shinkansen` v1.5.1，保留 fork 端新增的右鍵選單翻譯切換與 YouTube 原文+譯文雙行字幕。右鍵選單現在會依目前分頁狀態顯示「翻譯為繁體中文-台灣」或「顯示原文」，點擊後在 extension 譯文與原始頁面之間切換；manifest 新增 `contextMenus` 權限。Popup 顯示模式採「替換原文 / 雙語對照」兩段式切換，預設為雙語對照，符合未選替換原文時保留原文並顯示譯文的閱讀方式。YouTube 字幕翻譯維持原文與譯文雙行顯示，方便對照。
 
 **v1.5.1** — 修正 v1.5.0 雙語對照模式在 BBC author byline 一類頁面譯文連續疊三個 wrapper 的問題（Jimmy 在 https://www.bbc.com/news/articles/clyepyy82kxo 觀察到「BBC Radio 4 《Inside Health》節目主持人」連續三行譯文疊在淡黃 wrapper 內）。根因：`collectParagraphs` 在這類網站抓到祖先 element + 後代 element 都當成段落單元（祖孫同段重複偵測）。單語模式下後一次 `injectIntoTarget` 會 in-place 覆蓋前一次所以使用者看不到，雙語模式下每次 `SK.injectDual` 都 `insertAdjacentElement('afterend')` 一個 wrapper，所以重複偵測被視覺放大成多重 wrapper。
