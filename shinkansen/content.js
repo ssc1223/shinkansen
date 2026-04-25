@@ -1041,6 +1041,7 @@
     // 沒翻譯時不需提示——下次 translatePage 會自動讀新的 displayMode。
     if (msg?.type === 'MODE_CHANGED') {
       const mode = msg.mode === 'dual' ? 'dual' : 'single';
+      SK.setYouTubeCaptionDisplayMode?.(mode);
       if (STATE.translated) {
         const desc = mode === 'dual' ? '雙語對照' : '單語覆蓋';
         SK.showToast('success', `顯示模式已切換為「${desc}」，請按快速鍵重新翻譯以套用`, {

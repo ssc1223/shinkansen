@@ -156,3 +156,57 @@ test('youtube-onthefly-observer: captionMap 命中時顯示原文與譯文', asy
 
   await page.close();
 });
+
+test('youtube-display-mode: 替換原文模式只顯示譯文，雙語模式顯示原文與譯文', async ({
+  context,
+  localServer,
+}) => {
+  const page = await context.newPage();
+  await page.goto(`${localServer.baseUrl}/${FIXTURE}.html`, { waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('.ytp-caption-window-container', { timeout: 10_000, state: 'attached' });
+
+  const { evaluate } = await getShinkansenEvaluator(page);
+
+  await evaluate(`(async () => {
+    window.__SK.isYouTubePage = () => true;
+    chrome.runtime.sendMessage = async function() { return { ok: true }; };
+    await window.__SK.translateYouTubeSubtitles();
+    window.__SK.YT.captionMap.set('hello world', '你好世界');
+
+    const container = document.querySelector('.ytp-caption-window-container');
+    const span = document.createElement('span');
+    span.className = 'ytp-caption-segment';
+    span.id = 'mode-segment';
+    span.textContent = 'Hello world';
+    container.appendChild(span);
+  })()`);
+
+  await page.waitForTimeout(100);
+
+  const dual = await evaluate(`({
+    text: document.getElementById('mode-segment').textContent,
+    bilingual: document.getElementById('mode-segment').dataset.shinkansenBilingual,
+  })`);
+  expect(dual.text).toBe('Hello world\n你好世界');
+  expect(dual.bilingual).toBe('1');
+
+  await evaluate(`window.__SK.setYouTubeCaptionDisplayMode('single')`);
+  const single = await evaluate(`({
+    text: document.getElementById('mode-segment').textContent,
+    bilingual: document.getElementById('mode-segment').dataset.shinkansenBilingual,
+    original: document.getElementById('mode-segment').dataset.shinkansenCaptionOriginal,
+  })`);
+  expect(single.text).toBe('你好世界');
+  expect(single.bilingual).toBe('0');
+  expect(single.original).toBe('Hello world');
+
+  await evaluate(`window.__SK.setYouTubeCaptionDisplayMode('dual')`);
+  const dualAgain = await evaluate(`({
+    text: document.getElementById('mode-segment').textContent,
+    bilingual: document.getElementById('mode-segment').dataset.shinkansenBilingual,
+  })`);
+  expect(dualAgain.text).toBe('Hello world\n你好世界');
+  expect(dualAgain.bilingual).toBe('1');
+
+  await page.close();
+});

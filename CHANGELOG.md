@@ -7,6 +7,8 @@
 
 ## v1.5.x
 
+**v1.5.7** — YouTube 字幕翻譯改為共用 popup 上方「替換原文 / 雙語對照」顯示模式。`雙語對照` 會顯示原文 + 譯文兩行；`替換原文` 只顯示譯文。切換顯示模式時，已經顯示在畫面上的字幕會即時重新排版，不需要停止字幕翻譯或重新整理 YouTube。新增 regression 覆蓋 YouTube caption display mode 雙向切換。
+
 **v1.5.6** — 修正雙語對照模式的 rescan 會把 `<shinkansen-translation>` wrapper 內的中英混合譯文再次當成翻譯候選，造成 BBC byline/caption 與 Gmail email header/body 連續疊出多行相同譯文的問題。雙語 wrapper 現在會標記 `data-shinkansen-translation` / `data-shinkansen-translated` / `lang="zh-Hant"`，段落偵測器也明確排除 `<shinkansen-translation>` 與其所有後代；新增 regression 覆蓋「BBC Radio 4《Inside Health》」這類含英文專名的譯文不得被 rescan 重新收集。
 
 **v1.5.5** — 停用跨 tab / 新視窗的 sticky 翻譯繼承。過去在已翻譯的 tab A 點連結開 tab B 時，background 會依 `openerTabId` 把 A 的 preset slot 複製給 B，導致切換視窗或開新分頁後頁面未經使用者操作就自動翻譯。現在 sticky 狀態只保留在原本 tab；同一分頁內 SPA 導航仍可續翻，但新 tab / 新視窗不再自動帶入翻譯狀態。更新 regression，鎖定 `window.open` 新 tab 回 `shouldTranslate=false`。

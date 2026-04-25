@@ -236,6 +236,7 @@
     firstBatchSize:           8,   // v1.2.50: 最近一次視窗實際使用的首批大小（debug 用）
     lastLeadMs:               0,   // v1.2.50: 最近一次視窗起點距影片位置的 ms（負數=緊急）
     _firstCacheHitLogged:     false, // v1.2.51: 本 session 是否已記錄第一次 cache hit
+    displayMode:          'dual',  // v1.5.7: 跟 popup「替換原文 / 雙語對照」共用設定
   };
 
   // ─── 工具 ──────────────────────────────────────────────────
@@ -255,8 +256,9 @@
 
   async function getYtConfig() {
     if (SK.YT.config) return SK.YT.config;
-    const saved = await browser.storage.sync.get('ytSubtitle');
+    const saved = await browser.storage.sync.get(['ytSubtitle', 'displayMode']);
     SK.YT.config = { ...DEFAULT_YT_CONFIG, ...(saved.ytSubtitle || {}) };
+    SK.YT.displayMode = saved.displayMode === 'single' ? 'single' : 'dual';
     return SK.YT.config;
   }
 
@@ -764,22 +766,41 @@
     }
   }
 
-  function formatBilingualCaption(original, translation) {
+  function formatCaptionText(original, translation) {
     const src = (original || '').trim();
     const dst = (translation || '').trim();
     if (!dst) return '';
+    if (SK.YT.displayMode === 'single') return dst;
     if (!src || normText(src) === normText(dst)) return dst;
     return `${src}\n${dst}`;
   }
 
   function writeCaptionText(el, original, translation) {
-    const text = formatBilingualCaption(original, translation);
+    const text = formatCaptionText(original, translation);
     el.dataset.shinkansenCaptionKey = normText(original || '');
+    el.dataset.shinkansenCaptionOriginal = (original || '').trim();
     el.dataset.shinkansenCaptionText = text;
     el.dataset.shinkansenBilingual = text.includes('\n') ? '1' : '0';
     el.textContent = text;
     return text;
   }
+
+  function refreshCaptionDisplayMode() {
+    document.querySelectorAll('.ytp-caption-segment[data-shinkansen-caption-key]').forEach(el => {
+      const key = el.dataset.shinkansenCaptionKey;
+      if (!key) return;
+      const translation = SK.YT.captionMap.get(key);
+      if (translation === undefined) return;
+      const original = el.dataset.shinkansenCaptionOriginal || el.textContent || '';
+      writeCaptionText(el, original, translation);
+      if (translation) expandCaptionLine(el);
+    });
+  }
+
+  SK.setYouTubeCaptionDisplayMode = function setYouTubeCaptionDisplayMode(mode) {
+    SK.YT.displayMode = mode === 'single' ? 'single' : 'dual';
+    refreshCaptionDisplayMode();
+  };
 
   function replaceSegmentEl(el) {
     if (!SK.YT.active) return;
@@ -794,7 +815,7 @@
     // 快取命中 → 瞬間替換
     const cached = SK.YT.captionMap.get(key);
     if (cached !== undefined) {
-      const nextText = formatBilingualCaption(original, cached);
+      const nextText = formatCaptionText(original, cached);
       if (el.textContent !== nextText) {
         // v1.2.51: 第一次 cache hit = 使用者第一次「看到」翻譯字幕的時刻
         const YT = SK.YT;
