@@ -307,6 +307,35 @@
     return `https://docs.google.com/document/d/${match[1]}/mobilebasic`;
   }
 
+  function cleanupStaleDualTranslationDom(reason) {
+    if (STATE.translated || STATE.translating) {
+      return { wrappers: 0, sources: 0, cleaned: false };
+    }
+    const wrapperCount = document.querySelectorAll(SK.TRANSLATION_WRAPPER_TAG).length;
+    const sourceCount = document.querySelectorAll('[data-shinkansen-dual-source]').length;
+    if (wrapperCount === 0 && sourceCount === 0) {
+      return { wrappers: 0, sources: 0, cleaned: false };
+    }
+
+    // Extension reloads reset content-script memory but leave the page DOM intact.
+    // Dual mode can be restored without snapshots, so scrub those orphan nodes before
+    // language detection or the next translation pass sees them as page content.
+    SK.removeDualWrappers?.();
+    STATE.translationCache?.clear?.();
+    STATE.translatedMode = null;
+    STATE.translatedBy = null;
+    STATE.stickyTranslate = false;
+    STATE.stickySlot = null;
+    SK.sendLog('info', 'translate', 'stale dual translation DOM cleaned', {
+      reason,
+      wrappers: wrapperCount,
+      sources: sourceCount,
+      url: location.href,
+    });
+    return { wrappers: wrapperCount, sources: sourceCount, cleaned: true };
+  }
+  SK.cleanupStaleDualTranslationDom = cleanupStaleDualTranslationDom;
+
   // ─── translatePage ───────────────────────────────────
 
   SK.translatePage = async function translatePage(options = {}) {
@@ -321,6 +350,8 @@
       restorePage();
       return;
     }
+
+    cleanupStaleDualTranslationDom('pre-translate');
 
     if (isGoogleDocsEditorPage()) {
       const mobileUrl = getGoogleDocsMobileBasicUrl();
@@ -782,6 +813,8 @@
       restorePage();
     }
 
+    cleanupStaleDualTranslationDom('pre-google-translate');
+
     if (!navigator.onLine) {
       SK.showToast('error', '目前處於離線狀態，無法翻譯。請確認網路連線後再試', { autoHideMs: 5000 });
       return;
@@ -1147,6 +1180,9 @@
       STATE.translated = false;
       STATE.translatedMode = null;
     },
+    cleanupStaleDual() {
+      return cleanupStaleDualTranslationDom('debug-api');
+    },
     selectBestSlotOccurrences(text) {
       return SK.selectBestSlotOccurrences(text);
     },
@@ -1189,6 +1225,8 @@
   };
 
   // ─── 初始化 ──────────────────────────────────────────
+
+  cleanupStaleDualTranslationDom('startup');
 
   browser.runtime.sendMessage({ type: 'CLEAR_BADGE' }).catch(() => {});
 

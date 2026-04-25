@@ -7,6 +7,8 @@
 
 ## v1.5.x
 
+**v1.5.4** — 修正重新載入 extension 後，Gmail / email 類頁面可能保留上一輪雙語對照 DOM，但新的 content script 狀態已重置為未翻譯，導致下一次翻譯把殘留譯文一起當成頁面內容、或在原文附近再次疊加譯文的問題。content script 啟動與下一次翻譯前會清除孤兒 `<shinkansen-translation>` wrapper 與 `data-shinkansen-dual-source` 標記；新增 regression 覆蓋「狀態遺失但 dual DOM 殘留」的清理路徑。
+
 **v1.5.3** — 修正 Gmail / email 類頁面在雙語對照模式下同一行譯文重複插入多次的問題。根因：部分郵件 UI 會用多層或 sibling wrapper 暴露同一段可見文字，v1.5.1 的祖先/後代去重只能擋巢狀重複，無法擋同一視覺位置的 sibling clone。`SK.injectDual` 新增同文同譯且視覺位置重疊的去重檢查，避免同一封信中 salutation、subject 等短段落連續疊出多個 `<shinkansen-translation>` wrapper。新增 regression 覆蓋 email-like sibling clone。
 
 **v1.5.2** — 同步 upstream `jimmysu0309/shinkansen` v1.5.1，保留 fork 端新增的右鍵選單翻譯切換與 YouTube 原文+譯文雙行字幕。右鍵選單現在會依目前分頁狀態顯示「翻譯為繁體中文-台灣」或「顯示原文」，點擊後在 extension 譯文與原始頁面之間切換；manifest 新增 `contextMenus` 權限。Popup 顯示模式採「替換原文 / 雙語對照」兩段式切換，預設為雙語對照，符合未選替換原文時保留原文並顯示譯文的閱讀方式。YouTube 字幕翻譯維持原文與譯文雙行顯示，方便對照。

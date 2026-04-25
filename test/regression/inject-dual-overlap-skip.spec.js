@@ -103,3 +103,40 @@ test('dual-overlap-skip: 同一視覺位置的 sibling clone 應 skip，避免 G
 
   await page.close();
 });
+
+test('dual-stale-cleanup: extension reload 後殘留的 dual DOM 應在下次翻譯前清掉', async ({
+  context,
+  localServer,
+}) => {
+  const page = await context.newPage();
+  await page.goto(`${localServer.baseUrl}/dual.html`, { waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('#basic', { timeout: 10_000 });
+
+  const { evaluate } = await getShinkansenEvaluator(page);
+
+  await evaluate(`(() => {
+    window.__shinkansen.testInjectDual(document.querySelector('#basic'), '你好世界。');
+    window.__shinkansen.setTestState({ translated: false, translatedMode: null });
+  })()`);
+
+  const beforeCleanup = await page.evaluate(() => ({
+    wrapperCount: document.querySelectorAll('shinkansen-translation').length,
+    sourceCount: document.querySelectorAll('[data-shinkansen-dual-source]').length,
+  }));
+  expect(beforeCleanup.wrapperCount).toBe(1);
+  expect(beforeCleanup.sourceCount).toBe(1);
+
+  const cleaned = await evaluate(`window.__shinkansen.cleanupStaleDual()`);
+  const afterCleanup = await page.evaluate(() => ({
+    wrapperCount: document.querySelectorAll('shinkansen-translation').length,
+    sourceCount: document.querySelectorAll('[data-shinkansen-dual-source]').length,
+  }));
+
+  expect(cleaned.cleaned).toBe(true);
+  expect(cleaned.wrappers).toBe(1);
+  expect(cleaned.sources).toBe(1);
+  expect(afterCleanup.wrapperCount).toBe(0);
+  expect(afterCleanup.sourceCount).toBe(0);
+
+  await page.close();
+});
