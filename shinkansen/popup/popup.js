@@ -93,10 +93,12 @@ async function init() {
   refreshShortcutHint();
 
   // v0.62 起：autoTranslate 仍走 sync（跨裝置同步），apiKey 改走 local（不同步）
-  const { autoTranslate = false, replaceOriginal = false } = await browser.storage.sync.get(['autoTranslate', 'replaceOriginal']);
+  const { autoTranslate = false, displayMode = 'dual' } = await browser.storage.sync.get(['autoTranslate', 'displayMode']);
   const { apiKey = '' } = await browser.storage.local.get(['apiKey']);
   $('auto').checked = autoTranslate;
-  $('replace-original-toggle').checked = replaceOriginal;
+
+  // v1.5.0: 顯示模式 toggle 初始狀態
+  setDisplayModeButtons(displayMode === 'single' ? 'single' : 'dual');
 
   // v0.73: 術語表一致化開關（讀 browser.storage.sync 的 glossary.enabled）
   try {
@@ -148,9 +150,25 @@ $('auto').addEventListener('change', async (e) => {
   await browser.storage.sync.set({ autoTranslate: e.target.checked });
 });
 
-$('replace-original-toggle').addEventListener('change', async (e) => {
-  await browser.storage.sync.set({ replaceOriginal: e.target.checked });
-});
+// v1.5.0: 顯示模式切換 toggle
+function setDisplayModeButtons(mode) {
+  $('mode-single').setAttribute('aria-checked', mode === 'single' ? 'true' : 'false');
+  $('mode-dual').setAttribute('aria-checked', mode === 'dual' ? 'true' : 'false');
+}
+
+async function changeDisplayMode(mode) {
+  setDisplayModeButtons(mode);
+  await browser.storage.sync.set({ displayMode: mode });
+  try {
+    const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
+    if (tab?.id) {
+      await browser.tabs.sendMessage(tab.id, { type: 'MODE_CHANGED', mode }).catch(() => {});
+    }
+  } catch { /* 非可注入頁面，安靜忽略 */ }
+}
+
+$('mode-single').addEventListener('click', () => changeDisplayMode('single'));
+$('mode-dual').addEventListener('click',   () => changeDisplayMode('dual'));
 
 // v0.73: 術語表一致化開關 — 寫入 browser.storage.sync 的 glossary.enabled
 $('glossary-toggle').addEventListener('change', async (e) => {
