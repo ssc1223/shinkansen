@@ -587,9 +587,9 @@
       STATE.translated = true;
       STATE.translatedBy = 'gemini';  // v1.4.0
       STATE.stickyTranslate = true;
-      STATE.stickySlot = options.slot ?? null;  // v1.4.12: 記錄 preset slot 供 SPA 續翻 + 跨 tab 繼承
+      STATE.stickySlot = options.slot ?? null;  // v1.4.12: 記錄 preset slot 供 SPA 續翻
       browser.runtime.sendMessage({ type: 'SET_BADGE_TRANSLATED' }).catch(() => {});
-      // v1.4.11 跨 tab sticky（v1.4.12 改存 preset slot）：opener 鏈中新開的 tab 繼承同 slot
+      // tab-scoped sticky：只記錄當前 tab，不再讓 opener 鏈中新開的 tab 繼承同 slot。
       if (options.slot != null) {
         browser.runtime.sendMessage({ type: 'STICKY_SET', payload: { slot: options.slot } }).catch(() => {});
       }
@@ -712,7 +712,7 @@
     STATE.stickyTranslate = false;
     STATE.stickySlot = null;    // v1.4.12
     browser.runtime.sendMessage({ type: 'CLEAR_BADGE' }).catch(() => {});
-    // v1.4.11: 清除跨 tab sticky（只影響當前 tab，不影響樹中其他 tab）
+    // 清除當前 tab 的 sticky 狀態；其他 tab 不受影響。
     browser.runtime.sendMessage({ type: 'STICKY_CLEAR' }).catch(() => {});
     SK.showToast('success', '已還原原文', { progress: 1, autoHideMs: 2000 });
   }
@@ -909,7 +909,7 @@
       STATE.stickyTranslate = true;
       STATE.stickySlot = gtOptions.slot ?? null;  // v1.4.12
       browser.runtime.sendMessage({ type: 'SET_BADGE_TRANSLATED' }).catch(() => {});
-      // v1.4.11 跨 tab sticky（v1.4.12 改存 preset slot）：opener 鏈中新開的 tab 繼承同 slot
+      // tab-scoped sticky：只記錄當前 tab，不再讓 opener 鏈中新開的 tab 繼承同 slot。
       if (gtOptions.slot != null) {
         browser.runtime.sendMessage({ type: 'STICKY_SET', payload: { slot: gtOptions.slot } }).catch(() => {});
       }
@@ -1253,11 +1253,9 @@
       }
 
       // v1.4.18: 只有 reload 清 sticky——使用者按 reload 才是「我想要新鮮狀態」訊號。
-      // 瀏覽器前進後退（back_forward）是歷史切換，應延續既有 sticky：使用者在 A 翻譯
-      // 後點連結到 B 會自動翻譯，按返回鍵回 A 同樣該自動翻譯（一致的「翻譯會跟著我的
-      // 瀏覽上下文」心智模型）。v1.4.12–v1.4.17 曾一併把 back_forward 歸類成「放棄翻譯」
-      // 造成返回頁面顯示英文，v1.4.18 分開處理。
-      // （新 tab 開啟的 navigation.type 為 'navigate'，仍走下方 STICKY_QUERY 繼承 opener）
+      // 瀏覽器前進後退（back_forward）是同一 tab 的歷史切換，仍可查回本 tab 狀態。
+      // v1.5.5 起，新 tab / 新視窗不繼承 opener tab，避免點連結開頁後未經操作就自動翻譯。
+      // 新 tab / 新視窗不會繼承 opener；STICKY_QUERY 只會查當前 tab 自己的狀態。
       let navType = null;
       try {
         navType = performance.getEntriesByType('navigation')?.[0]?.type || null;
@@ -1266,10 +1264,10 @@
         await browser.runtime.sendMessage({ type: 'STICKY_CLEAR' }).catch(() => {});
         SK.sendLog('info', 'system', 'page reload, sticky cleared', { navType, url: location.href });
       } else {
-        // v1.4.11 跨 tab sticky（v1.4.12 改傳 preset slot）：opener tab 的 preset 延用到此 tab
+        // tab-scoped sticky：reload 以外的同 tab navigation 可查回自身 slot；新 tab 通常回 false。
         const stickyResp = await browser.runtime.sendMessage({ type: 'STICKY_QUERY' }).catch(() => null);
         if (stickyResp?.shouldTranslate && stickyResp.slot != null) {
-          SK.sendLog('info', 'system', 'sticky translate inherited from opener tab, triggering preset', { slot: stickyResp.slot, url: location.href });
+          SK.sendLog('info', 'system', 'tab sticky translate active, triggering preset', { slot: stickyResp.slot, url: location.href });
           handleTranslatePreset(Number(stickyResp.slot));
           return;
         }

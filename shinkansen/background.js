@@ -247,14 +247,15 @@ browser.contextMenus?.onClicked?.addListener(async (info, tab) => {
   });
 });
 
-// ─── v1.4.11 跨 tab sticky 翻譯（v1.4.12 改存 preset slot） ──────────
-// 使用者在 tab A 按任一 preset 快速鍵翻譯後，從 A 點連結開到 tab B 會自動翻譯，
-// 跟著 openerTabId 樹傳遞。跳到無 opener 的新 tab（手動打網址 / bookmark）不繼承。
-// 每個 tab 記錄自己當時用的 preset slot（1/2/3），新 tab 繼承相同 slot——
-// 尊重使用者當時按的引擎+模型（Flash / Flash Lite / Google MT 各自繼承）。
+// ─── tab-scoped sticky 翻譯（v1.4.12 改存 preset slot） ──────────
+// 每個 tab 記錄自己當時用的 preset slot（1/2/3），讓同一分頁 reload/back-forward
+// 可以查回本 tab 的 slot。新 tab / 新視窗不再繼承 opener tab，避免點連結開新頁時
+// 未經使用者明確操作就自動翻譯。SPA 同分頁續翻由 content-spa.js 的 in-memory
+// STATE.stickyTranslate 處理，不依賴這裡的跨 tab 複製。
 // 按任意 preset 快速鍵在已翻譯狀態 → restorePage → STICKY_CLEAR 只清當前 tab。
 // 持久化於 chrome.storage.session，service worker 休眠重啟後仍保留。
 
+const STICKY_SESSION_SCHEMA = 'tab-scoped-v1';
 const stickyTabs = new Map(); // tabId → slot (number)
 let _stickyHydrated = false;
 
@@ -262,7 +263,12 @@ async function hydrateStickyTabs() {
   if (_stickyHydrated) return;
   _stickyHydrated = true;
   try {
-    const { stickyTabs: saved } = await browser.storage.session.get('stickyTabs');
+    const { stickyTabs: saved, stickySchema } = await browser.storage.session.get(['stickyTabs', 'stickySchema']);
+    if (stickySchema !== STICKY_SESSION_SCHEMA) {
+      await browser.storage.session.set({ stickyTabs: {}, stickySchema: STICKY_SESSION_SCHEMA });
+      debugLog('info', 'system', 'sticky session reset for tab-scoped schema');
+      return;
+    }
     if (saved && typeof saved === 'object') {
       for (const [tabId, slot] of Object.entries(saved)) {
         // v1.4.12 前的舊值是 'gemini'/'google' 字串，重啟後忽略舊格式避免誤觸發
@@ -278,24 +284,11 @@ async function persistStickyTabs() {
   try {
     const obj = {};
     stickyTabs.forEach((slot, tabId) => { obj[tabId] = slot; });
-    await browser.storage.session.set({ stickyTabs: obj });
+    await browser.storage.session.set({ stickyTabs: obj, stickySchema: STICKY_SESSION_SCHEMA });
   } catch (err) {
     debugLog('warn', 'system', 'persistStickyTabs failed', { error: err.message });
   }
 }
-
-browser.tabs.onCreated.addListener(async (tab) => {
-  await hydrateStickyTabs();
-  const openerId = tab.openerTabId;
-  if (openerId == null) return;
-  const slot = stickyTabs.get(openerId);
-  if (slot == null) return;
-  stickyTabs.set(tab.id, slot);
-  await persistStickyTabs();
-  debugLog('info', 'system', 'sticky inherited from opener', {
-    newTabId: tab.id, openerTabId: openerId, slot,
-  });
-});
 
 browser.tabs.onRemoved.addListener(async (tabId) => {
   if (!stickyTabs.has(tabId)) return;
@@ -379,7 +372,7 @@ const messageHandlers = {
     async: true,
     handler: (_, sender) => clearTranslatedBadge(sender?.tab?.id),
   },
-  // v1.4.11 跨 tab sticky 翻譯（v1.4.12 起 value = preset slot number）
+  // tab-scoped sticky 翻譯（value = preset slot number）
   STICKY_QUERY: {
     async: true,
     handler: async (_, sender) => {

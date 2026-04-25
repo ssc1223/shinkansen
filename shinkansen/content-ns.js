@@ -35,7 +35,7 @@ if (window.__shinkansen_loaded) {
     translationNodeBySource: new WeakMap(),
     // v1.0.23: 續翻模式
     stickyTranslate: false,
-    // v1.4.12: 記錄本次翻譯使用的 preset slot（1/2/3），供 SPA 導航續翻 + 跨 tab sticky 用。
+    // v1.4.12: 記錄本次翻譯使用的 preset slot（1/2/3），供 SPA 導航續翻與同 tab reload/back-forward 查詢用。
     // null = 非 preset 觸發（例如 autoTranslate 白名單、popup 按鈕舊路徑）。
     stickySlot: null,
     // v1.5.0: 雙語對照模式

@@ -7,6 +7,8 @@
 
 ## v1.5.x
 
+**v1.5.5** — 停用跨 tab / 新視窗的 sticky 翻譯繼承。過去在已翻譯的 tab A 點連結開 tab B 時，background 會依 `openerTabId` 把 A 的 preset slot 複製給 B，導致切換視窗或開新分頁後頁面未經使用者操作就自動翻譯。現在 sticky 狀態只保留在原本 tab；同一分頁內 SPA 導航仍可續翻，但新 tab / 新視窗不再自動帶入翻譯狀態。更新 regression，鎖定 `window.open` 新 tab 回 `shouldTranslate=false`。
+
 **v1.5.4** — 修正重新載入 extension 後，Gmail / email 類頁面可能保留上一輪雙語對照 DOM，但新的 content script 狀態已重置為未翻譯，導致下一次翻譯把殘留譯文一起當成頁面內容、或在原文附近再次疊加譯文的問題。content script 啟動與下一次翻譯前會清除孤兒 `<shinkansen-translation>` wrapper 與 `data-shinkansen-dual-source` 標記；新增 regression 覆蓋「狀態遺失但 dual DOM 殘留」的清理路徑。
 
 **v1.5.3** — 修正 Gmail / email 類頁面在雙語對照模式下同一行譯文重複插入多次的問題。根因：部分郵件 UI 會用多層或 sibling wrapper 暴露同一段可見文字，v1.5.1 的祖先/後代去重只能擋巢狀重複，無法擋同一視覺位置的 sibling clone。`SK.injectDual` 新增同文同譯且視覺位置重疊的去重檢查，避免同一封信中 salutation、subject 等短段落連續疊出多個 `<shinkansen-translation>` wrapper。新增 regression 覆蓋 email-like sibling clone。

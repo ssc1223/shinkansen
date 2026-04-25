@@ -8,7 +8,7 @@
  * 按返回鍵回 A 時 STICKY_CLEAR 被觸發 → 後續 STICKY_QUERY 回 false → A 顯示英文。
  *
  * 修法（v1.4.18）：只有 `'reload'` 清 sticky。`'back_forward'` 視同正常歷史切換，走
- * STICKY_QUERY 繼承 opener / 之前的 sticky 狀態。
+ * STICKY_QUERY 查詢同一 tab 之前的 sticky 狀態。
  *
  * 這組 test 直接 mock jsdom window.performance.getEntriesByType + 攔截
  * chrome.runtime.sendMessage 觀察 STICKY_CLEAR / STICKY_QUERY 的發送順序。
@@ -96,7 +96,7 @@ describe('v1.4.18: back_forward navigation preserves sticky', () => {
     const types = env.sentMessages.map(m => m?.type);
     // back_forward 不該送 STICKY_CLEAR
     expect(types).not.toContain('STICKY_CLEAR');
-    // 應走 STICKY_QUERY 繼承之前的 sticky 狀態
+    // 應走 STICKY_QUERY 查詢之前的 sticky 狀態
     expect(types).toContain('STICKY_QUERY');
   });
 
