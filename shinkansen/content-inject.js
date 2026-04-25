@@ -3,6 +3,7 @@
 // replaceNodeInPlace、replaceTextInPlace、plainTextFallback、fragment 注入。
 
 (function(SK) {
+  if (!SK || SK.disabled) return;  // v1.5.2: iframe gate（見 content-ns.js）
 
   const STATE = SK.STATE;
 
@@ -470,13 +471,11 @@
     return false;
   }
 
-  /** 依原段落 tag 決定 wrapper 內部要用哪個 element + 是否需繼承 heading 字級 */
+  /** 依原段落 tag 決定 wrapper 內部要用哪個 element */
   function buildDualInner(originalTag, originalEl, translation, slots) {
     let innerTag;
-    let copyHeadingStyle = false;
     if (/^H[1-6]$/.test(originalTag)) {
       innerTag = 'div';
-      copyHeadingStyle = true;
     } else if (originalTag === 'LI' || originalTag === 'TD' || originalTag === 'TH') {
       innerTag = 'div';
     } else if (SK.BLOCK_TAGS_SET.has(originalTag) || originalTag === 'DIV' || originalTag === 'SECTION' || originalTag === 'ARTICLE' || originalTag === 'MAIN' || originalTag === 'ASIDE') {
@@ -487,14 +486,24 @@
       innerTag = 'div';
     }
     const inner = document.createElement(innerTag);
-    if (copyHeadingStyle) {
-      const win = originalEl.ownerDocument?.defaultView;
-      const cs = win?.getComputedStyle?.(originalEl);
-      if (cs) {
-        if (cs.fontSize)   inner.style.fontSize   = cs.fontSize;
-        if (cs.fontWeight) inner.style.fontWeight = cs.fontWeight;
-        if (cs.lineHeight) inner.style.lineHeight = cs.lineHeight;
-      }
+
+    // v1.5.2: typography copy（涵蓋所有 dual 路徑）。
+    // wrapper 在大多數情境下是原段落的 sibling（block tag 走 afterend、heading
+    // 走 afterend、inline 走 afterend-block-ancestor），inner 也不在原段落裡，
+    // 所以無法繼承到 BBC 等網站設在 `p`/`h1` selector 上的 paragraph typography——
+    // 結果是雙語模式下譯文字型 / 字距 / 行距跟原段落差很多。
+    // 主動 copy computed style 才能讓譯文視覺上對齊原段落。
+    // LI/TD/TH 的 inner 雖然在原 cell 裡（已繼承），多 copy 一份 inline style
+    // 結果一致、行為單純，照做。
+    const win = originalEl.ownerDocument?.defaultView;
+    const cs = win?.getComputedStyle?.(originalEl);
+    if (cs) {
+      if (cs.fontFamily)    inner.style.fontFamily    = cs.fontFamily;
+      if (cs.fontSize)      inner.style.fontSize      = cs.fontSize;
+      if (cs.fontWeight)    inner.style.fontWeight    = cs.fontWeight;
+      if (cs.lineHeight)    inner.style.lineHeight    = cs.lineHeight;
+      if (cs.letterSpacing) inner.style.letterSpacing = cs.letterSpacing;
+      if (cs.color)         inner.style.color         = cs.color;
     }
 
     // 譯文內容：有 slots 走 deserializer 重建 inline 結構，否則純文字 / br fragment
@@ -518,6 +527,55 @@
       inner.appendChild(document.createTextNode(translation));
     }
     return inner;
+  }
+
+  /**
+   * 在「本次預期注入的位置」找已存在、譯文相符的 wrapper。
+   *
+   * v1.5.2 BBC SPA 重建 inline 段落 race condition 防護：
+   * BBC News 等 React-driven 站點在初次 dual 注入後會把原 inline element（如
+   * byline 的 <span>）整個用 cloneNode 替換掉。新 element 沒有
+   * data-shinkansen-dual-source attribute（attribute 在「舊 element」上、舊
+   * element 已不在 DOM），但「舊 wrapper」仍在 DOM——因為 wrapper 是更上層
+   * block-ancestor 的 sibling，與 inline element 不同層，不會被替換連帶刪除。
+   * MutationObserver 觸發 collectParagraphs 重掃時，injectDual 對「新 element」
+   * 沒有去重保護，於是又注入第二個 wrapper；BBC 再 rerender 一次 → 第三個 wrapper
+   * → DOM 上同位置疊出 N 層巢狀 wrapper（v1.5.2 BBC byline 三層觀察值）。
+   *
+   * 修法：注入前在「預期插入位置」掃一次。若該位置已有 SHINKANSEN-TRANSLATION
+   * 且 textContent 與這次譯文相符，視為同一段已注入，skip 並把 cache key 從
+   * 舊 element 換成新 element，讓 Content Guard 後續用新 element 追蹤。
+   *
+   * 比對方式：用 stripStrayPlaceholderMarkers 把譯文裡的 ⟦…⟧ 標記移除後 trim，
+   * 跟 wrapper.textContent.trim() 比對全字串——因為 wrapper inner 的 textContent
+   * 是 deserializer 還原後的純文字（slot 已展開），跟 translation 帶 markers 的
+   * 原始字串不會 100% 一致，但移除 markers 後等價。
+   */
+  function findExistingWrapperAtInsertionPoint(original, tag, translation) {
+    const wrapperTagUpper = SK.TRANSLATION_WRAPPER_TAG.toUpperCase();
+    const winDoc = original.ownerDocument;
+    let candidate = null;
+    if (tag === 'LI' || tag === 'TD' || tag === 'TH') {
+      // appendChild 模式：注入後 wrapper 是 original 最後一個 element child
+      candidate = original.lastElementChild;
+    } else if (
+      SK.BLOCK_TAGS_SET.has(tag) ||
+      tag === 'DIV' || tag === 'SECTION' || tag === 'ARTICLE' || tag === 'MAIN' || tag === 'ASIDE'
+    ) {
+      // afterend 模式：wrapper 是 original 的下一個 element sibling
+      candidate = original.nextElementSibling;
+    } else {
+      // inline：afterend-block-ancestor（找不到 block-ancestor 時 fallback 到 original）
+      const blockAncestor = findBlockAncestor(original);
+      const anchor = (blockAncestor && blockAncestor !== winDoc.body) ? blockAncestor : original;
+      candidate = anchor.nextElementSibling;
+    }
+    if (!candidate || candidate.tagName !== wrapperTagUpper) return null;
+    const expected = (SK.stripStrayPlaceholderMarkers
+      ? SK.stripStrayPlaceholderMarkers(translation)
+      : translation).trim();
+    if (candidate.textContent.trim() !== expected) return null;
+    return candidate;
   }
 
   /** 主入口：把譯文以雙語 wrapper 形式注入 DOM */
@@ -554,6 +612,23 @@
     if (isLikelyDuplicateDualInjection(original, translation)) return;
 
     const tag = original.tagName;
+
+    // v1.5.2: 同位置已存在譯文相符的 wrapper → skip 並把 cache key 換成 original
+    // （見 findExistingWrapperAtInsertionPoint 註解：BBC SPA 重建 inline 段落
+    // 後 attribute 不繼承造成的重複注入。）
+    const existingWrapper = findExistingWrapperAtInsertionPoint(original, tag, translation);
+    if (existingWrapper) {
+      for (const [oldKey, info] of STATE.translationCache) {
+        if (info.wrapper === existingWrapper) {
+          STATE.translationCache.delete(oldKey);
+          STATE.translationCache.set(original, info);
+          break;
+        }
+      }
+      original.setAttribute('data-shinkansen-dual-source', '1');
+      return;
+    }
+
     const inner = buildDualInner(tag, original, translation, slots);
     const wrapper = original.ownerDocument.createElement(SK.TRANSLATION_WRAPPER_TAG);
     wrapper.setAttribute('data-shinkansen-translation', '1');
@@ -564,6 +639,22 @@
       : SK.DEFAULT_MARK_STYLE;
     wrapper.setAttribute('data-sk-mark', mark);
     wrapper.appendChild(inner);
+
+    // v1.5.3: copy 原段落的水平 layout 屬性到 wrapper。
+    // 真實案例（macstories.net Newsletter）：原 <p> 有 margin-left / padding-left
+    // 把段落擠到頁面中段，wrapper 是 sibling、不繼承這些屬性，所以譯文拉滿整行
+    // 跟原 <p> 不對齊。typography copy（v1.5.2）只搬字型相關 6 屬性，layout 沒搬。
+    // 只 copy 水平方向：保留 wrapper 自有的「上下間距」（margin-top:0.25em CSS rule）
+    // 與「不固定 width」（讓 wrapper 隨 parent 撐開），避免動到段間距與整體寬度。
+    const winLayout = original.ownerDocument?.defaultView;
+    const csLayout = winLayout?.getComputedStyle?.(original);
+    if (csLayout) {
+      if (csLayout.marginLeft)   wrapper.style.marginLeft   = csLayout.marginLeft;
+      if (csLayout.marginRight)  wrapper.style.marginRight  = csLayout.marginRight;
+      if (csLayout.paddingLeft)  wrapper.style.paddingLeft  = csLayout.paddingLeft;
+      if (csLayout.paddingRight) wrapper.style.paddingRight = csLayout.paddingRight;
+      if (csLayout.maxWidth && csLayout.maxWidth !== 'none') wrapper.style.maxWidth = csLayout.maxWidth;
+    }
 
     let insertMode;
     if (tag === 'LI' || tag === 'TD' || tag === 'TH') {
@@ -608,11 +699,14 @@
     const style = document.createElement('style');
     style.id = 'shinkansen-dual-style';
     // 樣式設計原則：display:block 確保 wrapper 自成一行；mark 用 attribute selector 區分
+    // v1.5.3: dashed 從「底部虛線」（block border-bottom 只在最後一行出現、跟連結
+    // 底線易混淆）改為「波浪底線」（每行字底下都有，跟連結直線底線視覺區分）。
+    // mark value 保留 'dashed' 不改名，避免 storage migration 問題；只改視覺實作。
     style.textContent =
       `${tag} { display: block; margin-top: 0.25em; }\n` +
       `${tag}[data-sk-mark="tint"]   { background-color: #FFF8E1; padding: 2px 4px; }\n` +
       `${tag}[data-sk-mark="bar"]    { border-left: 2px solid #9CA3AF; padding-left: 8px; }\n` +
-      `${tag}[data-sk-mark="dashed"] { border-bottom: 1px dashed #9CA3AF; }\n` +
+      `${tag}[data-sk-mark="dashed"] { text-decoration: underline wavy #C7CDD3; text-decoration-thickness: 1px; text-underline-offset: 4px; }\n` +
       `${tag}[data-sk-mark="none"]   {}\n`;
     (document.head || document.documentElement).appendChild(style);
   };
