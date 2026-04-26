@@ -323,6 +323,54 @@
     return [];
   }
 
+  function looksLikeChineseCaptionText(texts) {
+    const sample = (texts || [])
+      .map(t => (typeof t === 'string' ? t : t?.text) || '')
+      .filter(Boolean)
+      .slice(0, 30)
+      .join(' ');
+    if (!sample.trim()) return false;
+
+    const lettersOnly = sample.replace(/[\s\d\p{P}\p{S}]/gu, '');
+    if (lettersOnly.length < 2) return false;
+
+    let hanCount = 0;
+    let kanaCount = 0;
+    for (const ch of lettersOnly) {
+      const code = ch.codePointAt(0);
+      if ((code >= 0x4E00 && code <= 0x9FFF) || (code >= 0x3400 && code <= 0x4DBF)) {
+        hanCount++;
+      }
+      if ((code >= 0x3040 && code <= 0x309F) || (code >= 0x30A0 && code <= 0x30FF)) {
+        kanaCount++;
+      }
+    }
+
+    if (kanaCount > 0 && kanaCount / lettersOnly.length > 0.05) return false;
+    return hanCount / lettersOnly.length >= 0.45;
+  }
+
+  function currentVisibleCaptionsLookChinese() {
+    const texts = Array.from(document.querySelectorAll('.ytp-caption-segment'))
+      .map(el => el.textContent || '');
+    return looksLikeChineseCaptionText(texts);
+  }
+
+  function skipAlreadyChineseCaptions(reason, segments) {
+    const texts = segments || Array.from(document.querySelectorAll('.ytp-caption-segment'))
+      .map(el => el.textContent || '');
+    if (!looksLikeChineseCaptionText(texts)) return false;
+
+    SK.sendLog('info', 'youtube', 'captions already Chinese; subtitle translation skipped', {
+      reason,
+      segmentCount: Array.isArray(segments) ? segments.length : texts.length,
+    });
+    stopYouTubeTranslation();
+    SK.showToast('success', 'YouTube 字幕已是中文，不需翻譯');
+    setTimeout(() => SK.hideToast(), 2500);
+    return true;
+  }
+
   // ─── v1.3.12: MAIN world XHR 攔截結果接收 ────────────────────
   // content-youtube-main.js 的 monkey-patch 攔截 YouTube 播放器自己的 /api/timedtext 請求，
   // 把 responseText 以 CustomEvent 傳進 isolated world。
@@ -348,6 +396,7 @@
     });
 
     if (YT.active) {
+      if (skipAlreadyChineseCaptions('xhr-captions', segments)) return;
       // translateYouTubeSubtitles 已啟動但在等待（rawSegments 剛被填入）
       // 直接觸發當前視窗的翻譯
       const video = document.querySelector('video');
@@ -1050,6 +1099,8 @@
     attachVideoListener();
 
     const config = await getYtConfig();
+    if (YT.rawSegments.length > 0 && skipAlreadyChineseCaptions('cached-raw-segments', YT.rawSegments)) return;
+    if (currentVisibleCaptionsLookChinese() && skipAlreadyChineseCaptions('visible-caption-dom')) return;
     _debugUpdate('字幕翻譯已啟動，等待 CC 字幕資料…');
 
     // observer 提前啟動：captionMap 尚空時 cache miss → 字幕保持原文

@@ -33,6 +33,14 @@ const MOCK_JSON3 = JSON.stringify({
   ],
 });
 
+const MOCK_ZH_JSON3 = JSON.stringify({
+  events: [
+    { tStartMs: 0,    segs: [{ utf8: '大家好，歡迎回來' }] },
+    { tStartMs: 3000, segs: [{ utf8: '這部影片已經有中文字幕' }] },
+    { tStartMs: 6000, segs: [{ utf8: '所以不需要再次翻譯' }] },
+  ],
+});
+
 test('youtube-innertube-fetch: extractCaptionTracksFromPage 解析頁面 script 取得軌道', async ({
   context,
   localServer,
@@ -200,4 +208,47 @@ test('youtube-innertube-fetch: translateYouTubeSubtitles 完整流程（v1.3.12�
   expect(state.rawSegmentsCount).toBe(3);           // 3 條字幕（Hello world / This is a test / Goodbye）
   expect(state.fetchCaptionsCalled).toBe(0);         // v1.3.12：FETCH_YT_CAPTIONS 不再被呼叫
   expect(state.translateCalled).toBeGreaterThanOrEqual(1); // TRANSLATE_SUBTITLE_BATCH 至少一次
+});
+
+test('youtube-existing-chinese-captions: XHR 字幕已是中文時應停止翻譯並隱藏翻譯中提示', async ({
+  context,
+  localServer,
+}) => {
+  const page = await context.newPage();
+  await page.goto(`${localServer.baseUrl}/${FIXTURE}.html`, { waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('.ytp-caption-window-container', { timeout: 10_000, state: 'attached' });
+
+  const { evaluate } = await getShinkansenEvaluator(page);
+
+  await evaluate(`window.__SK.isYouTubePage = () => true`);
+  await evaluate(`
+    window.__translateBatchCalled = 0;
+    chrome.runtime.sendMessage = async function(msg) {
+      if (msg && msg.type === 'TRANSLATE_SUBTITLE_BATCH') {
+        window.__translateBatchCalled++;
+        return { ok: true, result: [], usage: {} };
+      }
+      return { ok: true };
+    };
+  `);
+
+  await evaluate(`window.__SK.translateYouTubeSubtitles()`);
+  await evaluate(`
+    window.dispatchEvent(new CustomEvent('shinkansen-yt-captions', {
+      detail: { url: 'https://www.youtube.com/api/timedtext?v=${VIDEO_ID}&lang=zh-Hant', responseText: ${JSON.stringify(MOCK_ZH_JSON3)} }
+    }));
+  `);
+  await page.waitForTimeout(100);
+
+  const state = await evaluate(`({
+    active: window.__SK.YT.active,
+    rawSegmentsCount: window.__SK.YT.rawSegments.length,
+    translateCalled: window.__translateBatchCalled,
+    statusExists: !!document.getElementById('__sk-yt-caption-status'),
+  })`);
+
+  expect(state.active).toBe(false);
+  expect(state.rawSegmentsCount).toBe(0);
+  expect(state.translateCalled).toBe(0);
+  expect(state.statusExists).toBe(false);
 });

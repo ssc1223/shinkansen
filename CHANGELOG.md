@@ -7,6 +7,8 @@
 
 ## v1.5.x
 
+**v1.5.10** — 修正 YouTube 影片原本就有中文字幕時，字幕翻譯提示會一直停在「翻譯中…」的問題。現在啟動字幕翻譯時若畫面上已是中文字幕，或 XHR 攔截到的 timedtext 字幕批次本身已是中文，會直接停止字幕翻譯狀態、保留原本中文字幕、隱藏字幕區提示，並顯示「YouTube 字幕已是中文，不需翻譯」。新增 regression 覆蓋 visible caption DOM 與 XHR captions 兩條路徑。
+
 **v1.5.9** — Merge upstream `jimmysu0309/shinkansen:main`（截至 2026-04-26），納入 upstream v1.5.6–v1.5.7 的中國用語黑名單、自訂 OpenAI 相容模型、用量紀錄改善、WordPress hero 圖標題偵測/注入修法、設定頁版面對齊與更嚴格的版本同步測試；保留 fork 端 v1.5.3–v1.5.8 的 Gmail/BBC duplicate 修正、tab-scoped sticky 翻譯、右鍵選單切換、雙語預設，以及 YouTube 字幕共用「替換原文 / 雙語對照」顯示模式。Extension 版本同步 bump 至 1.5.9。
 
 **v1.5.8** — Merge upstream `jimmysu0309/shinkansen:main`（截至 2026-04-25），納入 upstream v1.5.2–v1.5.5 的 iframe gate、dual typography/layout 對齊、SPA duplicate guard、restorePage dual attribute cleanup、編輯模式 Content Guard 修正、cross-browser prep 與測試效能更新；保留 fork 端 v1.5.3–v1.5.7 的 Gmail/BBC duplicate 修正、tab-scoped sticky 翻譯、右鍵選單切換、雙語預設，以及 YouTube 字幕共用「替換原文 / 雙語對照」顯示模式。Extension 版本同步 bump 至 1.5.8。
