@@ -17,6 +17,20 @@
 
 ## 條目
 
+### ~~v1.8.0 — streaming abort / mid-failure / first_chunk timeout 三個 e2e edge case~~ — 已補測試(2026-04-28)
+- abort 跨批傳播 → `test/regression/streaming-batch-0-abort.spec.js`(monkey-patch onMessage listener 收集器,先 fire FIRST_CHUNK 解放 batch 1+ 並行,maxConcurrentBatches=1 讓 abort 後 worker 下次迴圈 check signal.aborted 退出。SANITY:abortHandler 改 no-op → STREAMING_ABORT count=0 fail。)
+- mid-failure → `test/regression/streaming-batch-0-mid-failure.spec.js`(FIRST_CHUNK + 3 個 SEGMENT 後 STREAMING_ERROR,驗證 batch 0「整批 25 texts retry」+ batch 1 已並行不重送。SANITY:catch 區塊 no-op → batch 0 retry 不送、payloadSizes 變 1 fail。)
+- first_chunk 1.5s timeout → `test/regression/streaming-batch-0-first-chunk-timeout.spec.js`(TRANSLATE_BATCH_STREAM 回 started:true 但完全不 fire 任何 STREAMING_*,驗證 1.5s 後 STREAMING_ABORT 送 + fallback 走 non-streaming。SANITY:FIRST_CHUNK_TIMEOUT_MS 改 1_000_000 → 永不 timeout、abortCount=0 fail。)
+
+### ~~v1.6.19 — `hydrateStickyTabs` 並行 race~~ — 已豁免(2026-04-28)
+觸發條件「SW 喚醒後 <50ms 內連開多 tab」極端窄窗,真實使用幾乎不可能踩到;Playwright 的 `context.newPage` timing 受 Chromium 內部排程影響無法穩定壓住該 race window,jsdom mock 又得大幅 rewrite `background.js` 的 module pattern。修法本身已 commit(`_stickyHydratingPromise` 取代 boolean flag),回歸風險評估遠低於測試 rewrite 成本,走豁免不寫 spec。
+
+### ~~v1.6.19 — options.js `parseUserNum`~~ — 已補測試 → `test/unit/parse-user-num.spec.js`(v1.8.9)
+v1.8.9 把 `parseUserNum` helper 從 `options.js` 內部抽到 `lib/format.js` export,寫 10 條 Playwright unit spec 涵蓋 0 / 空字串 / null / undefined / 非法字元 / 正整數 / 小數 / 負數 / trim 空白 / Infinity / NaN 全部 case。SANITY 通過(把 body 改回 `Number(v) || default` → "0 應保留" + "Infinity/NaN 走 default" fail)。
+
+### ~~v1.6.19 — content.js `sendMessageWithTimeout` timer leak~~ — 已豁免(原 PENDING 條目就宣告)
+GC / timer 殘留難以從 page-level Playwright 觀察;stub `setTimeout`/`clearTimeout` 計數等於測實作細節而非行為。實際影響極低(微 GC 壓力沒功能差異),修法已包成 helper,測試效益低於投入成本,走「dim 影響無自動化價值」豁免。
+
 ### ~~vBulletin td.alt1 翻譯後標題 div 消失 / HR 位置顛倒~~ — 已修復（v1.4.14）→ `test/regression/inject-vbulletin-title-div.spec.js`
 （Cowork 端 Chrome MCP 實地診斷：根因不在 detection，而在 `content-inject.js` `injectIntoTarget`——TD 含 img 觸發 `containsMedia(TD)=true` 走 media-preserving path，把 fragment 塞進最長文字節點所在的 postbitcontrol2，原 smallfont/HR 殘留於其上方。修法：target 有 CONTAINER_TAGS 直屬子元素時改走 clean-slate（`containsMedia && !hasContainerChild` 才走 media path）。SANITY 通過。這是 v1.4.14 起「UI bug 必須 Cowork 實地診斷」新流程的首發；對比前一版被 revert 的 v1.4.14（Claude Code 純推理自以為修好但真實頁面沒用），證明實地驗證規則的必要性。）
 

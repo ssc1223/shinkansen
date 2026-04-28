@@ -7,11 +7,28 @@
 </head>
 <body>
   <header>
-    <h1>🚄 Shinkansen</h1>
+    <h1>🚄 Shinkansen<span class="update-dot" id="update-dot" hidden title="有新版可下載"></span></h1>
     <span class="version" id="version"></span>
   </header>
 
   <main>
+    <!-- v1.6.5: 剛升級的歡迎條（CWS 自動更新後顯示一次性綠色 banner，使用者按
+         「知道了」永久 dismissed）。welcome banner 與 update banner 互斥——
+         CWS 使用者只會看到綠色，unpacked 使用者只會看到黃色。 -->
+    <div id="welcome-banner" class="welcome-banner" hidden>
+      <strong id="welcome-banner-title">🎉 已升級</strong>
+      <p class="welcome-banner-subtitle">本版新增：</p>
+      <ul id="welcome-bullets" class="welcome-bullets"></ul>
+      <button id="welcome-banner-dismiss" class="welcome-banner-dismiss" type="button">知道了</button>
+    </div>
+
+    <!-- v1.6.1: 有新版可下載時顯示 banner（v1.6.3 改 button 不依賴 a-tag navigate
+         避免 popup 環境下 <a target="_blank"> 反而 navigate 到 popup.html# 的怪 bug） -->
+    <button id="update-banner" class="update-banner" type="button" hidden>
+      <strong>📦 有新版可下載</strong>
+      <span id="update-banner-version"></span>
+    </button>
+
     <button id="translate-btn" class="primary">翻譯本頁</button>
     <button id="edit-btn" class="secondary" hidden>編輯譯文</button>
 

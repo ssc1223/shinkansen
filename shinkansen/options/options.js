@@ -4,7 +4,8 @@
 import { browser } from '../lib/compat.js';
 import { DEFAULT_SETTINGS, DEFAULT_SYSTEM_PROMPT, DEFAULT_GLOSSARY_PROMPT, DEFAULT_SUBTITLE_SYSTEM_PROMPT, DEFAULT_FORBIDDEN_TERMS } from '../lib/storage.js';
 import { TIER_LIMITS } from '../lib/tier-limits.js';
-import { formatTokens, formatUSD } from '../lib/format.js';
+import { formatTokens, formatUSD, parseUserNum } from '../lib/format.js';
+import { isWorthNotifying } from '../lib/update-check.js'; // v1.6.5
 
 // 向下相容：舊程式碼大量使用 DEFAULTS，保留別名避免大範圍搜尋取代
 const DEFAULTS = DEFAULT_SETTINGS;
@@ -18,41 +19,23 @@ const MODEL_PRICING = Object.fromEntries(
 );
 
 
+// v1.6.15: 全域 #model dropdown 已移除（v1.4.12 起 preset modelOverride 涵蓋
+// 95%+ 場景,真實後備路徑剩 testGeminiKey 按鈕 + cache key 構建）。改讀
+// 「主要預設」(slot 2)的 model;若 slot 2 引擎不是 gemini → fallback 到
+// DEFAULTS.geminiConfig.model(避免 testGeminiKey 沒 model 可送)。
 function getSelectedModel() {
-  const sel = $('model').value;
-  if (sel === '__custom__') {
-    return ($('custom-model-input').value || '').trim() || DEFAULTS.geminiConfig.model;
+  const engineSel = $('preset-engine-2');
+  const modelSel = $('preset-model-2');
+  if (engineSel?.value === 'gemini' && modelSel?.value) {
+    return modelSel.value;
   }
-  return sel;
+  return DEFAULTS.geminiConfig.model;
 }
 
-// v0.64：切換自行輸入欄位的可見性
-function toggleCustomModelInput() {
-  const isCustom = $('model').value === '__custom__';
-  $('custom-model-row').hidden = !isCustom;
-}
-
-// Service Tier 價格倍率（以 Standard 為基準）
-// 來源：https://ai.google.dev/gemini-api/docs/flex-inference / priority-inference（2026-04-09）
-// Flex = 50% 折扣 → 0.5 倍；Priority = 最高 200% → 2.0 倍（保守估計）
-const SERVICE_TIER_MULTIPLIER = {
-  DEFAULT:  1.0,
-  STANDARD: 1.0,
-  FLEX:     0.5,
-  PRIORITY: 2.0,
-};
-
-// v0.64：模型變更 / Service Tier 變更 → 自動帶入參考價到模型計價欄位
-function applyModelPricing(model, tierOverride) {
-  const baseModel = model;
-  const p = MODEL_PRICING[baseModel];
-  if (!p) return; // 自行輸入或查不到參考價時不動現有值
-  const tier = tierOverride || $('serviceTier').value || 'DEFAULT';
-  const mult = SERVICE_TIER_MULTIPLIER[tier] ?? 1.0;
-  // 保留兩位小數，避免浮點誤差
-  $('inputPerMTok').value = +(p.input * mult).toFixed(2);
-  $('outputPerMTok').value = +(p.output * mult).toFixed(2);
-}
+// v1.6.15: SERVICE_TIER_MULTIPLIER + applyModelPricing 已移除。
+// 原本是「全域 model dropdown 切換時自動帶入參考價到後備路徑單價」的便利功能,
+// model dropdown 移除後不再有觸發點;且 v1.6.14 已加 per-model override 表
+// 取代「自動帶價」的 UX 功能。後備路徑單價現在純由使用者填,不自動連動 service tier。
 
 function applyTierToInputs(tier, model) {
   const rpmEl = $('rpm');
@@ -88,24 +71,30 @@ async function load() {
     apiKey: localApiKey,
   };
   $('apiKey').value = s.apiKey;
-  const modelSelect = $('model');
-  const savedModel = s.geminiConfig.model;
-  const hasOption = [...modelSelect.options].some((o) => o.value === savedModel);
-  if (hasOption) {
-    modelSelect.value = savedModel;
-  } else {
-    modelSelect.value = '__custom__';
-    $('custom-model-input').value = savedModel;
-  }
-  toggleCustomModelInput();
+  // v1.6.15: 全域 #model dropdown 已移除,不再從 storage 載入到 UI。
+  // settings.geminiConfig.model 仍保留 storage 結構（避免 migration）但 UI 不顯示。
   $('serviceTier').value = s.geminiConfig.serviceTier;
   $('temperature').value = s.geminiConfig.temperature;
   $('topP').value = s.geminiConfig.topP;
   $('topK').value = s.geminiConfig.topK;
   $('maxOutputTokens').value = s.geminiConfig.maxOutputTokens;
   $('systemInstruction').value = s.geminiConfig.systemInstruction;
-  $('inputPerMTok').value = s.pricing.inputPerMTok;
-  $('outputPerMTok').value = s.pricing.outputPerMTok;
+  // v1.6.16: 後備路徑單價 UI 已移除(對應 input element 不存在),不再從 settings 載入到 UI。
+  // settings.pricing 仍保留 storage 結構作 belt-and-suspenders(background.js:610 fallback 路徑保留)。
+  // v1.6.14: per-model 計價覆蓋
+  const overrides = s.modelPricingOverrides || {};
+  const fillOverride = (id, model, key) => {
+    const el = $(id);
+    if (!el) return;
+    const v = overrides[model]?.[key];
+    el.value = (Number.isFinite(Number(v)) ? Number(v) : '');
+  };
+  fillOverride('override-lite-input',  'gemini-3.1-flash-lite-preview', 'inputPerMTok');
+  fillOverride('override-lite-output', 'gemini-3.1-flash-lite-preview', 'outputPerMTok');
+  fillOverride('override-flash-input', 'gemini-3-flash-preview', 'inputPerMTok');
+  fillOverride('override-flash-output','gemini-3-flash-preview', 'outputPerMTok');
+  fillOverride('override-pro-input',   'gemini-3.1-pro-preview', 'inputPerMTok');
+  fillOverride('override-pro-output',  'gemini-3.1-pro-preview', 'outputPerMTok');
   $('whitelist').value = (s.domainRules.whitelist || []).join('\n');
   $('debugLog').checked = s.debugLog;
 
@@ -116,18 +105,28 @@ async function load() {
   if (s.rpmOverride) $('rpm').value = s.rpmOverride;
   if (s.tpmOverride) $('tpm').value = s.tpmOverride;
   if (s.rpdOverride) $('rpd').value = s.rpdOverride;
-  const marginPct = Math.round((s.safetyMargin || 0.1) * 100);
+  // v1.6.19: 統一用 ?? 不用 || ——使用者輸入 0(safety margin / batch size)是合法
+  // 設定意圖,|| 會把 0 當 falsy 默默改回預設值,造成 UI 「我設了 0 卻看到 10%」。
+  const marginPct = Math.round((s.safetyMargin ?? 0.1) * 100);
   $('safetyMargin').value = marginPct;
   $('safetyMarginLabel').textContent = marginPct;
-  $('maxConcurrentBatches').value = s.maxConcurrentBatches || 10;
-  $('maxUnitsPerBatch').value = s.maxUnitsPerBatch ?? 12;
+  $('maxConcurrentBatches').value = s.maxConcurrentBatches ?? 10;
+  $('maxUnitsPerBatch').value = s.maxUnitsPerBatch ?? 20;
   $('maxCharsPerBatch').value = s.maxCharsPerBatch ?? 3500;
   $('maxTranslateUnits').value = s.maxTranslateUnits ?? 1000;
-  $('maxRetries').value = s.maxRetries || 3;
+  // v1.8.3: partialMode toggle + size
+  const pm = { ...DEFAULTS.partialMode, ...(s.partialMode || {}) };
+  $('partialModeEnabled').checked = pm.enabled === true;
+  $('partialModeMaxUnits').value = pm.maxUnits;
+  $('maxRetries').value = s.maxRetries ?? 3;
 
   // v0.69: 術語表一致化設定
   const gl = { ...DEFAULTS.glossary, ...(s.glossary || {}) };
   $('glossaryEnabled').checked = gl.enabled !== false;
+  // v1.7.2: 術語擷取獨立模型(預設 Flash Lite),空字串表示「與主翻譯相同」
+  $('glossaryModel').value = gl.model ?? DEFAULTS.glossary.model;
+  // v1.7.3: 阻塞門檻可調(預設 10,> 此值才 blocking,≤ 此值走 fire-and-forget)
+  $('glossaryBlockingThreshold').value = gl.blockingThreshold ?? DEFAULTS.glossary.blockingThreshold;
   $('glossaryTemperature').value = gl.temperature;
   $('glossaryTimeout').value = gl.timeoutMs;
   $('glossaryPrompt').value = gl.prompt;
@@ -139,6 +138,8 @@ async function load() {
   $('toastPosition').value = s.toastPosition || 'bottom-right';
   // v1.1.3: Toast 自動關閉
   $('toastAutoHide').checked = s.toastAutoHide !== false;
+  // v1.6.8: Toast master switch
+  $('showProgressToast').checked = s.showProgressToast !== false;
 
   // v1.0.21: 頁面層級繁中偵測開關
   $('skipTraditionalChinesePage').checked = s.skipTraditionalChinesePage !== false;
@@ -174,6 +175,11 @@ async function load() {
   $('cp-temperature').value = (typeof cp.temperature === 'number') ? cp.temperature : 0.7;
   $('cp-inputPerMTok').value = cp.inputPerMTok != null ? cp.inputPerMTok : '';
   $('cp-outputPerMTok').value = cp.outputPerMTok != null ? cp.outputPerMTok : '';
+  // v1.6.18: thinking 控制
+  const validLevels = ['auto', 'off', 'low', 'medium', 'high'];
+  const tl = validLevels.includes(cp.thinkingLevel) ? cp.thinkingLevel : 'auto';
+  if ($('cp-thinking-level')) $('cp-thinking-level').value = tl;
+  if ($('cp-extra-body-json')) $('cp-extra-body-json').value = (typeof cp.extraBodyJson === 'string') ? cp.extraBodyJson : '';
   // 從 storage.local 讀 customProviderApiKey
   const { customProviderApiKey = '' } = await browser.storage.local.get('customProviderApiKey');
   $('cp-apiKey').value = customProviderApiKey;
@@ -184,6 +190,12 @@ async function load() {
   const ytEngineEl = $('ytEngine');
   if (ytEngineEl) ytEngineEl.value = yt.engine || 'gemini';
   $('ytAutoTranslate').checked       = yt.autoTranslate       === true;
+  // v1.6.23: ASR 分句改單一 toggle——開啟=progressive(混合模式)、關閉=heuristic(預設分句)。
+  // 舊 'llm' 值視為 progressive(行為相近,LLM 結果仍會顯示;只是改成漸進方式)。
+  $('ytAsrProgressive').checked = yt.asrMode !== 'heuristic';
+  // v1.5.8: 字幕是否套用固定術語表 / 黑名單
+  $('ytApplyFixedGlossary').checked  = yt.applyFixedGlossary  === true;
+  $('ytApplyForbiddenTerms').checked = yt.applyForbiddenTerms === true;
   $('ytDebugToast').checked          = yt.debugToast          === true;
   $('ytOnTheFly').checked            = yt.onTheFly            === true;  // v1.2.49
   // ytPreserveLineBreaks 已於 v1.2.38 移除（功能改為永遠開啟）
@@ -223,10 +235,91 @@ async function load() {
   }
   refreshPresetKeyBindings();
 
+  // v1.6.6: 工具列「翻譯本頁」按鈕的 preset slot dropdown
+  // v1.6.14: slot 2 顯示「主要預設」、slot 1/3 顯示「預設 2/3」(順延編號:原預設 1 → 預設 2,原預設 2 → 主要預設,原預設 3 維持)
+  const slotTitle = (slot) => slot === 2 ? '主要預設' : `預設 ${slot === 1 ? 2 : 3}`;
+  const popupSlotSel = $('popup-button-slot');
+  if (popupSlotSel) {
+    for (const slot of [1, 2, 3]) {
+      const p = presets.find(x => x.slot === slot) || DEFAULTS.translatePresets.find(x => x.slot === slot);
+      const label = (p.label && p.label.trim()) || slotTitle(slot);
+      const opt = popupSlotSel.querySelector(`option[value="${slot}"]`);
+      if (opt) opt.textContent = `${slotTitle(slot)}：${label}`;
+    }
+    const slotVal = Number(s.popupButtonSlot);
+    popupSlotSel.value = ([1, 2, 3].includes(slotVal) ? slotVal : 2).toString();
+  }
+
+  // v1.6.13: 自動翻譯網站使用的 preset slot
+  const autoSlotSel = $('auto-translate-slot');
+  if (autoSlotSel) {
+    for (const p of presets) {
+      const slot = Number(p.slot);
+      if (!slot) continue;
+      const label = (p.label && p.label.trim()) || slotTitle(slot);
+      const opt = autoSlotSel.querySelector(`option[value="${slot}"]`);
+      if (opt) opt.textContent = `${slotTitle(slot)}：${label}`;
+    }
+    const autoSlotVal = Number(s.autoTranslateSlot);
+    autoSlotSel.value = ([1, 2, 3].includes(autoSlotVal) ? autoSlotVal : 2).toString();
+  }
+
   // v1.5.7: cache presets 與 customProvider 給用量紀錄「模型」欄的 modelToLabel() 用
   _presetsCache = presets;
   _customProviderCache = cp || { model: '' };
+
+  // v1.5.8: 依 ytEngine 顯示 / 隱藏字幕分頁的 Gemini-only / Prompt sections
+  updateYtSectionVisibility();
+  // v1.5.8: 字幕 prompt 開銷估算
+  updateYtPromptCostHint();
+
+  // v1.6.1: 更新提示 banner — 有新版且使用者未關閉提示時顯示
+  // v1.6.3: 加 click handler 攔截改用 chrome.tabs.create()，避免 href 被任何理由
+  //         （updateAvailable.releaseUrl undefined / race condition）保留 "#" 時，
+  //         <a target="_blank"> 會 navigate 到 options.html# 跳出另一個設定頁。
+  try {
+    const disableUpdateNotice = s.disableUpdateNotice === true;
+    if (!disableUpdateNotice) {
+      const { updateAvailable } = await browser.storage.local.get('updateAvailable');
+      const manifest = browser.runtime.getManifest();
+      // v1.6.5: belt-and-suspenders — 必須 storage.version 真的 > current 才顯示
+      if (updateAvailable && updateAvailable.version && updateAvailable.releaseUrl
+          && isWorthNotifying(updateAvailable.version, manifest.version)) {
+        $('update-banner-row').hidden = false;
+        $('update-banner-version').textContent = `v${updateAvailable.version}（你目前是 v${manifest.version}）`;
+        // click handler 改用 document delegation 在外面掛（避免 init() async race）
+      }
+    }
+  } catch { /* 略 */ }
 }
+
+// v1.6.1: 「不再提示」按鈕——寫 disableUpdateNotice=true 立即生效
+$('update-banner-dismiss')?.addEventListener('click', async (e) => {
+  e.preventDefault();
+  e.stopPropagation();
+  await browser.storage.sync.set({ disableUpdateNotice: true });
+  $('update-banner-row').hidden = true;
+});
+
+// v1.6.3: update banner 主體用 document-level delegation 處理，不依賴 init() timing。
+// click handler 內臨時讀 storage 拿最新 releaseUrl，避免 init() race condition。
+document.addEventListener('click', async (e) => {
+  // closest 同時涵蓋點 banner 內的 strong / span 子元素
+  const banner = e.target.closest('#update-banner');
+  if (!banner) return;
+  e.preventDefault();
+  try {
+    const { updateAvailable } = await browser.storage.local.get('updateAvailable');
+    // 三層 fallback：storage.releaseUrl > 用 version 組 tag URL > releases 索引頁
+    const url = updateAvailable?.releaseUrl
+      || (updateAvailable?.version
+        ? `https://github.com/jimmysu0309/shinkansen/releases/tag/v${updateAvailable.version}`
+        : 'https://github.com/jimmysu0309/shinkansen/releases');
+    await browser.tabs.create({ url });
+  } catch (err) {
+    console.error('[shinkansen] update-banner click failed', err);
+  }
+});
 
 // v1.5.0: 雙語視覺標記預覽更新
 function updateDualDemoMark(mark) {
@@ -246,6 +339,90 @@ function updatePresetModelVisibility(slot) {
   const engine = $(`preset-engine-${slot}`).value;
   const row = $(`preset-model-row-${slot}`);
   if (row) row.hidden = (engine === 'google' || engine === 'openai-compat');
+}
+
+// v1.5.8: YouTube 字幕分頁 — 依引擎切換 section 可見性。
+//   gemini        → 顯示「翻譯模型」「翻譯參數」「字幕翻譯 Prompt」全部
+//   google        → 全部隱藏（Google MT 不支援自訂任何參數）
+//   openai-compat → 只顯示「字幕翻譯 Prompt」（model/計價/temperature 從「自訂模型」分頁那組共用，
+//                   但 prompt 字幕專用）
+function updateYtSectionVisibility() {
+  const engine = $('ytEngine')?.value || 'gemini';
+  const geminiOnly = document.getElementById('yt-gemini-only-sections');
+  const promptSection = document.getElementById('yt-prompt-section');
+  if (geminiOnly) geminiOnly.hidden = (engine !== 'gemini');
+  if (promptSection) promptSection.hidden = (engine === 'google');
+}
+
+// v1.5.8: 字幕分頁 prompt 開銷估算 — 用「目前字幕用的 model + input 單價」算
+// 一支 30 分鐘影片打開「固定術語表」/「禁用詞清單」toggle 後 prompt 多花多少錢。
+function updateYtPromptCostHint() {
+  const hintEl = $('yt-prompt-cost-hint');
+  if (!hintEl) return;
+
+  // 找 input 單價：優先 yt.pricing > yt.model 查表 > 主 inputPerMTok
+  let inputPrice = 0;
+  let modelDisplay = '';
+  const engine = $('ytEngine')?.value || 'gemini';
+  const cpInput = parseFloat($('cp-inputPerMTok').value);
+  const cpModel = ($('cp-model').value || '').trim();
+  const ytModel = $('ytModel').value;
+  const ytInput = parseFloat($('ytInputPerMTok').value);
+  const mainModel = getSelectedModel();
+  // v1.6.16: 後備路徑單價 UI 已移除;mainInput fallback 改用主要預設(slot 2)的內建表 pricing。
+  // 這個 hint 是設定頁字幕 prompt 開銷估算用,翻譯實際計費走獨立路徑(yt.pricing / customProvider / preset modelOverride),不受影響。
+  const mainInput = MODEL_PRICING[mainModel]?.input ?? 0;
+
+  if (engine === 'openai-compat') {
+    // 自訂模型字幕路徑用 customProvider 那組
+    inputPrice = isNaN(cpInput) ? 0 : cpInput;
+    modelDisplay = cpModel || '(未設定)';
+  } else if (engine === 'gemini') {
+    if (!isNaN(ytInput) && ytInput > 0) {
+      inputPrice = ytInput;
+      modelDisplay = ytModel || mainModel;
+    } else if (ytModel && MODEL_PRICING[ytModel]) {
+      inputPrice = MODEL_PRICING[ytModel].input;
+      modelDisplay = ytModel;
+    } else if (!isNaN(mainInput)) {
+      inputPrice = mainInput;
+      modelDisplay = mainModel;
+    }
+  }
+  // engine === 'google' 不算費用（免費）
+
+  // Token 估算（粗估；中文 ~1.5 char/token、英文 ~4 char/token、混合 ~2 char/token）：
+  // 黑名單 prompt block：tag + 標頭 + 結尾說明 baseline ~450 token；每條對映「視頻 → 影片」~3 token
+  // 固定術語表 block：標頭 baseline ~67 token；每條 source→target ~5 token
+  const fbCount = Array.isArray(forbiddenTerms) ? forbiddenTerms.filter(t => t && t.forbidden).length : 0;
+  const fgCount = (fixedGlossary?.global || []).filter(e => e.source && e.target).length;
+  const fbTok = fbCount > 0 ? 450 + 3 * fbCount : 0;
+  const fgTok = fgCount > 0 ? 67  + 5 * fgCount : 0;
+
+  // 一支 30 分鐘影片：windowSize 30s → 60 windows × 平均每 window 1 batch ≈ 60 batches
+  const BATCHES_PER_30MIN = 60;
+  function fmtUSD(tok, cacheRatio = 1) {
+    if (!inputPrice || !tok) return '$0';
+    const usd = tok * BATCHES_PER_30MIN / 1_000_000 * inputPrice * cacheRatio;
+    if (usd < 0.0001) return '<$0.0001';
+    if (usd < 0.01)   return `$${usd.toFixed(4)}`;
+    return `$${usd.toFixed(3)}`;
+  }
+
+  if (engine === 'google') {
+    hintEl.innerHTML = '<strong>Google Translate 不會送 prompt</strong>，這兩個 toggle 對 Google MT 不適用。';
+    return;
+  }
+  if (!inputPrice) {
+    hintEl.innerHTML = '<strong>無法估算費用</strong>：請在對應的計價欄位設定 input 單價（USD / 1M tokens）。';
+    return;
+  }
+
+  hintEl.innerHTML =
+    `<strong>token 開銷估算</strong>（以目前模型 <code>${escapeHtml(modelDisplay)}</code> 計，input $${inputPrice}/1M tokens、30 分鐘影片約 60 批）：<br>` +
+    `<span style="display:inline-block; margin-left: 12px;">• 套用「固定術語表」（${fgCount} 條）→ 每批 prompt +${fgTok} token，全片約 ${fmtUSD(fgTok)}（cache 命中後 ~${fmtUSD(fgTok, 0.25)}）</span><br>` +
+    `<span style="display:inline-block; margin-left: 12px;">• 套用「禁用詞清單」（${fbCount} 條）→ 每批 prompt +${fbTok} token，全片約 ${fmtUSD(fbTok)}（cache 命中後 ~${fmtUSD(fbTok, 0.25)}）</span><br>` +
+    `<span style="font-size: 11px; color: #999;">※ token 為粗估，實際以 Gemini tokenizer 為準。Gemini implicit cache 命中需 prompt prefix ≥1024 token 且穩定，命中部分 25% 計費。</span>`;
 }
 
 // v1.4.13: 從 chrome.commands.getAll() 讀取實際綁定鍵位顯示在每張 card 右上角
@@ -271,9 +448,14 @@ async function save() {
   // v0.62 起：apiKey 單獨寫到 browser.storage.local，不進 sync
   const apiKeyValue = $('apiKey').value.trim();
   await browser.storage.local.set({ apiKey: apiKeyValue });
+  // v1.6.15: 讀回現存的 geminiConfig.model 不從 UI 取(全域 dropdown 已移除)。
+  // 保留 storage 欄位避免 migration,且 testGeminiKey 已改走「主要預設」的 model。
+  // v1.6.16: 同樣讀回 settings.pricing(後備路徑單價 UI 也移除了)。
+  const existing = await browser.storage.sync.get(['geminiConfig', 'pricing']);
+  const existingModel = existing.geminiConfig?.model || DEFAULTS.geminiConfig.model;
   const settings = {
     geminiConfig: {
-      model: getSelectedModel(),
+      model: existingModel,
       serviceTier: $('serviceTier').value,
       temperature: Number($('temperature').value),
       topP: Number($('topP').value),
@@ -281,21 +463,26 @@ async function save() {
       maxOutputTokens: Number($('maxOutputTokens').value),
       systemInstruction: $('systemInstruction').value,
     },
-    pricing: {
-      inputPerMTok: Number($('inputPerMTok').value) || 0,
-      outputPerMTok: Number($('outputPerMTok').value) || 0,
-    },
+    // v1.6.16: 後備路徑單價 UI 已移除,從 storage 拉現存值寫回(沿用 v1.6.15 對 geminiConfig.model 的同 pattern)
+    pricing: existing.pricing || DEFAULTS.pricing,
     domainRules: {
       whitelist: $('whitelist').value.split('\n').map(s => s.trim()).filter(Boolean),
     },
     debugLog: $('debugLog').checked,
     tier: $('tier').value,
+    // v1.6.19: 改用 parseUserNum——空字串/非法字元走 default,合法數字(含 0)保留。
+    // 沿用 `|| default` 會把使用者明確打的 0 一律當 falsy 改回預設,造成 UI 不一致。
     safetyMargin: Number($('safetyMargin').value) / 100,
-    maxRetries: Number($('maxRetries').value) || 3,
-    maxConcurrentBatches: Number($('maxConcurrentBatches').value) || 10,
-    maxUnitsPerBatch: Number($('maxUnitsPerBatch').value) || 12,
-    maxCharsPerBatch: Number($('maxCharsPerBatch').value) || 3500,
-    maxTranslateUnits: Number($('maxTranslateUnits').value) ?? 1000,
+    maxRetries: parseUserNum($('maxRetries').value, 3),
+    maxConcurrentBatches: parseUserNum($('maxConcurrentBatches').value, 10),
+    maxUnitsPerBatch: parseUserNum($('maxUnitsPerBatch').value, 20),
+    maxCharsPerBatch: parseUserNum($('maxCharsPerBatch').value, 3500),
+    maxTranslateUnits: parseUserNum($('maxTranslateUnits').value, 1000),
+    // v1.8.3: 只翻文章開頭(節省費用)
+    partialMode: {
+      enabled: $('partialModeEnabled').checked,
+      maxUnits: parseUserNum($('partialModeMaxUnits').value, 25),
+    },
     // 只有 custom tier 才寫入 override(其他 tier 的數字從對照表讀,不存)
     rpmOverride: $('tier').value === 'custom' ? (Number($('rpm').value) || null) : null,
     tpmOverride: $('tier').value === 'custom' ? (Number($('tpm').value) || null) : null,
@@ -303,10 +490,13 @@ async function save() {
     // v0.69: 術語表一致化
     glossary: {
       enabled: $('glossaryEnabled').checked,
+      // v1.7.2: 術語擷取獨立模型;空字串 = 與主翻譯模型相同(舊行為)
+      model: $('glossaryModel').value,
       prompt: $('glossaryPrompt').value,
       temperature: Number($('glossaryTemperature').value) || 0.1,
       skipThreshold: DEFAULTS.glossary.skipThreshold,
-      blockingThreshold: DEFAULTS.glossary.blockingThreshold,
+      // v1.7.3: blockingThreshold 使用者可調(0 = 永遠 fire-and-forget,大值 = 幾乎都 blocking)
+      blockingThreshold: parseUserNum($('glossaryBlockingThreshold').value, DEFAULTS.glossary.blockingThreshold),
       timeoutMs: Number($('glossaryTimeout').value) || 60000,
       maxTerms: DEFAULTS.glossary.maxTerms,
     },
@@ -315,6 +505,8 @@ async function save() {
     toastPosition: $('toastPosition').value,
     // v1.1.3: Toast 自動關閉
     toastAutoHide: $('toastAutoHide').checked,
+    // v1.6.8: Toast master switch（false 完全不顯示，連訊息都不發）
+    showProgressToast: $('showProgressToast').checked,
     // v1.5.0: 雙語對照視覺標記
     translationMarkStyle: getSelectedMarkStyle(),
     // v1.0.21: 頁面層級繁中偵測開關
@@ -323,6 +515,11 @@ async function save() {
     ytSubtitle: {
       engine: ($('ytEngine')?.value || 'gemini'),  // v1.4.0
       autoTranslate:      $('ytAutoTranslate').checked,
+      // v1.6.23: ASR 分句單一 toggle——checked=progressive(混合)、unchecked=heuristic
+      asrMode: $('ytAsrProgressive').checked ? 'progressive' : 'heuristic',
+      // v1.5.8: 字幕是否套用固定術語表 / 黑名單
+      applyFixedGlossary:  $('ytApplyFixedGlossary').checked,
+      applyForbiddenTerms: $('ytApplyForbiddenTerms').checked,
       debugToast:         $('ytDebugToast').checked,
       onTheFly:           $('ytOnTheFly').checked,          // v1.2.49
       // preserveLineBreaks: 已移除 toggle，永遠 true（content-youtube.js 硬編碼）
@@ -353,6 +550,38 @@ async function save() {
       const label = ($(`preset-label-${slot}`).value || '').trim() || `預設 ${slot}`;
       return { slot, engine, model, label };
     }),
+    // v1.6.6: 工具列「翻譯本頁」按鈕對應的 preset slot
+    popupButtonSlot: (() => {
+      const v = Number($('popup-button-slot')?.value);
+      return [1, 2, 3].includes(v) ? v : 2;
+    })(),
+    // v1.6.13: 自動翻譯網站(白名單)觸發時走的 preset slot
+    autoTranslateSlot: (() => {
+      const v = Number($('auto-translate-slot')?.value);
+      return [1, 2, 3].includes(v) ? v : 2;
+    })(),
+    // v1.6.14: per-model 計價覆蓋(Google 改價時使用者自填)。
+    // 兩欄都是合法數字才寫入 entry,任一欄空白整個 model 不存(走內建表)。
+    modelPricingOverrides: (() => {
+      const collect = (model, inputId, outputId) => {
+        const i = $(inputId)?.value?.trim();
+        const o = $(outputId)?.value?.trim();
+        if (i === '' || o === '') return null;
+        const ni = Number(i), no = Number(o);
+        if (!Number.isFinite(ni) || !Number.isFinite(no) || ni < 0 || no < 0) return null;
+        return { model, inputPerMTok: ni, outputPerMTok: no };
+      };
+      const rows = [
+        collect('gemini-3.1-flash-lite-preview', 'override-lite-input',  'override-lite-output'),
+        collect('gemini-3-flash-preview',         'override-flash-input', 'override-flash-output'),
+        collect('gemini-3.1-pro-preview',         'override-pro-input',   'override-pro-output'),
+      ].filter(Boolean);
+      const out = {};
+      for (const r of rows) {
+        out[r.model] = { inputPerMTok: r.inputPerMTok, outputPerMTok: r.outputPerMTok };
+      }
+      return out;
+    })(),
     // v1.0.29: 固定術語表（save 前先同步 UI → 記憶體）
     fixedGlossary: (() => {
       // 同步全域表格的最新 UI 值
@@ -376,6 +605,7 @@ async function save() {
       return forbiddenTerms.filter(t => t.forbidden || t.replacement);
     })(),
     // v1.5.7: 自訂 OpenAI-compatible Provider
+    // v1.6.18: 加入 thinkingLevel + extraBodyJson(各家 thinking schema 統一抽象)
     customProvider: {
       baseUrl: ($('cp-baseUrl').value || '').trim(),
       model: ($('cp-model').value || '').trim(),
@@ -383,6 +613,11 @@ async function save() {
       temperature: Number($('cp-temperature').value) || 0.7,
       inputPerMTok: Number($('cp-inputPerMTok').value) || 0,
       outputPerMTok: Number($('cp-outputPerMTok').value) || 0,
+      thinkingLevel: (() => {
+        const v = $('cp-thinking-level')?.value;
+        return ['auto', 'off', 'low', 'medium', 'high'].includes(v) ? v : 'auto';
+      })(),
+      extraBodyJson: ($('cp-extra-body-json')?.value || '').trim(),
     },
   };
   // v1.5.7: customProvider.apiKey 走 storage.local（與主 apiKey 同樣設計），先抽出再寫 sync
@@ -441,10 +676,74 @@ $('yt-reset-prompt').addEventListener('click', () => {
   $('ytSystemPrompt').value = DEFAULT_SUBTITLE_SYSTEM_PROMPT;
   markDirty(); // 值已變更，標記為未儲存
 });
+// v1.5.8: 自訂模型「重置為預設 Prompt」按鈕——把 textarea 重設為 Gemini 同款 DEFAULT_SYSTEM_PROMPT
+$('cp-reset-prompt')?.addEventListener('click', () => {
+  $('cp-systemPrompt').value = DEFAULT_SYSTEM_PROMPT;
+  markDirty();
+});
+
+// v1.5.8: Gemini 分頁「重設所有參數」按鈕 — 把本分頁所有欄位填回 DEFAULT_SETTINGS 對應值。
+// 不直接寫 storage（要使用者按「儲存設定」才生效），避免誤觸毀掉自訂設定無法回復。
+// 不影響其他分頁（術語表 / 禁用詞 / 自訂模型 / YouTube 字幕）；要全部清空仍走「一般設定 → 回復預設設定」。
+$('gemini-reset-all')?.addEventListener('click', () => {
+  if (!confirm('確定要把 Gemini 分頁所有參數重設為預設值嗎？\n\n影響欄位：Service Tier、模型計價覆蓋（清空走內建表）、Tier/RPM/TPM/RPD、安全邊際、重試次數、Temperature、Top P、Top K、Max Output Tokens、翻譯 Prompt、並發批次、每批段數/字元/段落上限。\n\n按下後仍需點「儲存設定」才會生效。')) return;
+  const D = DEFAULTS;
+  // v1.6.15: 全域 #model dropdown 已移除,不再 reset 模型 UI;只 reset service tier。
+  // settings.geminiConfig.model 由「儲存設定」按鈕從 storage 讀回沿用。
+  $('serviceTier').value = D.geminiConfig.serviceTier;
+  // LLM 參數
+  $('temperature').value     = D.geminiConfig.temperature;
+  $('topP').value            = D.geminiConfig.topP;
+  $('topK').value            = D.geminiConfig.topK;
+  $('maxOutputTokens').value = D.geminiConfig.maxOutputTokens;
+  $('systemInstruction').value = D.geminiConfig.systemInstruction;
+  // 計價
+  // v1.6.16: 後備路徑單價 UI 已移除,reset 不再動 settings.pricing 欄位。
+  // v1.6.14: per-model override 欄位 reset 為空(預設 modelPricingOverrides:{} 對應 UI 全空 = 走內建表)。
+  for (const id of [
+    'override-lite-input',  'override-lite-output',
+    'override-flash-input', 'override-flash-output',
+    'override-pro-input',   'override-pro-output',
+  ]) {
+    const el = $(id);
+    if (el) el.value = '';
+  }
+  // 配額（先填 tier 觸發 RPM/TPM/RPD readonly 帶值，再清掉 override）
+  $('tier').value = D.tier;
+  applyTierToInputs(D.tier, D.geminiConfig.model);
+  $('safetyMargin').value = Math.round((D.safetyMargin ?? 0.1) * 100);
+  $('safetyMarginLabel').textContent = $('safetyMargin').value;
+  $('maxRetries').value = D.maxRetries;
+  // 效能
+  $('maxConcurrentBatches').value = D.maxConcurrentBatches;
+  $('maxUnitsPerBatch').value     = D.maxUnitsPerBatch;
+  $('maxCharsPerBatch').value     = D.maxCharsPerBatch;
+  $('maxTranslateUnits').value    = D.maxTranslateUnits;
+  // v1.8.3: 只翻文章開頭重設
+  $('partialModeEnabled').checked = D.partialMode.enabled;
+  $('partialModeMaxUnits').value  = D.partialMode.maxUnits;
+  markDirty();
+  $('save-gemini-status').textContent = '欄位已重設，請按「儲存設定」生效';
+  setTimeout(() => { $('save-gemini-status').textContent = ''; }, 4000);
+});
 
 // v1.4.13: preset engine 下拉切換時隱藏/顯示 model row
 for (const slot of [1, 2, 3]) {
   $(`preset-engine-${slot}`).addEventListener('change', () => updatePresetModelVisibility(slot));
+}
+
+// v1.5.8: 字幕引擎下拉切換時更新 section 可見性 + 重算 cost hint
+$('ytEngine')?.addEventListener('change', () => {
+  updateYtSectionVisibility();
+  updateYtPromptCostHint();
+});
+// v1.5.8: 字幕模型 / 計價變動時重算 cost hint
+// v1.6.15: 移除 'model'(全域 dropdown 已移除)。preset-model-2 切換不影響字幕成本估算
+// 因為字幕用獨立的 ytSubtitle.model;字幕 prompt token 成本估算只看字幕端設定。
+// v1.6.16: 移除 'inputPerMTok'(後備路徑單價 UI 已移除)
+for (const id of ['ytModel', 'ytInputPerMTok', 'cp-model', 'cp-inputPerMTok']) {
+  $(id)?.addEventListener('change', updateYtPromptCostHint);
+  $(id)?.addEventListener('input', updateYtPromptCostHint);
 }
 
 // v1.2.39: 切換 YouTube 模型時自動帶入參考計價（與主模型的邏輯相同）
@@ -561,20 +860,12 @@ $('test-api-key').addEventListener('click', async () => {
   });
 });
 
-// Tier 或 Model 變更 → 自動更新 RPM/TPM/RPD 顯示
+// Tier 變更 → 自動更新 RPM/TPM/RPD 顯示
+// v1.6.15: 全域 model dropdown 已移除,Service Tier 已搬到 LLM 參數微調 section。
+// applyModelPricing(model) 在這裡也失去意義(model 不再從 UI 變,計價走 v1.6.14 per-model
+// override 表;Service Tier 影響的是內建表 multiplier,但「後備路徑單價」不再隨 tier 變)。
 $('tier').addEventListener('change', () => {
   applyTierToInputs($('tier').value, getSelectedModel());
-});
-// v0.64：Model 變更 → 更新 rate limit + 自動帶入參考價 + 切換自行輸入欄位
-$('model').addEventListener('change', () => {
-  toggleCustomModelInput();
-  const model = getSelectedModel();
-  applyTierToInputs($('tier').value, model);
-  applyModelPricing(model);
-});
-// Service Tier 變更 → 重新計算模型計價（Flex 半價、Priority 兩倍）
-$('serviceTier').addEventListener('change', () => {
-  applyModelPricing(getSelectedModel());
 });
 $('safetyMargin').addEventListener('input', () => {
   $('safetyMarginLabel').textContent = $('safetyMargin').value;
@@ -642,6 +933,10 @@ function sanitizeImport(raw) {
     tpmOverride:         { type: 'number', min: 1, nullable: true },
     rpdOverride:         { type: 'number', min: 1, nullable: true },
     toastAutoHide:       { type: 'boolean' },
+    popupButtonSlot:     { type: 'number', min: 1, max: 3, int: true }, // v1.6.6
+    autoTranslateSlot:   { type: 'number', min: 1, max: 3, int: true }, // v1.6.13
+    modelPricingOverrides: { type: 'object' }, // v1.6.14
+    showProgressToast:   { type: 'boolean' }, // v1.6.8
   };
 
   for (const [key, rule] of Object.entries(topRules)) {
@@ -712,7 +1007,7 @@ function sanitizeImport(raw) {
     if (typeof gl.temperature === 'number' && gl.temperature >= 0 && gl.temperature <= 2) glClean.temperature = gl.temperature;
     if (typeof gl.timeoutMs === 'number' && gl.timeoutMs >= 3000 && gl.timeoutMs <= 60000) glClean.timeoutMs = gl.timeoutMs;
     if (typeof gl.skipThreshold === 'number' && Number.isInteger(gl.skipThreshold) && gl.skipThreshold >= 0) glClean.skipThreshold = gl.skipThreshold;
-    if (typeof gl.blockingThreshold === 'number' && Number.isInteger(gl.blockingThreshold) && gl.blockingThreshold >= 1) glClean.blockingThreshold = gl.blockingThreshold;
+    if (typeof gl.blockingThreshold === 'number' && Number.isInteger(gl.blockingThreshold) && gl.blockingThreshold >= 0) glClean.blockingThreshold = gl.blockingThreshold;
     if (typeof gl.maxTerms === 'number' && Number.isInteger(gl.maxTerms) && gl.maxTerms >= 1 && gl.maxTerms <= 500) glClean.maxTerms = gl.maxTerms;
     if (Object.keys(glClean).length > 0) clean.glossary = glClean;
   }
@@ -766,6 +1061,17 @@ function sanitizeImport(raw) {
       }
     }
     if (Object.keys(drClean).length > 0) clean.domainRules = drClean;
+  }
+
+  // v1.8.3: partialMode 子物件
+  if (raw.partialMode && typeof raw.partialMode === 'object') {
+    const pm = raw.partialMode;
+    const pmClean = {};
+    if (typeof pm.enabled === 'boolean') pmClean.enabled = pm.enabled;
+    if (typeof pm.maxUnits === 'number' && Number.isInteger(pm.maxUnits) && pm.maxUnits >= 5 && pm.maxUnits <= 50) {
+      pmClean.maxUnits = pm.maxUnits;
+    }
+    if (Object.keys(pmClean).length > 0) clean.partialMode = pmClean;
   }
 
   return { clean, warnings };
@@ -973,14 +1279,17 @@ let forbiddenTerms = []; // 記憶體中的清單；load 時從 storage 讀入�
 
 function renderForbiddenTermsTable() {
   const tbody = $('forbidden-terms-tbody');
-  tbody.innerHTML = forbiddenTerms.map((t, i) =>
-    `<tr data-idx="${i}">` +
-    `<td><input type="text" class="ft-forbidden" value="${escapeAttr(t.forbidden)}" placeholder="禁用詞（簡中）"></td>` +
-    `<td><input type="text" class="ft-replacement" value="${escapeAttr(t.replacement)}" placeholder="替換詞（台灣）"></td>` +
-    `<td><input type="text" class="ft-note" value="${escapeAttr(t.note || '')}" placeholder="（可選）"></td>` +
-    `<td class="glossary-col-action"><button class="glossary-delete-row" data-idx="${i}" title="刪除">×</button></td>` +
-    `</tr>`
-  ).join('');
+  // v1.5.8: 備註 input 加 title attribute（hover 顯示原生 tooltip 看完整內容），
+  // 編輯時靠 CSS focus 規則浮起放寬看完整文字。
+  tbody.innerHTML = forbiddenTerms.map((t, i) => {
+    const noteVal = escapeAttr(t.note || '');
+    return `<tr data-idx="${i}">` +
+      `<td><input type="text" class="ft-forbidden" value="${escapeAttr(t.forbidden)}" placeholder="禁用詞（簡中）"></td>` +
+      `<td><input type="text" class="ft-replacement" value="${escapeAttr(t.replacement)}" placeholder="替換詞（台灣）"></td>` +
+      `<td class="ft-note-cell"><input type="text" class="ft-note" value="${noteVal}" title="${noteVal}" placeholder="（可選）"></td>` +
+      `<td class="glossary-col-action"><button class="glossary-delete-row" data-idx="${i}" title="刪除">×</button></td>` +
+      `</tr>`;
+  }).join('');
 }
 
 function readForbiddenTableEntries() {
@@ -1025,6 +1334,12 @@ $('forbidden-terms-tbody').addEventListener('click', (e) => {
 
 $('forbidden-terms-tbody').addEventListener('focusout', () => {
   forbiddenTerms = readForbiddenTableEntries();
+});
+
+// v1.5.8: 備註 input 編輯時隨打隨同步 title attribute，hover tooltip 跟著文字更新
+$('forbidden-terms-tbody').addEventListener('input', (e) => {
+  const t = e.target;
+  if (t && t.classList.contains('ft-note')) t.title = t.value;
 });
 
 // ═══════════════════════════════════════════════════════════
@@ -1424,6 +1739,14 @@ document.querySelectorAll('.gran-btn').forEach(btn => {
     currentGranularity = btn.dataset.gran;
     loadUsageData();
   });
+});
+
+// v1.6.11: 手動重新載入用量紀錄（不需關閉設定頁）
+// 使用者回報：translatePage 寫入新紀錄後,設定頁停留在用量頁也不會自動更新,
+// Cmd+R refresh 也會回到預設分頁。loadUsageData() 已能保留當前的篩選狀態
+// （日期範圍 / 搜尋 / 模型 filter / 粒度）只重抓底層資料,直接呼叫即可。
+$('usage-reload')?.addEventListener('click', () => {
+  loadUsageData();
 });
 
 // 匯出 CSV

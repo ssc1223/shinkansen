@@ -72,6 +72,41 @@ export const DEFAULT_SUBTITLE_SYSTEM_PROMPT = `你是專業的影片字幕翻譯
 8. 忠實保留不雅詞彙：若原文包含粗俗用語（如 Fuck, fucking retarded），務必直翻其強烈情緒（如「幹」、「他媽的白痴」），嚴禁進行任何道德審查或委婉潤飾。
 </critical_rules>`;
 
+// v1.6.20: ASR(YouTube 自動語音辨識)字幕專用 prompt。設計依據:
+// timestamp mode——LLM 自由合句,
+// 時間戳對齊作為唯一驗證條件,而非強制行數對齊。
+// ASR 字幕特性(平均 1-3 字/條、無標點、~1.5-3 條/秒)決定逐條翻譯本質上不可行,
+// 必須讓模型自己看上下文合句後再翻。
+export const DEFAULT_ASR_SUBTITLE_SYSTEM_PROMPT = `你是專業的英文 ASR(自動語音辨識)字幕翻譯員,將英文 YouTube 自動字幕翻譯成台灣繁體中文。
+
+<input_format>
+輸入是 JSON 陣列,每個元素 {"s": 起始毫秒, "e": 結束毫秒, "t": 英文片段}。
+範例:[{"s":500,"e":1200,"t":"the auto"},{"s":1200,"e":1800,"t":"captions are"},{"s":1800,"e":3500,"t":"really broken"}]
+</input_format>
+
+<task>
+1. 依語意自由合併鄰近片段成完整句子(可跨多個元素,通常 1 句涵蓋 3-10 個片段)
+2. 修正明顯的 ASR 辨識錯字(同音字、專有名詞)
+3. 翻成台灣繁體中文,加上適當標點(逗號、問號、驚嘆號;句尾不加句號)
+4. 用台灣自然口語,避免書面語腔調
+</task>
+
+<output_format>
+回傳 JSON 陣列,每個元素 {"s": 該句起始 ms, "e": 該句結束 ms, "t": 中文譯文}。
+- s 必須等於某個輸入元素的 s
+- e 必須等於某個輸入元素的 e(通常是該句最後一個片段的 e)
+- 不要包 \`\`\`json fence,直接輸出純 JSON 陣列
+- 不要任何解釋、開場白、後記
+範例:[{"s":500,"e":3500,"t":"自動字幕真的壞了"}]
+</output_format>
+
+<critical_rules>
+1. 禁用中國大陸用語(網絡→網路、視頻→影片、軟件→軟體、數據→資料、用戶→使用者)
+2. 專有名詞保留英文(人名、品牌、縮寫如 AI、NASA、CPU)
+3. 忠實保留粗俗用語(Fuck → 幹),不審查、不委婉化
+4. 不要遺漏輸入片段:輸出陣列加總應涵蓋所有輸入時間範圍
+</critical_rules>`;
+
 // v1.5.6: 中國用語黑名單預設清單。使用者可在「術語表」分頁的「禁用詞清單」section 編輯。
 // 注入時機：buildEffectiveSystemInstruction 在所有其他規則（含 fixedGlossary）之後，
 // 以 <forbidden_terms_blacklist> 區塊放在最末端，讓 LLM 給予最高權重。
@@ -128,9 +163,18 @@ export const DEFAULT_SETTINGS = {
     prompt: DEFAULT_GLOSSARY_PROMPT,
     temperature: 0.1,                  // 術語表要穩定，不要有創意
     skipThreshold: 1,                  // ≤ 此批次數完全不建術語表
-    blockingThreshold: 5,              // > 此批次數則阻塞等術語表回來再翻譯
+    // v1.7.3: 預設從 5 提高到 10 — 中等長度頁面(6-10 批)走 fire-and-forget 不阻塞,
+    // 省下 EXTRACT_GLOSSARY 1.5-7.4 秒 blocking 等待;短頁本就跳過、長頁(>10 批)
+    // 仍 blocking 確保跨批次術語一致。使用者可在設定頁 0(永遠 fire-and-forget)
+    // ~ 50(極長頁才 blocking)區間調整。
+    blockingThreshold: 10,             // > 此批次數則阻塞等術語表回來再翻譯
     timeoutMs: 60000,                  // 術語表請求逾時（毫秒），超過則 fallback（v0.70: 60s）
     maxTerms: 200,                     // 術語表上限條目數
+    // v1.7.2: 術語表獨立模型。空字串表示「跟主翻譯同一個 model」(舊行為);
+    // 預設 'gemini-3.1-flash-lite-preview' — 術語抽取任務簡單,Flash Lite 比 Flash 快
+    // 1.5-3 倍且便宜 5 倍。實測啟用 glossary 時 EXTRACT_GLOSSARY 用 Flash 耗時
+    // 1.5-7.4 秒,改用 Flash Lite 預期可壓到 0.5-2.5 秒。
+    model: 'gemini-3.1-flash-lite-preview',
   },
   domainRules: { whitelist: [] },
   autoTranslate: false,
@@ -151,6 +195,17 @@ export const DEFAULT_SETTINGS = {
     model: '',
     // v1.2.39: 獨立計價——null 表示與主模型計價相同；設定後用於字幕費用計算
     pricing: null,
+    // v1.5.8: 字幕路徑「是否套用固定術語表 / 中國用語黑名單」。預設 false 省 token——
+    // 字幕本來就走獨立 prompt 設計，且字幕短句 LLM 不太會誤翻黑名單詞，套用收益小、
+    // 而每批 prompt 多 300–500 token 的開銷在高頻字幕場景累積可觀。
+    applyFixedGlossary: false,
+    applyForbiddenTerms: false,
+    // v1.6.20: ASR(YouTube 自動字幕)分句模式。內部三值,UI 簡化為單一 toggle(v1.6.23):
+    //   'heuristic'   = 預設分句:純 client-side 啟發式,延遲最低(~1-2s)。toggle 關閉時用。
+    //   'progressive' = 混合模式(預設):先 heuristic 顯示(秒出),同時 LLM 跑覆蓋成更精緻版本。
+    //                   兼顧速度與品質。toggle 開啟時用(預設)。
+    //   'llm'         = 純 LLM 自由分句(內部保留,UI 不再可選)。
+    asrMode: 'progressive',
   },
   // v0.35 新增：並行翻譯 rate limiter 設定
   // tier 對應 Gemini API 付費層級(free / tier1 / tier2),決定 RPM/TPM/RPD 上限
@@ -171,11 +226,24 @@ export const DEFAULT_SETTINGS = {
   // v1.0.1: 單頁翻譯段落數上限。超大頁面（如維基百科長條目）超過此上限時截斷。
   // 設為 0 表示不限制。
   maxTranslateUnits: 1000,
+  // v1.8.3:「只翻文章開頭」節省模式。enabled=true 時只翻 batch 0(經 prioritizeUnits
+  // 推前的文章開頭 N 段),跳過 batch 1+,大幅減少 token 用量。使用者想看完整翻譯時
+  // 關閉此選項並重新翻譯,前面已翻好的段落會從本地快取自動命中(不重複收費)。
+  // maxUnits 範圍 5-50;chars 限制走內部 BATCH0_CHARS=3700 不暴露給使用者。
+  partialMode: {
+    enabled: false,
+    maxUnits: 25,
+  },
   // v1.0.17: Toast 透明度（0.1–1.0），讓使用者在無限捲動網站上降低 toast 干擾
   toastOpacity: 0.7,
   // v1.1.3: Toast 自動關閉——翻譯完成/錯誤等 toast 在數秒後自動消失。
   // 預設開啟。關閉時翻譯完成 toast 需手動點 × 或點擊外部區域才會消失。
   toastAutoHide: true,
+  // v1.6.8: 是否顯示翻譯進度通知（toast 系統 master switch）。
+  // 預設 true 維持現有行為。false 時 SK.showToast() 入口直接 return：
+  // 不建 DOM、不開 Shadow root、不發訊息（與單純調 opacity=0 不同——後者仍會渲染）。
+  // 使用情境：使用者翻譯流量大、不在乎個別頁面進度，希望全靜音。
+  showProgressToast: true,
   // v1.0.21: 頁面層級繁體中文偵測開關。開啟時若整頁文字以繁中為主則跳過不翻譯；
   // 關閉時不做頁面層級檢查（元素層級仍會個別跳過繁中段落）。
   // Gmail 等介面語言為繁中但內容多為英文的網站，可關閉此選項。
@@ -199,20 +267,51 @@ export const DEFAULT_SETTINGS = {
   // 內容會以 <forbidden_terms_blacklist> 區塊注入到 systemInstruction 末端，
   // 且修改清單後快取 key 會帶 _b<hash> 後綴讓既有快取自動失效。
   forbiddenTerms: DEFAULT_FORBIDDEN_TERMS,
+  // v1.6.1: 「不再顯示更新提示」toggle。預設 false（顯示提示）。
+  // 對應 storage.local 的 updateAvailable 物件由 lib/update-check.js 寫入，不在 sync。
+  disableUpdateNotice: false,
+  // v1.6.6: 工具列「翻譯本頁」按鈕對應的 preset slot（1/2/3）。
+  // 預設 slot 2 = Flash（與 v1.4.12 開始 popup 按鈕硬碼映射的行為一致）。
+  // 使用者可在一般設定改成其他 preset，按 popup 按鈕等同按該 slot 的快速鍵。
+  popupButtonSlot: 2,
+  // v1.6.13: 自動翻譯網站(白名單)觸發時要用哪一組 preset。預設 slot 2 = Flash。
+  // 修法前自動翻譯路徑直接 SK.translatePage() 不帶 slot,fallback 全域 geminiConfig.model;
+  // 使用者改 preset model 後 Alt+S 走新 model,但白名單路徑仍走全域 → UX 不一致。
+  // 改成走 SK.handleTranslatePreset(autoTranslateSlot) 後,白名單與快速鍵行為對齊。
+  autoTranslateSlot: 2,
+  // v1.6.14: per-model 計價覆蓋表。Google 改價時內建表(lib/model-pricing.js)會過時,
+  // 使用者可在「Gemini 分頁 → 模型計價」針對 lite/flash/pro 個別覆蓋。
+  // 結構:{ [modelName]: { inputPerMTok, outputPerMTok } };空欄位或缺 entry → fallback 內建表。
+  modelPricingOverrides: {},
   // v1.5.7: 自訂 OpenAI-compatible Provider。
   // engine='openai-compat' 的 preset 會走 lib/openai-compat.js 透過 chat.completions
   // endpoint 翻譯，可接 OpenRouter / Together / DeepSeek / Groq / Ollama 等 provider。
   // apiKey 不存 sync（getSettings 會從 storage.local 的 customProviderApiKey 注入），
   // systemPrompt 獨立於 Gemini（黑名單與固定術語表仍共用、由 buildEffectiveSystemInstruction 注入），
   // 但「預設值」與 Gemini 相同——使用者第一次打開分頁就有完整可用的 prompt，要動再動。
-  // 計價必須使用者自填（OpenRouter 等百種模型不可能內建查表，0 = 不顯示費用）。
+  //
+  // v1.6.16: baseUrl/model/pricing 預填 OpenRouter DeepSeek V4 Pro,使用者只要填 API Key
+  // 就能啟動。資料來源 https://openrouter.ai/deepseek/deepseek-v4-pro(2026-04 校準)。
+  // 既有使用者升級後若 storage 內已有 customProvider entry(例如打開過自訂模型分頁),
+  // 此預設不會覆蓋(getSettings 對 customProvider 走淺 merge,saved 在後);要套用新預設
+  // 需手動清空欄位或重新匯入設定。新使用者第一次打開設定頁就看到預填值。
   customProvider: {
-    baseUrl: '',                       // 例如 https://openrouter.ai/api/v1
-    model: '',                         // 例如 anthropic/claude-sonnet-4-5
+    baseUrl: 'https://openrouter.ai/api/v1',
+    model: 'deepseek/deepseek-v4-pro',
     systemPrompt: DEFAULT_SYSTEM_PROMPT, // 預設與 Gemini 相同；空字串時 adapter 套用簡短 fallback
     temperature: 0.7,
-    inputPerMTok: 0,                   // 自填，0 = 不顯示費用
-    outputPerMTok: 0,
+    inputPerMTok: 0.435,                // OpenRouter DeepSeek V4 Pro Standard tier 參考價
+    outputPerMTok: 0.87,
+    // v1.6.18: thinking 控制(統一 5 級對映 + 進階 JSON 透傳)。
+    //   thinkingLevel:'auto' 不送任何 thinking 參數,讓 provider 自選預設(最安全 fallback);
+    //   'off' / 'low' / 'medium' / 'high' 由 lib/openai-compat-thinking.js 偵測 provider 後
+    //   翻譯成對應 API 寫法(OpenRouter unified reasoning / DeepSeek extra_body.thinking /
+    //   Claude thinking.type / OpenAI o reasoning_effort / Grok reasoning_effort / Qwen
+    //   extra_body.enable_thinking)。
+    //   extraBodyJson:使用者自填 JSON 字串,deep merge 到 request body,可覆蓋自動 mapping
+    //   並加 provider 專屬參數(top_k / metadata 等)。預設空白(進階使用者才需要)。
+    thinkingLevel: 'auto',
+    extraBodyJson: '',
   },
 };
 
@@ -253,6 +352,8 @@ export async function getSettings() {
     glossary: { ...DEFAULT_SETTINGS.glossary, ...(saved.glossary || {}) },
     // v1.2.39: 深層 merge ytSubtitle，確保新欄位（model / pricing）有預設值
     ytSubtitle: { ...DEFAULT_SETTINGS.ytSubtitle, ...(saved.ytSubtitle || {}) },
+    // v1.8.3: partialMode 深層 merge,確保 maxUnits 預設值有 fallback
+    partialMode: { ...DEFAULT_SETTINGS.partialMode, ...(saved.partialMode || {}) },
     // v1.4.12: translatePresets——使用者自訂三組就完全以自訂為準（不做 per-slot merge），
     // 否則套用預設三組。陣列非空時視為使用者已自訂。
     translatePresets: (Array.isArray(saved.translatePresets) && saved.translatePresets.length > 0)
@@ -271,6 +372,33 @@ export async function getSettings() {
   const { [CUSTOM_PROVIDER_API_KEY]: cpApiKey = '' } = await browser.storage.local.get(CUSTOM_PROVIDER_API_KEY);
   merged.customProvider.apiKey = cpApiKey;
   return merged;
+}
+
+// v1.6.6: 工具列「翻譯本頁」按鈕的 preset slot 解析
+// raw 來自 storage.sync.popupButtonSlot（可能是 number / string / undefined / 0 / 999）
+// 不在 1/2/3 範圍一律 fallback 2（與 v1.4.12 起的 popup 硬碼行為一致）
+export function pickPopupSlot(raw) {
+  const n = Number(raw);
+  return [1, 2, 3].includes(n) ? n : 2;
+}
+
+// v1.6.13: 自動翻譯網站(白名單)的 preset slot 解析。
+// raw 來自 storage.sync.autoTranslateSlot;範圍外一律 fallback 2(與 popup 對稱)。
+export function pickAutoTranslateSlot(raw) {
+  const n = Number(raw);
+  return [1, 2, 3].includes(n) ? n : 2;
+}
+
+// v1.8.12: 判斷使用者目前的 translatePresets 是否真的會用到 Gemini engine。
+// 用途:popup 的「⚠ 尚未設定 API Key」提示只有在會用到 Gemini 時才該顯示;
+// 若使用者三組 preset 都改成 Google MT / 自訂模型,popup 不該再嘮叨他沒填 Gemini Key。
+// 行為:
+//   - 任一 slot engine === 'gemini' → true
+//   - presets 為空 / 不是 array → 視為 true(保守,跟 fallback DEFAULT_SETTINGS 一致,
+//     DEFAULT_SETTINGS.translatePresets 三組裡有兩組是 gemini)
+export function presetsRequireGemini(presets) {
+  if (!Array.isArray(presets) || presets.length === 0) return true;
+  return presets.some(p => p && p.engine === 'gemini');
 }
 
 export async function setSettings(patch) {

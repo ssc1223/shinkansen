@@ -2,6 +2,19 @@
 
 import { browser } from '../lib/compat.js';
 import { formatBytes, formatTokens, formatUSD } from '../lib/format.js';
+import { RELEASE_HIGHLIGHTS } from '../lib/release-highlights.js';
+import { shouldShowWelcomeNotice } from '../lib/welcome-notice.js';
+import { isWorthNotifying } from '../lib/update-check.js';
+import { pickPopupSlot, presetsRequireGemini } from '../lib/storage.js';
+
+// v1.6.5: 把 markdown 風的 **粗體** 標記轉成 <strong>，其他字符做 escapeHtml
+function highlightToHtml(s) {
+  const esc = String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+  return esc.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+}
 
 const $ = (id) => document.getElementById(id);
 const statusEl = $('status');
@@ -85,6 +98,40 @@ async function refreshShortcutHint() {
   }
 }
 
+// v1.6.5: welcome banner「知道了」按鈕——標記 welcomeNotice.dismissed=true 永久關閉
+document.addEventListener('click', async (e) => {
+  if (!e.target.closest('#welcome-banner-dismiss')) return;
+  e.preventDefault();
+  try {
+    await browser.runtime.sendMessage({ type: 'WELCOME_NOTICE_DISMISSED' });
+    $('welcome-banner').hidden = true;
+    $('update-dot').hidden = true; // 紅點也清掉（除非還有 update-banner，但 welcome 顯示時 update 沒顯示）
+  } catch (err) {
+    console.error('[shinkansen] welcome-banner dismiss failed', err);
+  }
+});
+
+// v1.6.3: 用 document-level event delegation 處理 update banner 點擊，
+// 不依賴 init() async timing 也不靠 a-tag navigate 行為——任何時候 button 出現在
+// DOM 都能 click 觸發。click handler 內臨時讀 storage 拿 release URL，最穩固。
+document.addEventListener('click', async (e) => {
+  if (!e.target.closest('#update-banner')) return;
+  e.preventDefault();
+  try {
+    const { updateAvailable } = await browser.storage.local.get('updateAvailable');
+    // 三層 fallback：storage.releaseUrl > 用 version 組 tag URL > releases 索引頁
+    // 即使 storage 內缺 releaseUrl 或損壞也能跳到合理頁面
+    const url = updateAvailable?.releaseUrl
+      || (updateAvailable?.version
+        ? `https://github.com/jimmysu0309/shinkansen/releases/tag/v${updateAvailable.version}`
+        : 'https://github.com/jimmysu0309/shinkansen/releases');
+    await browser.tabs.create({ url });
+    window.close();
+  } catch (err) {
+    console.error('[shinkansen] update-banner click failed', err);
+  }
+});
+
 async function init() {
   // 從 manifest 動態讀版本號，避免日後忘記同步
   const manifest = browser.runtime.getManifest();
@@ -92,8 +139,50 @@ async function init() {
 
   refreshShortcutHint();
 
+  // v1.6.5: welcome banner（CWS 剛升級）優先於 update banner（GitHub 有新版）顯示。
+  // 兩者互斥——CWS 自動升級後使用者不需要看「有新版可下載」（已在最新），看「歡迎升級」即可；
+  // unpacked 使用者沒 onInstalled update 事件，看到的是黃色 update banner。
+  let welcomeShown = false;
+  try {
+    const { welcomeNotice } = await browser.storage.local.get('welcomeNotice');
+    const decision = shouldShowWelcomeNotice(welcomeNotice, manifest.version);
+    if (decision.removeStale) {
+      // 過期殘留(不同 minor 系列)→ 清除避免日後誤顯示
+      await browser.storage.local.remove('welcomeNotice');
+    } else if (decision.show) {
+      welcomeShown = true;
+      $('update-dot').hidden = false;
+      $('welcome-banner').hidden = false;
+      $('welcome-banner-title').textContent = `🎉 已升級至 v${welcomeNotice.version}`;
+      $('welcome-bullets').innerHTML = RELEASE_HIGHLIGHTS
+        .map(h => `<li>${highlightToHtml(h)}</li>`)
+        .join('');
+    }
+  } catch { /* 略 */ }
+
+  // v1.6.1: 更新提示 — 有新版時顯示版本紅點 + banner（welcome 顯示時跳過）
+  if (!welcomeShown) {
+    try {
+      const { disableUpdateNotice } = await browser.storage.sync.get('disableUpdateNotice');
+      if (disableUpdateNotice !== true) {
+        const { updateAvailable } = await browser.storage.local.get('updateAvailable');
+        // v1.6.5: belt-and-suspenders — banner 顯示前再次驗 storage.version 真的 >
+        // 當前 manifest.version。即使 storage 殘留 stale 資料（例如之前測試殘留、
+        // update-check 還沒跑、或 fetch 失敗未清），UI 層也不會錯誤顯示「有新版」
+        // 然後跳到自身版本的 release 頁。
+        if (updateAvailable && updateAvailable.version && updateAvailable.releaseUrl
+            && isWorthNotifying(updateAvailable.version, manifest.version)) {
+          $('update-dot').hidden = false;
+          const banner = $('update-banner');
+          banner.hidden = false;
+          $('update-banner-version').textContent = `v${updateAvailable.version}（你目前是 v${manifest.version}）`;
+        }
+      }
+    } catch { /* 讀取失敗就略過 */ }
+  }
+
   // v0.62 起：autoTranslate 仍走 sync（跨裝置同步），apiKey 改走 local（不同步）
-  const { autoTranslate = false, displayMode = 'dual' } = await browser.storage.sync.get(['autoTranslate', 'displayMode']);
+  const { autoTranslate = false, displayMode = 'dual', translatePresets = [] } = await browser.storage.sync.get(['autoTranslate', 'displayMode', 'translatePresets']);
   const { apiKey = '' } = await browser.storage.local.get(['apiKey']);
   $('auto').checked = autoTranslate;
 
@@ -121,7 +210,9 @@ async function init() {
     }
   } catch { /* 非 YouTube 頁面，保持 hidden */ }
 
-  if (!apiKey) {
+  // v1.8.12: 只有當 translatePresets 中有任一 slot 用 Gemini engine 時,才提醒未設 API Key。
+  // 使用者若三組 preset 都改成 Google MT / 自訂模型,popup 不再嘮叨他沒填 Gemini Key。
+  if (!apiKey && presetsRequireGemini(translatePresets)) {
     statusEl.textContent = '狀態：⚠ 尚未設定 API Key';
     statusEl.style.color = '#ff3b30';
   }
@@ -137,8 +228,11 @@ $('translate-btn').addEventListener('click', async () => {
   const mode = $('translate-btn').dataset.mode;
   statusEl.textContent = mode === 'restore' ? '狀態：正在還原原文…' : '狀態：正在翻譯…';
   try {
-    // TOGGLE_TRANSLATE 在 content.js 是 toggle 行為：已翻譯 → 還原，反之翻譯
-    await browser.tabs.sendMessage(tab.id, { type: 'TOGGLE_TRANSLATE' });
+    // v1.6.6: 讀 settings.popupButtonSlot 決定按鈕對應的 preset slot（預設 2 = Flash）
+    // content.js handleTranslatePreset 自帶 toggle 行為（已翻譯 → 還原 / 翻譯中 → abort / 閒置 → 翻譯）
+    const { popupButtonSlot } = await browser.storage.sync.get('popupButtonSlot');
+    const slot = pickPopupSlot(popupButtonSlot);
+    await browser.tabs.sendMessage(tab.id, { type: 'TRANSLATE_PRESET', payload: { slot } });
     window.close();
   } catch (err) {
     statusEl.textContent = '狀態：無法在此頁面執行，請重新整理後再試';
@@ -187,13 +281,12 @@ $('glossary-toggle').addEventListener('change', async (e) => {
 // 舊版點擊送 TOGGLE_SUBTITLE，content.js 走「翻面」YT.active；當設定值與 YT.active
 // desync（例如使用者手動按 Alt+S 啟動過、或處於 init 800ms 延遲窗口）時，點擊會反向作用。
 // 改為送 SET_SUBTITLE { enabled }，content.js 依 enabled 直接決定啟/停/no-op。
+// v1.6.23:改為「Option → Popup」單向 sync。popup toggle 變動只通知當前 tab 即時啟 / 停,
+// **不寫** storage 避免反向覆蓋 Option 的全域設定。Option 設定影響「下次進 YouTube 頁的預設行為」,
+// popup 的勾選只控制「當前 tab」即時狀態。
 $('yt-subtitle-toggle').addEventListener('change', async (e) => {
   const enabled = e.target.checked;
   try {
-    // 1. 更新設定（影響下次進 YouTube 頁是否自動啟動字幕翻譯）
-    const { ytSubtitle = {} } = await browser.storage.sync.get('ytSubtitle');
-    await browser.storage.sync.set({ ytSubtitle: { ...ytSubtitle, autoTranslate: enabled } });
-    // 2. 通知當前分頁把運行狀態調成 enabled
     const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
     if (tab?.id) {
       await browser.tabs.sendMessage(tab.id, {
@@ -202,13 +295,23 @@ $('yt-subtitle-toggle').addEventListener('change', async (e) => {
       }).catch(() => {});
     }
   } catch (err) {
-    statusEl.textContent = '狀態：無法切換字幕翻譯，請重新整理頁面';
+    statusEl.textContent = '狀態：無法切換字幕翻譯,請重新整理頁面';
     statusEl.style.color = '#ff3b30';
   }
 });
 
 $('options-btn').addEventListener('click', () => {
   browser.runtime.openOptionsPage();
+});
+
+// v1.6.23:popup 開著時 reactive sync ytSubtitle.autoTranslate(設定頁同步寫 storage 後立即反映)
+// popup 通常 click 外面就關閉,但 detached popup window 或極短時間視窗下這條 listener 確保一致
+browser.storage.onChanged.addListener((changes, area) => {
+  if (area !== 'sync') return;
+  if (!changes.ytSubtitle) return;
+  const newVal = changes.ytSubtitle.newValue || {};
+  // ytSubtitle.autoTranslate 預設視為 true(對齊 init 邏輯)
+  $('yt-subtitle-toggle').checked = newVal.autoTranslate !== false;
 });
 
 // v1.0.3: 編輯譯文按鈕
