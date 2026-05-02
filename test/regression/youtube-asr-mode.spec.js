@@ -436,7 +436,7 @@ test('youtube-asr-mode: G 路徑 — ASR 啟動後 player root 加 class + overl
   `);
   await page.waitForTimeout(150);
 
-  // 驗證 1:player root 應加 ASR class
+  // 驗證 1:全域雙語對照預設不應加 ASR hide class,保留 YouTube 原生字幕當原文列。
   // 驗證 2:overlay element 應存在於 player root 內(含 shadowRoot)
   // 驗證 3:全域 style 應注入到 head
   const asrSetup = await evaluate(`(() => {
@@ -451,7 +451,7 @@ test('youtube-asr-mode: G 路徑 — ASR 啟動後 player root 加 class + overl
     };
   })()`);
   expect(asrSetup.isAsr, 'YT.isAsr 應為 true').toBe(true);
-  expect(asrSetup.hasAsrClass, 'player root 應加 shinkansen-asr-active class').toBe(true);
+  expect(asrSetup.hasAsrClass, '雙語對照預設不應加 shinkansen-asr-active hide class').toBe(false);
   expect(asrSetup.overlayExists, 'player root 內應有 <shinkansen-yt-overlay>').toBe(true);
   expect(asrSetup.overlayHasShadow, 'overlay 應有 shadowRoot').toBe(true);
   expect(asrSetup.cssInjected, '全域 hide CSS 應注入到 head').toBe(true);
@@ -793,6 +793,92 @@ test('youtube-asr-mode: G 路徑 — overlay 內容由 timeupdate 驅動,根據 
     at10s.hidden,
     `@10s 超過所有 cue 範圍 overlay 應隱藏。實際: hidden=${at10s.hidden} text="${at10s.text}"`,
   ).toBe(true);
+
+  await page.close();
+});
+
+test('youtube-asr-mode: G 路徑 — displayMode=dual 應啟用字幕雙語,displayMode=single 應回純譯文', async ({
+  context,
+  localServer,
+}) => {
+  const page = await context.newPage();
+  await page.goto(`${localServer.baseUrl}/${FIXTURE}.html`, { waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('video', { timeout: 10_000 });
+
+  const { evaluate } = await getShinkansenEvaluator(page);
+  await evaluate(`window.__SK.isYouTubePage = () => true`);
+  await setAsrMode(evaluate, 'heuristic');
+
+  await evaluate(`
+    chrome.runtime.sendMessage = async function(msg) {
+      if (!msg || !msg.type) return { ok: true };
+      if (msg.type === 'TRANSLATE_SUBTITLE_BATCH') {
+        const texts = (msg.payload && msg.payload.texts) || [];
+        return {
+          ok: true,
+          result: texts.map(t => '中譯-' + t),
+          usage: { inputTokens: 1, outputTokens: 1, cachedTokens: 0, billedInputTokens: 1, billedCostUSD: 0, cacheHits: 0 },
+        };
+      }
+      return { ok: true };
+    };
+  `);
+
+  await evaluate(`
+    const events = [
+      { tStartMs: 1000, segs: [{ utf8: 'source subtitle line' }] },
+    ];
+    const json3 = JSON.stringify({ events });
+    window.dispatchEvent(new CustomEvent('shinkansen-yt-captions', {
+      detail: { url: 'https://www.youtube.com/api/timedtext?v=ABC&lang=en&kind=asr', responseText: json3 },
+    }));
+  `);
+  await page.waitForTimeout(100);
+
+  await evaluate(`(() => { window.__SK.translateYouTubeSubtitles(); })()`);
+  await page.waitForTimeout(500);
+
+  const driveTimeUpdate = async () => evaluate(`(() => {
+    const video = document.querySelector('video');
+    Object.defineProperty(video, 'currentTime', { get: () => 2, configurable: true });
+    video.dispatchEvent(new Event('timeupdate'));
+  })()`);
+  const readOverlay = async () => evaluate(`(() => {
+    const root = document.querySelector('#movie_player') || document.querySelector('.html5-video-player');
+    const host = root ? root.querySelector('shinkansen-yt-overlay') : null;
+    const src = host?.shadowRoot?.querySelector('.src');
+    const tgt = host?.shadowRoot?.querySelector('.tgt');
+    return {
+      hidden: host?.style.display === 'none',
+      hostBilingual: host?.getAttribute('bilingual') || '',
+      nativeHidden: root?.classList?.contains('shinkansen-asr-active') || false,
+      srcHidden: src?.hidden,
+      srcText: src?.textContent || '',
+      tgtText: tgt?.textContent || '',
+    };
+  })()`);
+
+  await driveTimeUpdate();
+  const dual = await readOverlay();
+  expect(dual.hidden, 'dual 模式 overlay 應顯示').toBe(false);
+  expect(dual.hostBilingual, 'dual 模式應設定 overlay bilingual attribute 讓中文上抬避開原生 CC').toBe('true');
+  expect(dual.nativeHidden, 'dual 模式不應隱藏原生英文 CC').toBe(false);
+  expect(dual.srcHidden, 'dual 模式原文由 YouTube 原生 CC 顯示，overlay src row 應隱藏避免重複').toBe(true);
+  expect(dual.srcText, 'dual 模式 overlay src row 應清空避免重複原文').toBe('');
+  expect(dual.tgtText, `dual 模式譯文列應含中譯。實際: "${dual.tgtText}"`).toContain('中譯-source subtitle line');
+
+  await evaluate(`window.__SK.setYouTubeCaptionDisplayMode('single')`);
+  const single = await readOverlay();
+  expect(single.hostBilingual, 'single 模式應移除 overlay bilingual attribute').toBe('');
+  expect(single.nativeHidden, 'single 模式應隱藏原生英文 CC').toBe(true);
+  expect(single.srcHidden, 'single 模式應隱藏原文字幕列').toBe(true);
+  expect(single.srcText, 'single 模式原文列應清空').toBe('');
+  expect(single.tgtText, 'single 模式譯文仍應顯示').toContain('中譯-source subtitle line');
+
+  await evaluate(`window.__SK.setYouTubeCaptionDisplayMode('dual')`);
+  const dualAgain = await readOverlay();
+  expect(dualAgain.hostBilingual, '切回 dual 後 overlay bilingual attribute 應恢復').toBe('true');
+  expect(dualAgain.nativeHidden, '切回 dual 後原生英文 CC 應重新顯示').toBe(false);
 
   await page.close();
 });

@@ -18,6 +18,12 @@ function highlightToHtml(s) {
 
 const $ = (id) => document.getElementById(id);
 const statusEl = $('status');
+let currentDisplayMode = 'dual';
+
+function syncBilingualToggle(ytSubtitle = {}) {
+  const forcedByGlobalDual = currentDisplayMode === 'dual';
+  $('bilingual-toggle').checked = forcedByGlobalDual || ytSubtitle.bilingualMode === true;
+}
 
 async function refreshUsageInfo() {
   try {
@@ -78,13 +84,13 @@ async function refreshTranslateButton() {
 
 async function refreshShortcutHint() {
   // v1.4.13: popup 按鈕觸發 TOGGLE_TRANSLATE 訊息，content.js 將其映射為 preset slot 2（Flash）。
-  // 所以這裡讀 translate-preset-2 的當前鍵位顯示。
-  // （v1.4.12 前舊名 toggle-translate 已移除，改讀新名稱避免永遠顯示「未設定」）
+  // 所以這裡讀「主要預設」的當前鍵位顯示。
+  // v1.8.19: 主要預設 command id 改為 translate-preset-0(字典序保證 chrome://extensions/shortcuts 顯示在最上)
   const el = $('shortcut-hint');
   if (!el) return;
   try {
     const cmds = await browser.commands.getAll();
-    const cmd = cmds.find((c) => c.name === 'translate-preset-2');
+    const cmd = cmds.find((c) => c.name === 'translate-preset-0');
     const shortcut = cmd?.shortcut?.trim();
     if (shortcut) {
       el.textContent = `${shortcut} 快速切換`;
@@ -154,6 +160,8 @@ async function init() {
       $('update-dot').hidden = false;
       $('welcome-banner').hidden = false;
       $('welcome-banner-title').textContent = `🎉 已升級至 v${welcomeNotice.version}`;
+      // AMO source review: RELEASE_HIGHLIGHTS 是 dev hardcoded 字串陣列(見 lib/release-highlights.js),
+      // highlightToHtml 是同檔案內的安全 markdown-to-html 轉換(只處理 **bold** → <strong>),無 user input。
       $('welcome-bullets').innerHTML = RELEASE_HIGHLIGHTS
         .map(h => `<li>${highlightToHtml(h)}</li>`)
         .join('');
@@ -183,11 +191,12 @@ async function init() {
 
   // v0.62 起：autoTranslate 仍走 sync（跨裝置同步），apiKey 改走 local（不同步）
   const { autoTranslate = false, displayMode = 'dual', translatePresets = [] } = await browser.storage.sync.get(['autoTranslate', 'displayMode', 'translatePresets']);
+  currentDisplayMode = displayMode === 'single' ? 'single' : 'dual';
   const { apiKey = '' } = await browser.storage.local.get(['apiKey']);
   $('auto').checked = autoTranslate;
 
   // v1.5.0: 顯示模式 toggle 初始狀態
-  setDisplayModeButtons(displayMode === 'single' ? 'single' : 'dual');
+  setDisplayModeButtons(currentDisplayMode);
 
   // v0.73: 術語表一致化開關（讀 browser.storage.sync 的 glossary.enabled）
   try {
@@ -208,7 +217,20 @@ async function init() {
       // 沒設定過視為 true（與 DEFAULT_SETTINGS.ytSubtitle.autoTranslate 對齊）
       $('yt-subtitle-toggle').checked = ytSubtitle.autoTranslate !== false;
     }
-  } catch { /* 非 YouTube 頁面，保持 hidden */ }
+    // commit 5a':Drive 影片 viewer toggle 共用 ytSubtitle.autoTranslate
+    // (user 不需要為 Drive 多做設定,跟 YouTube 字幕用同一個開關)
+    if (/^https:\/\/drive\.google\.com\/file\//.test(url)) {
+      $('drive-subtitle-row').hidden = false;
+      const { ytSubtitle = {} } = await browser.storage.sync.get('ytSubtitle');
+      $('drive-subtitle-toggle').checked = ytSubtitle.autoTranslate !== false;
+    }
+    // commit 5c:雙語對照 toggle(YouTube + Drive 影片頁都顯示,共用 ytSubtitle.bilingualMode)
+    if (url.includes('youtube.com/watch') || /^https:\/\/drive\.google\.com\/file\//.test(url)) {
+      $('bilingual-row').hidden = false;
+      const { ytSubtitle = {} } = await browser.storage.sync.get('ytSubtitle');
+      syncBilingualToggle(ytSubtitle);
+    }
+  } catch { /* 非影片頁面,保持 hidden */ }
 
   // v1.8.12: 只有當 translatePresets 中有任一 slot 用 Gemini engine 時,才提醒未設 API Key。
   // 使用者若三組 preset 都改成 Google MT / 自訂模型,popup 不再嘮叨他沒填 Gemini Key。
@@ -223,9 +245,14 @@ async function init() {
 }
 
 $('translate-btn').addEventListener('click', async () => {
+  // v1.8.20: 雙擊防護——點擊期間 disable 按鈕,避免快速連按兩次導致第二次被
+  // content.js 解讀為 abort/restore(toggle 行為)
+  const btn = $('translate-btn');
+  if (btn.disabled) return;
+  btn.disabled = true;
   const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
-  if (!tab?.id) return;
-  const mode = $('translate-btn').dataset.mode;
+  if (!tab?.id) { btn.disabled = false; return; }
+  const mode = btn.dataset.mode;
   statusEl.textContent = mode === 'restore' ? '狀態：正在還原原文…' : '狀態：正在翻譯…';
   try {
     // v1.6.6: 讀 settings.popupButtonSlot 決定按鈕對應的 preset slot（預設 2 = Flash）
@@ -237,6 +264,7 @@ $('translate-btn').addEventListener('click', async () => {
   } catch (err) {
     statusEl.textContent = '狀態：無法在此頁面執行，請重新整理後再試';
     statusEl.style.color = '#ff3b30';
+    btn.disabled = false;
   }
 });
 
@@ -251,12 +279,15 @@ function setDisplayModeButtons(mode) {
 }
 
 async function changeDisplayMode(mode) {
-  setDisplayModeButtons(mode);
-  await browser.storage.sync.set({ displayMode: mode });
+  currentDisplayMode = mode === 'single' ? 'single' : 'dual';
+  setDisplayModeButtons(currentDisplayMode);
+  const { ytSubtitle = {} } = await browser.storage.sync.get('ytSubtitle');
+  syncBilingualToggle(ytSubtitle);
+  await browser.storage.sync.set({ displayMode: currentDisplayMode });
   try {
     const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
     if (tab?.id) {
-      await browser.tabs.sendMessage(tab.id, { type: 'MODE_CHANGED', mode }).catch(() => {});
+      await browser.tabs.sendMessage(tab.id, { type: 'MODE_CHANGED', mode: currentDisplayMode }).catch(() => {});
     }
   } catch { /* 非可注入頁面，安靜忽略 */ }
 }
@@ -300,18 +331,66 @@ $('yt-subtitle-toggle').addEventListener('change', async (e) => {
   }
 });
 
-$('options-btn').addEventListener('click', () => {
-  browser.runtime.openOptionsPage();
+// commit 5a':Drive toggle 共用 ytSubtitle.autoTranslate(寫 storage,跟 YouTube popup
+// 的 SET_SUBTITLE message 設計不同——因 Drive 沒 SPA 切影片,單純 storage 即時 sync 即可。
+// content-drive.js listen onChanged 即時生效)。
+$('drive-subtitle-toggle').addEventListener('change', async (e) => {
+  const enabled = e.target.checked;
+  try {
+    const { ytSubtitle = {} } = await browser.storage.sync.get('ytSubtitle');
+    await browser.storage.sync.set({
+      ytSubtitle: { ...ytSubtitle, autoTranslate: enabled },
+    });
+  } catch (err) {
+    statusEl.textContent = '狀態:無法切換字幕翻譯,請重新整理頁面';
+    statusEl.style.color = '#ff3b30';
+  }
+});
+
+// commit 5c:雙語 toggle change handler(寫 ytSubtitle.bilingualMode 到 storage,YouTube
+// 跟 Drive 兩條路徑各自的 onChanged listener 自動反應;切換生效需 reload 影片頁)
+$('bilingual-toggle').addEventListener('change', async (e) => {
+  const bilingual = e.target.checked;
+  try {
+    const { ytSubtitle = {} } = await browser.storage.sync.get('ytSubtitle');
+    await browser.storage.sync.set({
+      ytSubtitle: { ...ytSubtitle, bilingualMode: bilingual },
+    });
+  } catch (err) {
+    statusEl.textContent = '狀態:無法切換雙語對照';
+    statusEl.style.color = '#ff3b30';
+  }
+});
+
+$('options-btn').addEventListener('click', async() => {
+  try{
+    await browser.runtime.openOptionsPage();
+  } catch (e) {
+    // 如果 openOptionsPage 不支援（例如 Arc），退而求其次直接開啟 options.html 頁面
+    const url = browser.runtime.getURL('options/options.html');
+    await browser.tabs.create({ url });
+  }
 });
 
 // v1.6.23:popup 開著時 reactive sync ytSubtitle.autoTranslate(設定頁同步寫 storage 後立即反映)
 // popup 通常 click 外面就關閉,但 detached popup window 或極短時間視窗下這條 listener 確保一致
 browser.storage.onChanged.addListener((changes, area) => {
   if (area !== 'sync') return;
-  if (!changes.ytSubtitle) return;
-  const newVal = changes.ytSubtitle.newValue || {};
-  // ytSubtitle.autoTranslate 預設視為 true(對齊 init 邏輯)
-  $('yt-subtitle-toggle').checked = newVal.autoTranslate !== false;
+  if (changes.displayMode) {
+    const mode = changes.displayMode.newValue === 'single' ? 'single' : 'dual';
+    currentDisplayMode = mode;
+    setDisplayModeButtons(mode);
+  }
+  if (!changes.ytSubtitle && !changes.displayMode) return;
+  const newVal = changes.ytSubtitle?.newValue || {};
+  if (changes.ytSubtitle) {
+    // 同一個 ytSubtitle.autoTranslate 設定同步兩個 popup toggle(YouTube + Drive 共用)
+    const enabled = newVal.autoTranslate !== false;
+    $('yt-subtitle-toggle').checked = enabled;
+    $('drive-subtitle-toggle').checked = enabled;
+  }
+  // commit 5c + fork displayMode:全域雙語對照會強制影片字幕雙語,UI 也要同步反映。
+  syncBilingualToggle(newVal);
 });
 
 // v1.0.3: 編輯譯文按鈕

@@ -64,6 +64,13 @@ if (window.__shinkansen_loaded) {
     // 雙語模式插入的譯文節點。還原/SPA reset 時需要移除這些 sibling/child nodes。
     insertedTranslations: new Set(),
     translationNodeBySource: new WeakMap(),
+    // 儲存 inject 前 element 的 textContent。當 SPA framework 把
+    // 整個被翻譯的 element detach 換成新 element(例如 YouTube 的 yt-attributed-string
+    // 在 model 更新時整個 host span 被替換)時,onSpaObserverMutations 用 originalText
+    // 比對 mutation 的 addedNodes 找出對應的新 element,從 translatedHTML 拿譯文 re-apply。
+    // 沒這條 fallback 的話,新 element 不在 translatedHTML 也不在 originalHTML,
+    // Content Guard 完全認不出它,使用者捲動觸發 re-render 後譯文就永久消失。
+    originalText: new Map(), // el → snapshot 的 textContent.trim()
     // v1.0.23: 續翻模式
     stickyTranslate: false,
     // v1.4.12: 記錄本次翻譯使用的 preset slot（1/2/3），供 SPA 導航續翻與同 tab reload/back-forward 查詢用。
@@ -96,6 +103,36 @@ if (window.__shinkansen_loaded) {
         payload: { level, category, message, data },
       }).catch(() => {}); // fire-and-forget
     } catch { /* 靜默 */ }
+  };
+
+  // ─── v1.8.19: 安全版 runtime.sendMessage ─────────────────
+  // Extension reload / 更新時, 已載入頁面的 orphan content script 失去 extension
+  // 連線通道, 此後任何 chrome.runtime.* 呼叫會 SYNC throw "Extension context
+  // invalidated" — 不是 promise reject! 既有 caller 的 `.catch()` 接不到, 會洩漏
+  // uncaught error 到 chrome://extensions/ 錯誤面板, 污染真實 bug 的能見度。
+  //
+  // 此 helper 用三層防護把 sync throw 統一變 async resolve(undefined):
+  //   1. chrome.runtime.id 在 context 死掉時變 undefined → fast path return
+  //   2. 進入 sendMessage 前同步 try/catch 接住 sync throw
+  //   3. async reject 不主動吞(維持原 caller 的 .catch 行為), 讓真實業務錯誤
+  //      仍能被 caller 看到; 只把 invalidated 錯誤吞掉
+  //
+  // caller 端 invalidated 時拿到 undefined, 配合 `if (!res?.ok)` 防禦即可。
+  SK.safeSendMessage = function safeSendMessage(msg) {
+    if (!globalThis.chrome?.runtime?.id) return Promise.resolve(undefined);
+    try {
+      return browser.runtime.sendMessage(msg).catch((err) => {
+        const m = String(err?.message || err);
+        if (m.includes('Extension context invalidated') || m.includes('Receiving end does not exist')) {
+          return undefined;
+        }
+        throw err;
+      });
+    } catch (err) {
+      const m = String(err?.message || err);
+      if (m.includes('Extension context invalidated')) return Promise.resolve(undefined);
+      return Promise.reject(err);
+    }
   };
 
   // ─── 共用常數 ──────────────────────────────────────────

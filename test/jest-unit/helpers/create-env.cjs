@@ -64,6 +64,7 @@ function createEnv(options = {}) {
   // 每個 mock 都用 jest.fn() 包裝，測試可以斷言呼叫次數與參數。
   const chromeMock = {
     runtime: {
+      id: 'test-extension-id',
       sendMessage: jest.fn().mockImplementation(() => Promise.resolve({})),
       getManifest: jest.fn().mockReturnValue({ version: '1.0.26' }),
       onMessage: { addListener: jest.fn() },
