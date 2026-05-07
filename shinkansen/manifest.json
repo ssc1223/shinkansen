@@ -19,7 +19,7 @@
     "storage",
     "activeTab",
     "alarms",
-    "webNavigation"
+    "contextMenus"
   ],
   "host_permissions": [
     "<all_urls>",

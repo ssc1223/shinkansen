@@ -253,22 +253,92 @@ browser.tabs.onUpdated.addListener((tabId, changeInfo) => {
   }
 });
 
-// ─── v1.4.11 跨 tab sticky 翻譯（v1.4.12 改存 preset slot；v1.8.24 改用 webNavigation） ──────────
-// 使用者在 tab A 按任一 preset 快速鍵翻譯後，從 A 點連結開到 tab B 會自動翻譯，
-// 跟著「實際的連結點擊」傳遞。Cmd+T 後手動打網址 / bookmark / 外部 app 開啟不繼承。
-// 每個 tab 記錄自己當時用的 preset slot（1/2/3），新 tab 繼承相同 slot——
-// 尊重使用者當時按的引擎+模型（Flash / Flash Lite / Google MT 各自繼承）。
+// ─── 右鍵選單(fork-only) ─────────────────────────────────
+// 點 page / selection / link 右鍵切換「翻譯為繁體中文-台灣」/「顯示原文」,
+// 觸發等同主要預設快速鍵(slot 2)。Title 在 onShown 動態依當前 tab 是否已翻譯切換。
+const CONTEXT_MENU_TRANSLATE_ID = 'shinkansen-translate-zh-tw';
+const CONTEXT_MENU_TRANSLATE_TITLE = '翻譯為繁體中文-台灣';
+const CONTEXT_MENU_RESTORE_TITLE = '顯示原文';
+
+function createTranslateContextMenu() {
+  if (!browser.contextMenus) return;
+  try {
+    browser.contextMenus.create({
+      id: CONTEXT_MENU_TRANSLATE_ID,
+      title: CONTEXT_MENU_TRANSLATE_TITLE,
+      contexts: ['page', 'selection', 'link'],
+    }, () => {
+      const err = browser.runtime?.lastError;
+      if (err) {
+        debugLog('warn', 'system', 'context menu create failed', { error: err.message });
+      }
+    });
+  } catch (err) {
+    debugLog('warn', 'system', 'context menu create failed', { error: err?.message || String(err) });
+  }
+}
+
+function updateTranslateContextMenuTitle(translated) {
+  if (!browser.contextMenus) return;
+  const title = translated ? CONTEXT_MENU_RESTORE_TITLE : CONTEXT_MENU_TRANSLATE_TITLE;
+  try {
+    browser.contextMenus.update(CONTEXT_MENU_TRANSLATE_ID, { title }, () => {
+      void browser.runtime?.lastError;
+      browser.contextMenus.refresh?.();
+    });
+  } catch (err) {
+    debugLog('warn', 'system', 'context menu update failed', { error: err?.message || String(err) });
+  }
+}
+
+async function getTabTranslatedState(tabId) {
+  if (tabId == null) return false;
+  try {
+    const state = await browser.tabs.sendMessage(tabId, { type: 'GET_STATE' });
+    return state?.translated === true;
+  } catch {
+    return false;
+  }
+}
+
+function setupContextMenu() {
+  if (!browser.contextMenus) return;
+  try {
+    browser.contextMenus.remove(CONTEXT_MENU_TRANSLATE_ID, () => {
+      void browser.runtime?.lastError;
+      createTranslateContextMenu();
+    });
+  } catch {
+    createTranslateContextMenu();
+  }
+}
+
+setupContextMenu();
+
+browser.contextMenus?.onShown?.addListener(async (_info, tab) => {
+  updateTranslateContextMenuTitle(await getTabTranslatedState(tab?.id));
+});
+
+browser.contextMenus?.onClicked?.addListener(async (info, tab) => {
+  if (info.menuItemId !== CONTEXT_MENU_TRANSLATE_ID || !tab?.id) return;
+  const wasTranslated = await getTabTranslatedState(tab.id);
+  browser.tabs.sendMessage(tab.id, {
+    type: 'TRANSLATE_PRESET',
+    payload: { slot: 2 },
+  }).then(() => {
+    updateTranslateContextMenuTitle(!wasTranslated);
+  }).catch(() => {
+    updateTranslateContextMenuTitle(false);
+  });
+});
+
+// ─── tab-scoped sticky 翻譯(fork: 不跨 tab 繼承) ──────────
+// 每個 tab 記錄自己當時用的 preset slot(1/2/3),同一分頁 reload / back-forward
+// 可查回本 tab 的 slot。新 tab / 新視窗不繼承 opener tab,避免點連結開新頁時
+// 未經使用者明確操作就自動翻譯。SPA 同分頁續翻由 content-spa.js 的 in-memory
+// STATE.stickyTranslate 處理,不依賴這裡的跨 tab 複製。
 // 按任意 preset 快速鍵在已翻譯狀態 → restorePage → STICKY_CLEAR 只清當前 tab。
-// 持久化於 chrome.storage.session，service worker 休眠重啟後仍保留。
-//
-// v1.8.24: 從 `tabs.onCreated.openerTabId` 改用 `webNavigation.onCreatedNavigationTarget`。
-// 原本的 onCreated 路徑誤以為 Cmd+T 開的新 tab 會有 openerTabId == null，但現代
-// Chrome 對 Cmd+T 也會把 openerTabId 設為當下 active tab（受 tab grouping / new-tab
-// placement 影響），加上 `chrome.tabs.create({})` 從 extension API 開的也會帶 opener，
-// 結果任何被 Chrome 設了 openerTabId 的新 tab 都會誤繼承 sticky slot。
-// onCreatedNavigationTarget 是 Chrome 專為「使用者點連結造成新 tab」設計的精準事件——
-// 只 fire 在 target=_blank / middle-click / Cmd+click / window.open，不 fire 在
-// Cmd+T → 打網址 / bookmark / 外部 app / 程式化 tabs.create，剛好對應 v1.4.11 的設計意圖。
+// 持久化於 chrome.storage.session,service worker 休眠重啟後仍保留。
 
 const stickyTabs = new Map(); // tabId → slot (number)
 let _stickyHydratingPromise = null;
@@ -309,26 +379,6 @@ async function persistStickyTabs() {
   } catch (err) {
     debugLog('warn', 'system', 'persistStickyTabs failed', { error: err.message });
   }
-}
-
-// v1.8.24: 用 webNavigation.onCreatedNavigationTarget 取代 tabs.onCreated。
-// Firefox 同樣支援這個 API（webNavigation polyfill 在 lib/compat.js 有 fallback 處理）。
-if (browser.webNavigation && browser.webNavigation.onCreatedNavigationTarget) {
-  browser.webNavigation.onCreatedNavigationTarget.addListener(async (details) => {
-    await hydrateStickyTabs();
-    const sourceTabId = details.sourceTabId;
-    const newTabId = details.tabId;
-    if (sourceTabId == null || newTabId == null) return;
-    const slot = stickyTabs.get(sourceTabId);
-    if (slot == null) return;
-    stickyTabs.set(newTabId, slot);
-    await persistStickyTabs();
-    debugLog('info', 'system', 'sticky inherited from link-opened new tab', {
-      newTabId, sourceTabId, slot, url: details.url,
-    });
-  });
-} else {
-  debugLog('warn', 'system', 'webNavigation.onCreatedNavigationTarget unavailable, cross-tab sticky disabled', {});
 }
 
 browser.tabs.onRemoved.addListener(async (tabId) => {
