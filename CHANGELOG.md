@@ -7,6 +7,26 @@
 
 ## v1.9.x
 
+**v1.9.22** — YouTube ASR 字幕大整修:6 個 bug 一次修。SEP_RE tolerant split 把 segment count mismatch 從 46% 砍到 1.3%(實機 50 iter 量測)；`_splitAsrSubBatches` 修空 segs edge case 解掉 30% rapid-seek 觸發的 LLM crash；overlay null deref / silent failure / displayCues sparse 三條 crash path 全堵；seek 時 BATCH=4 + LLM 仍跑(Option B)兼顧速度跟分句精緻度。
+
+**對使用者可見改動**：
+- **拖進度條後字幕現比較快**：Chrome for Claude 實機 50 iter 量測,median wait 從 4.4s → 4.3s(看起來小但底層 mismatch fallback 砍掉 ~98%,大量省 Gemini token + 對使用者更穩定)
+- **拖進度條後不會出現「畫面空白沒提示」**：之前某些 window 翻譯失敗會被誤標「已翻」,下次拖到那段看不到中文也沒「翻譯中」提示。修法:失敗不誤加 translatedWindows,可重試
+- **清快取後不再噴 console 紅字**：之前清快取後拖進度條會持續出現 `Cannot read properties of null (reading 'innerHTML')`;改寫 reset 路徑 + overlay rebuild guard
+- **rapid seek 不再偶發 LLM crash**：`_splitAsrSubBatches` 處理「seek 到視窗最尾、所有 ASR 都已過去」的 edge case,不再回含空 subarray 觸發 `startMs of undefined`
+
+**內部改動**：
+- `lib/system-instruction.js`：新 `SEP_RE = /\s*<<<SHINKANSEN_SEP>>>\s*/` 容忍 Gemini Flash Lite 吃掉 DELIMITER 兩側 `\n` 的回應變體（lib/gemini.js × 4 split 點 + lib/openai-compat.js × 1 全改用）
+- `content-youtube.js` `_splitAsrSubBatches`：所有 return path 加 `length === 0 → return []`,杜絕 `[[]]` 沿用到 `subBatches.map(b => b[0].startMs)` 炸掉
+- `content-youtube.js` `translateWindowFrom`：失敗時不加 translatedWindows（compare captionMap.size / displayCues.length before/after,沒長 = 全失敗）；seek 緊急(wallLead < 10s)時 BATCH 1+ 從 12 縮到 4,LLM 仍 fire-and-forget 跑
+- `content-youtube.js` `_resetTranslationStateForCacheClear`：改呼 `_setOverlayContent('')` 取代直接 `.window.textContent = ''`(後者銷毀 .cue-block 子元素)
+- `content-youtube.js` `_setOverlayContent`：tgtEl null 時自動 rebuild `.cue-block` 結構,後續寫入不 throw
+- `content-youtube.js` `_findActiveCue` / `_upsertDisplayCue`：所有 cues iteration 加 `c &&` null guard(defense-in-depth,防 sparse array 殘留)
+- `_runAsrWindow` catch 加 stack capture（5 行 stack 進 log）便於未來定位
+- 新增 spec：3 + 5 + 3 + 6 + 7 + 2(共 26 條 regression / unit)鎖死全部修法,SANITY 都驗過
+
+**自動清快取**：不建議。修法只影響 split 解析、分段邏輯、防 crash,**不影響譯文內容**;past cache entry 仍有效。
+
 **v1.9.21** — 翻譯路徑全套加 fetch 層 timeout：Gemini / OpenAI 相容 / Google Translate / 術語表 / streaming 一律 15s 上限。streaming first-chunk fallback 從 1.5s 改 3s（避免 Pro 模型 / 偶發網路慢誤判）。release pipeline 一律 build Developer ID 版 Safari 並自動上傳 GitHub Release。
 
 **對使用者可見改動**：

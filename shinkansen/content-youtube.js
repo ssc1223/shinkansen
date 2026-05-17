@@ -1149,8 +1149,19 @@
   function _setOverlayContent(targetText, sourceText) {
     const host = _ensureOverlay();
     if (!host || !host.shadowRoot) return;
-    const tgtEl = host.shadowRoot.querySelector('.tgt');
-    const srcEl = host.shadowRoot.querySelector('.src');
+    // v1.9.22:子元素被外部清掉時(過去 _resetTranslationStateForCacheClear bug 會把
+    // .window.textContent='' 砍掉所有子元素),tgtEl 會是 null。重建 .cue-block 結構讓
+    // 後續邏輯能繼續走,不直接 throw TypeError。
+    let tgtEl = host.shadowRoot.querySelector('.tgt');
+    let srcEl = host.shadowRoot.querySelector('.src');
+    if (!tgtEl) {
+      const win = host.shadowRoot.querySelector('.window');
+      if (!win) return; // 整個 .window 都沒了 → 放棄此次寫入
+      win.innerHTML = '<div class="cue-block"><span class="src" hidden></span><span class="tgt"></span></div>';
+      tgtEl = host.shadowRoot.querySelector('.tgt');
+      srcEl = host.shadowRoot.querySelector('.src');
+      if (!tgtEl) return; // 還是失敗就放棄(不該發生)
+    }
     if (!targetText) {
       if (tgtEl.innerHTML !== '') tgtEl.innerHTML = '';
       if (srcEl) {
@@ -1183,6 +1194,9 @@
 
   // 暴露給 spec 用
   SK._wrapTargetTextForOverlay = _wrapTargetText;
+  SK._setOverlayContent = _setOverlayContent;
+  SK._splitAsrSubBatches = (windowSegs, videoNowMs, windowStartMs, playbackRate) =>
+    _splitAsrSubBatches(windowSegs, videoNowMs, windowStartMs, playbackRate);
 
   // v1.8.42:non-ASR 雙語模式 overlay 同步 helper。收集當前 visible
   // .ytp-caption-segment 對應的譯文,join 後寫到獨立 overlay,並動態量測
@@ -1458,9 +1472,12 @@
     // v1.8.14: _upsertDisplayCue 已用 findIndex upsert + sort,同 startMs 只留一筆,
     // 所以 cues[i+1].startMs 必嚴格大於 cues[i].startMs(若 i+1 存在)。
     // 從原本 O(N²) 內 loop 簡化為 O(N) 線性掃描。
+    // v1.9.22:加 c / next null guard,跟 _upsertDisplayCue 同一個 sparse array 防禦。
     for (let i = 0; i < cues.length; i++) {
       const c = cues[i];
-      const nextStart = (i + 1 < cues.length) ? cues[i + 1].startMs : Infinity;
+      if (!c) continue;
+      const next = cues[i + 1];
+      const nextStart = (next) ? next.startMs : Infinity;
       const effectiveEnd = Math.min(c.endMs, nextStart);
       if (currentMs >= c.startMs && currentMs <= effectiveEnd) return c;
     }
@@ -1529,17 +1546,28 @@
 
     // LLM 路徑清除被覆蓋的舊 cues(heuristic 殘留)。
     // 範圍上限用 llmEndMs 不用 adjustedEnd——避免清掉 LLM 沒 cover 的中段 heuristic。
+    // v1.9.22:加 `c &&` 防禦 — 實機 log 看到 'asr llm overlay failed: Cannot read
+    // properties of undefined (reading startMs)' × 6 次,代表這個 cues 陣列偶爾出現
+    // undefined slot(疑似 race condition 或 sparse array)。null check 比追根因
+    // 安全 — 反正 undefined cue 本來就該被忽略。
     if (opts && opts.replaceRange) {
       for (let i = cues.length - 1; i >= 0; i--) {
         const c = cues[i];
-        if (c.startMs > startMs && c.startMs < llmEndMs) cues.splice(i, 1);
+        if (c && c.startMs > startMs && c.startMs < llmEndMs) cues.splice(i, 1);
       }
     }
 
-    const idx = cues.findIndex(c => c.startMs === startMs);
+    const idx = cues.findIndex(c => c && c.startMs === startMs);
     if (idx >= 0) cues[idx] = next;
     else cues.push(next);
 
+    // 排序前過濾掉 undefined / null slot(防 sparse array;sort comparator 對 undefined
+    // 行為未定義,且可能整個 throw)
+    if (cues.some(c => !c)) {
+      const filtered = cues.filter(c => !!c);
+      cues.length = 0;
+      cues.push(...filtered);
+    }
     cues.sort((a, b) => a.startMs - b.startMs);
   }
 
@@ -1562,6 +1590,9 @@
   //
   // windowSegs < 5 條 → 不切,整批一發(over-engineering 沒意義,API 也不會慢多少)
   function _splitAsrSubBatches(windowSegs, videoNowMs, windowStartMs, playbackRate) {
+    // v1.9.22:空 input 直接回空 subBatches(原本 `return [windowSegs]` 變 `[[]]`,
+    // 下游 _runAsrWindow line 1736 `subBatches.map(b => b[0].startMs)` 對空 b throw)
+    if (windowSegs.length === 0) return [];
     if (windowSegs.length <= 5) return [windowSegs];
 
     const GAP_MS = 500;          // 自然停頓判斷門檻
@@ -1578,6 +1609,9 @@
     const segs = leadMs <= 0
       ? windowSegs.filter(s => s.startMs >= sub0Start)
       : windowSegs;
+    // v1.9.22:filter 後可能變空(seek 到視窗最尾,所有 segs 都 < videoNowMs)。
+    //          這條才是「30% rapid-seek 觸發 asr llm overlay failed」的真正 root cause。
+    if (segs.length === 0) return [];
     if (segs.length <= 5) return [segs];
     const n = segs.length;
 
@@ -1676,7 +1710,8 @@
       if (!Number.isFinite(sStart) || !trans) { droppedCount++; continue; }
       if (!startMsSet.has(sStart)) { droppedCount++; continue; }
       const validEnd = Number.isFinite(sEnd) && sEnd >= sStart ? sEnd : sStart;
-      const covered = subSegs.filter(seg => seg.startMs >= sStart && seg.startMs <= validEnd);
+      // v1.9.22: 加 `seg &&` null guard 跟 displayCues 同樣 sparse 防禦原則
+      const covered = subSegs.filter(seg => seg && seg.startMs >= sStart && seg.startMs <= validEnd);
       if (covered.length === 0) { droppedCount++; continue; }
       YT.captionMap.set(covered[0].normText, trans);
       for (let k = 1; k < covered.length; k++) {
@@ -1778,7 +1813,7 @@
   // 跟非 ASR 路徑共用「一般字幕」訊息(因為翻譯單位已經是「英文整句」，跟人工字幕
   // 一樣形態，不用 ASR 專用的 JSON timestamp prompt)。實際訊息類型依 engine 由
   // SK.getSubtitleBatchType 路由：google → _GOOGLE / openai-compat → _CUSTOM / 其餘 → Gemini。
-  async function _runAsrHeuristicWindow(windowSegs, windowStartMs) {
+  async function _runAsrHeuristicWindow(windowSegs, windowStartMs, options) {
     const YT = SK.YT;
     if (!YT.active) return;
 
@@ -1801,7 +1836,12 @@
     // v1.9.19: BATCH 8 → 12(token 攤提 ~26%,elapsed median 幾乎不變),
     //          batch 0 ramp 上限拉到 16(lead 充裕時更省 token),boundary 改走 wall time
     //          (除以 playbackRate),否則 2x 速 + 中等 lead 會誤選大批挨延遲。
-    const BATCH = 12;
+    // v1.9.22: isUrgent(translateWindowFrom 傳入,代表 wallLead < 10s — seek 或緊跟著影片
+    //          的情境)時 batch 1+ 縮到 4。原因:seek 後 batch 0 已 adaptive 縮到 1-4 條
+    //          快速顯示前幾條,但接下來 batch 1 size=12 要 ~3-5s 才完,使用者中間視覺
+    //          上像 freeze。縮到 4 讓「第 5-N 條」中文也快點冒,代價是 token 攤提變差
+    //          (143 t/seg → 194 t/seg,+35%),但 isUrgent 場景 token 不是優先考量。
+    const BATCH = options?.isUrgent ? 4 : 12;
     const videoNowMs = YT.videoEl ? YT.videoEl.currentTime * 1000 : windowStartMs;
     const leadMs = windowStartMs - videoNowMs;
     const playbackRate = YT.videoEl?.playbackRate || 1;
@@ -1995,6 +2035,14 @@
     // 若使用者從中間開始看，前段從未翻過，向後拖時高水位線誤判「已翻」導致字幕空白。
     if (YT.translatedWindows.has(windowStartMs)) return;  // try-finally 會清理
 
+    // v1.9.22: 翻譯成功判斷 — 記錄起始 captionMap.size + displayCues.length,
+    // 翻完比對若都沒長 = 整批 batches 全失敗(SW context invalidated / Gemini reject /
+    // rate limit / 15s timeout × maxRetries 全部用光)。失敗時不加 translatedWindows,
+    // 讓下次 seek 可重試;若加了 translatedWindows 又沒譯文,使用者拖到此視窗會看到
+    // 空白(status 不顯示因 !translatedWindows.has=false,翻譯不重試因同 guard)。
+    const _cmSizeBefore = YT.captionMap.size;
+    const _cuesCountBefore = YT.displayCues.length;
+
     // 找出本視窗內的字幕（[windowStartMs, windowEndMs)）
     const windowSegs = YT.rawSegments.filter(
       s => s.startMs >= windowStartMs && s.startMs < windowEndMs
@@ -2019,9 +2067,20 @@
       //   - 'progressive' = E:先 heuristic 顯示(秒出),同時 fire-and-forget LLM 跑覆蓋。
       const asrMode = config.asrMode || 'progressive';  // 預設 progressive(混合模式)
 
+      // v1.9.22:seek / 緊急場景的 ASR 加速 — 算 wallLead(視窗起點距影片當前位置的
+      // wall-clock ms,負數=video 已過視窗起點;這是 seek 進入此視窗的特徵)。
+      //   wallLead < 10s 視為「使用者馬上要看到」→ 傳 isUrgent 給 _runAsrHeuristicWindow:
+      //   batch 1+ 改 BATCH=4(原 12),讓使用者快點看到第 2-N 條中文。
+      //   LLM(_runAsrWindow)仍照常 fire-and-forget 跑 — LLM 提供更聰明的句子切分,
+      //   即使使用者已滑過,停下時也能看到精緻版。(原 v1.9.22 草案曾跳 LLM,但發現
+      //   使用者抱怨「分句變糙」,改回保留 LLM)。
+      const _videoNowMs = YT.videoEl ? YT.videoEl.currentTime * 1000 : 0;
+      const _wallLead = (windowStartMs - _videoNowMs) / (YT.videoEl?.playbackRate || 1);
+      const _isUrgent = _wallLead < 10000;
+
       if (asrMode === 'heuristic' || asrMode === 'progressive') {
         try {
-          await _runAsrHeuristicWindow(windowSegs, windowStartMs);
+          await _runAsrHeuristicWindow(windowSegs, windowStartMs, { isUrgent: _isUrgent });
         } catch (err) {
           SK.sendLog('error', 'youtube', 'asr heuristic translation failed', { error: err.message });
         }
@@ -2032,7 +2091,11 @@
           // fire-and-forget:LLM 結果回來後寫入 captionMap 會覆蓋 heuristic 版本
           // (兩條路徑都用同一組 windowSegs.normText 當 key,LLM 路徑的 entry.s/e 區間 ⊆ heuristic 合句區間)
           _runAsrWindow(windowSegs, windowStartMs, windowEndMs).catch(err => {
-            SK.sendLog('error', 'youtube', 'asr llm overlay failed', { error: err.message });
+            SK.sendLog('error', 'youtube', 'asr llm overlay failed', {
+              error: err.message,
+              // v1.9.22:保留前 5 行 stack,便於下次再爆時定位
+              stack: (err.stack || '').split('\n').slice(0, 5).join(' | '),
+            });
           });
         } else {
           try {
@@ -2333,7 +2396,20 @@
 
     // v1.2.46/v1.2.48: 記錄此視窗已翻完
     YT.captionMapCoverageUpToMs = Math.max(YT.captionMapCoverageUpToMs, windowEndMs);
-    YT.translatedWindows.add(windowStartMs); // Set 精確記錄，供 seek-back 跳過判斷用
+    // v1.9.22: 只有「真的有譯文進帳」或「視窗本來就沒字幕」才加 translatedWindows。
+    // 全 batches 失敗時不加,下次 seek 此視窗會重跑翻譯(避免「靜默空白」bug)。
+    const _windowProducedTranslation =
+      YT.captionMap.size > _cmSizeBefore ||
+      YT.displayCues.length > _cuesCountBefore;
+    if (windowSegs.length === 0 || _windowProducedTranslation) {
+      YT.translatedWindows.add(windowStartMs); // Set 精確記錄,供 seek-back 跳過判斷用
+    } else {
+      SK.sendLog('warn', 'youtube', 'window translation produced nothing — leaving open for retry', {
+        windowStartMs, segCount: windowSegs.length,
+        captionMapSize: YT.captionMap.size,
+        displayCuesLen: YT.displayCues.length,
+      });
+    }
 
     // v1.2.45: 過期視窗追趕機制——API 完成時若 video 已超過 translatedUpToMs（window end），
     // 代表這個視窗的字幕早就過了，直接把翻譯起點跳到 video 現在所在的視窗邊界，
@@ -2689,13 +2765,14 @@
     YT.captionMapCoverageUpToMs  = 0;
     YT._firstCacheHitLogged      = false;
     hideCaptionStatus();
-    // ASR overlay 內可能殘留中文 cue 文字(displayCues 已清,但渲染還在)
+    // ASR overlay 內可能殘留中文 cue 文字(displayCues 已清,但渲染還在)。
+    // v1.9.22:走 _setOverlayContent('') 而非直接砍 .window.textContent。後者會把
+    // .cue-block / .src / .tgt 子元素一起銷毀,下次 _setOverlayContent 呼叫時
+    // querySelector('.tgt') 回 null → `tgtEl.innerHTML` throw TypeError(實測使用者
+    // CLEAR_CACHE 後拖進度條觸發,console 滿屏紅字)。_setOverlayContent('') 只清
+    // 兩個 span 的 innerHTML,結構保留可重複使用。
     if (YT.isAsr) {
-      const overlay = document.querySelector(_OVERLAY_TAG);
-      if (overlay && overlay.shadowRoot) {
-        const win = overlay.shadowRoot.querySelector('.window');
-        if (win) win.textContent = '';
-      }
+      _setOverlayContent('');
     }
     // sync ccPaused 從 CC button 當下 aria-pressed,避免 stale 旗標擋住後續
     // onVideoTimeUpdate / onVideoSeeked(_observeCcButton 的 MutationObserver 偶爾 race)

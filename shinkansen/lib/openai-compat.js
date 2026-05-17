@@ -19,7 +19,7 @@
 // 黑名單與固定術語表是「跨 provider 共用」（Jimmy 設計決定 #3）。
 
 import { debugLog } from './logger.js';
-import { DELIMITER, MARKER_COMPACT, MARKER_STRONG, packChunks, buildEffectiveSystemInstruction } from './system-instruction.js';
+import { DELIMITER, SEP_RE, MARKER_COMPACT, MARKER_STRONG, packChunks, buildEffectiveSystemInstruction } from './system-instruction.js';
 // v1.6.18: thinking 控制 mapping（各家 provider 的 thinking schema 不同，統一成
 // thinkingLevel 'auto/off/low/medium/high' + extraBodyJson 進階透傳）
 import { buildThinkingPayload } from './openai-compat-thinking.js';
@@ -266,7 +266,7 @@ async function translateChunk(texts, settings, glossary, fixedGlossary, forbidde
   });
 
   // 拆分對齊（與 Gemini 同邏輯：split by DELIMITER + 移除序號標記;用本批選的 marker.re）
-  const parts = text.split(DELIMITER).map(s => s.trim().replace(marker.re, ''));
+  const parts = text.split(SEP_RE).map(s => s.trim().replace(marker.re, ''));
   if (parts.length !== texts.length) {
     await debugLog('warn', 'api', 'openai-compat segment count mismatch — fallback to per-segment', {
       expected: texts.length, got: parts.length, elapsed: ms,

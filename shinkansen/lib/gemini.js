@@ -5,7 +5,7 @@
 import { debugLog } from './logger.js';
 // v1.5.7: DELIMITER / packChunks / buildEffectiveSystemInstruction 抽到共用模組，
 // 與 lib/openai-compat.js 共用同一份「翻譯 batch 構建」邏輯。
-import { DELIMITER, MARKER_COMPACT, packChunks, buildEffectiveSystemInstruction } from './system-instruction.js';
+import { DELIMITER, SEP_RE, MARKER_COMPACT, packChunks, buildEffectiveSystemInstruction } from './system-instruction.js';
 
 const MAX_BACKOFF_MS = 8000;
 
@@ -523,7 +523,7 @@ async function translateChunk(texts, settings, glossary, fixedGlossary, forbidde
   });
 
   // v0.89: split 後移除序號標記（若有）
-  const parts = text.split(DELIMITER).map(s => s.trim().replace(MARKER_COMPACT.re, ''));
+  const parts = text.split(SEP_RE).map(s => s.trim().replace(MARKER_COMPACT.re, ''));
   // 若回傳段數不符，且本批不只一段，則 fallback 改為逐段單獨翻譯，確保對齊
   if (parts.length !== texts.length) {
     await debugLog('warn', 'api', 'segment count mismatch — fallback to per-segment', {
@@ -682,7 +682,7 @@ export async function translateBatchStream(texts, settings, glossary, fixedGloss
   // 自動處理占位符斷裂——占位符在 segment 內部,DELIMITER 不會切到占位符中間。
   function tryEmitSegments() {
     if (!callbacks.onSegment) return;
-    const allParts = allText.split(DELIMITER);
+    const allParts = allText.split(SEP_RE);
     // allParts 最後一個 element 是「尚未完成的當前段落」(因為它後面沒 DELIMITER 接),先不 emit
     const numComplete = allParts.length - 1;
     while (segmentsEmitted < numComplete && segmentsEmitted < texts.length) {
@@ -755,7 +755,7 @@ export async function translateBatchStream(texts, settings, glossary, fixedGloss
 
   // 流結束後 emit 最後一段(allText 最後一個 split element 是 trailing segment)
   if (callbacks.onSegment) {
-    const allParts = allText.split(DELIMITER);
+    const allParts = allText.split(SEP_RE);
     while (segmentsEmitted < allParts.length && segmentsEmitted < texts.length) {
       const segText = allParts[segmentsEmitted].trim().replace(MARKER_COMPACT.re, '');
       callbacks.onSegment(segmentsEmitted, segText, false);
@@ -787,7 +787,7 @@ export async function translateBatchStream(texts, settings, glossary, fixedGloss
   }
 
   // 計算對齊後的譯文 array(跟 non-streaming 一致),hadMismatch 留給呼叫端決定如何處理
-  const translations = allText.split(DELIMITER).map(s => s.trim().replace(MARKER_COMPACT.re, ''));
+  const translations = allText.split(SEP_RE).map(s => s.trim().replace(MARKER_COMPACT.re, ''));
   const hadMismatch = translations.length !== texts.length;
 
   if (hadMismatch) {

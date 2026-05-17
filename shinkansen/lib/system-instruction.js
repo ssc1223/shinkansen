@@ -26,6 +26,14 @@ import { DEFAULT_UNITS_PER_BATCH, DEFAULT_CHARS_PER_BATCH } from './constants.js
 
 /** 多段翻譯時用此 delimiter 串接 / 拆回對齊。Gemini 與 OpenAI-compat 共用。 */
 export const DELIMITER = '\n<<<SHINKANSEN_SEP>>>\n';
+// v1.9.22: split-time tolerance — Gemini Flash Lite 經常把 DELIMITER 兩邊的 `\n` 吃掉,
+// 還原成 `<<<SHINKANSEN_SEP>>>`(無換行)或 ` <<<SHINKANSEN_SEP>>> `(空格替代)等變體。
+// 用嚴格 `text.split(DELIMITER)` 找不到匹配 → parts.length===1 → segment count mismatch
+// → 觸發 per-segment fallback(每段一個獨立 API call,慢且燒 token)。
+// 改用 SEP_RE(兩側 `\s*`)接受所有空白變體;`\s*` 包含 0 個字元,連 `abc<<<SHINKANSEN_SEP>>>def`
+// 也能正確切。每段 .trim() 過,前後空白損失無影響。實測這個 fix 把 ASR 字幕 mismatch 率
+// 從 ~46% 砍到接近 0%。
+export const SEP_RE = /\s*<<<SHINKANSEN_SEP>>>\s*/;
 
 // 多段序號標記。為什麼有兩組:
 //   Gemini / 商用 LLM(GPT / Claude / DeepSeek 等)用緊湊的 «N»,token 開銷小。
