@@ -99,6 +99,27 @@
   <h1>商店上架版本更新紀錄</h1>
   <p class="subtitle">給 Chrome Web Store 與 Firefox Add-ons 使用者的更新摘要，只列出對使用者直接有感的功能變更與重要修正。完整的版本歷史（含每一個 patch 與技術細節）請見 GitHub <a href="https://github.com/jimmysu0309/shinkansen/blob/main/CHANGELOG.md" target="_blank" rel="noopener">CHANGELOG.md</a>。</p>
 
+  <h2>v1.9.24 <span class="release-date">2026-05-18 上架</span></h2>
+  <p class="release-meta">相對於上一個商店版本 v1.9.8</p>
+
+  <p class="lead">這版以 YouTube 字幕大幅整修為主軸，並修補多類網站支援不足的問題，同時把「翻譯成」選單搬到工具列彈出視窗</p>
+
+  <ul>
+    <li><strong>「翻譯成」選單搬到工具列彈出視窗</strong>：切目標語言不用再進設定頁，點工具列圖示直接選；切了立刻生效，下次翻譯就是新語言（舊翻譯快取不會自動清，要重新翻譯舊頁面再點工具列圖示「清除快取」）。介面語言與翻譯目標仍維持各自獨立設定（例如「英文介面 + 翻成繁中」依然可以）</li>
+
+    <li><strong>YouTube 字幕大整修</strong>：若你的 YouTube 帳號設了「自動翻譯成中文（簡體）」偏好，Shinkansen 會自動切回原始口說語版本（英文、日文、法文 等），翻譯品質不再被 YouTube 雙重翻譯損耗污染；20 種非英文口說語（日、韓、法、德 等）的字幕翻譯品質改善；單句譯文限兩行，不再一次塞 4 行擠爆畫面；影片若已有原生繁中字幕（或多軌字幕中含繁中軌）直接讓 YouTube 顯示原生字幕，不啟動翻譯；拖進度條後字幕翻譯穩定度大幅提升；按 CC 按鈕關閉字幕時「翻譯中⋯」浮層立即消失</li>
+
+    <li><strong>多類網站支援不足修補</strong>：（1）用 web component 渲染的網站（例如 Datawrapper 互動圖表的標題、表格、註解）現在會被翻譯，先前整片留在原文；（2）中國技術新聞站文章內文穿插廣告卡片的結構之前導致約半數段落不翻，這版修補後實測一篇 17 段從 7 段翻譯提升到 17 段全段；（3）Goodreads 書評區、部分部落格與留言區用單一段落包多句的結構先前漏抓，這版可正常翻譯；（4）整篇放在 <code>&lt;pre&gt;</code> 標籤中的純文字頁面（例如 <code>asuswrt-merlin.net/changelog-3006</code>）原本被當程式碼跳過，這版會被翻譯</li>
+
+    <li><strong>Medium / Substack 等網站「500 系統出狀況」修復</strong>：過去開啟自動翻譯時這類網站偶爾會跳出「很抱歉，我們系統這邊出了點狀況」錯誤頁面，這版修復。連帶 Medium 留言區點「more」展開按鈕翻譯後維持底線樣式，點下可正常展開全文（過去按鈕整顆消失只留純文字「更多」）</li>
+
+    <li><strong>Gemini 3.1 Flash Lite 從預覽版轉正式版</strong>：Google 正式發佈這個模型，這版同步把預設模型 ID 從 <code>gemini-3.1-flash-lite-preview</code> 改成 <code>gemini-3.1-flash-lite</code>。既有使用者設定升級時自動轉換，無須手動操作</li>
+
+    <li><strong>自動翻譯網站名單 <code>www.</code> 前綴互通</strong>：「自動翻譯指定網站」名單輸入 <code>example.com</code> 也會自動套用到 <code>www.example.com</code>（反過來也成立），大小寫不影響比對</li>
+
+    <li><strong>匯入設定漏列 13 個欄位修復</strong>：過去匯入備份設定時，固定術語表、翻譯目標語言、介面語言、顯示模式、顯示貨幣、譯文強調色、Toast 透明度與位置、跳過繁中頁、停用更新通知、自訂預設組、YouTube 字幕設定等 13 個欄位會被默默丟棄，匯入後設定相當於沒匯到。這版修補後匯入的設定不會掉欄位，異常資料也會逐筆過濾</li>
+  </ul>
+
   <h2>v1.9.8 <span class="release-date">2026-05-12 上架</span></h2>
   <p class="release-meta">相對於上一個商店版本 v1.9.0</p>
 

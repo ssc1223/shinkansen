@@ -99,6 +99,27 @@
   <h1>Store Release Notes</h1>
   <p class="subtitle">Update summary for users on Chrome Web Store and Firefox Add-ons. Lists only changes that directly affect end users; bug fixes and refactors are omitted unless user-visible. The full version history (every patch and technical detail) lives in the GitHub <a href="https://github.com/jimmysu0309/shinkansen/blob/main/CHANGELOG.md" target="_blank" rel="noopener">CHANGELOG.md</a>.</p>
 
+  <h2>v1.9.24 <span class="release-date">Released 2026-05-18</span></h2>
+  <p class="release-meta">Compared with the previous store version v1.9.8</p>
+
+  <p class="lead">This release focuses on a major overhaul of YouTube subtitle translation, plus improved support for several categories of pages. It also moves the "Translate into" picker into the toolbar popup.</p>
+
+  <ul>
+    <li><strong>"Translate into" picker moved to the toolbar popup</strong>: switching target language no longer requires opening the settings page — pick it directly from the toolbar icon. The change takes effect immediately for the next translation (existing translation cache is not cleared automatically; to re-translate an old page, open the toolbar popup and use "Clear cache"). UI language and translation target remain independently configurable (e.g. "English UI + translate into Traditional Chinese" still works).</li>
+
+    <li><strong>Major YouTube subtitle overhaul</strong>: if your YouTube account has the "Auto-translate subtitles to Chinese (Simplified)" preference set, Shinkansen now switches back to the original spoken-language track (English, Japanese, French, etc.) on load, so translation quality is no longer degraded by double translation (YouTube translating first, then Shinkansen translating that); subtitle translation quality is improved for 20 non-English spoken languages (Japanese, Korean, French, German, etc.); single subtitle lines are capped to two rows, so a single utterance no longer balloons to four lines and covers the picture; videos with a native Traditional Chinese subtitle track (including videos with multiple subtitle tracks where one of them is Traditional Chinese) skip translation entirely and let YouTube show the native track; seeking on the progress bar is far more stable; the "Translating…" overlay disappears immediately when you press the CC button to hide subtitles.</li>
+
+    <li><strong>Improved support for previously unsupported pages</strong>: (1) pages that use web components to render content (for example, the titles, tables, and footnotes inside Datawrapper interactive charts) are now translated — previously these blocks stayed in the source language; (2) Chinese tech-news sites whose article body interleaves ad cards used to leave roughly half the paragraphs untranslated; this release fixes the structural misjudgment, taking one test article from 7 of 17 paragraphs translated to a full 17 of 17; (3) Goodreads reviews and some blog / comment sections that wrap several lines inside a single paragraph element were previously skipped by detection and are now translated normally; (4) plain-text pages wrapped entirely in a <code>&lt;pre&gt;</code> tag (such as <code>asuswrt-merlin.net/changelog-3006</code>) used to be treated as source code and skipped; this release recognizes them as plain text and translates them.</li>
+
+    <li><strong>Medium / Substack and similar sites: "500 Something went wrong" fix</strong>: previously, enabling auto-translate on these sites would occasionally surface a "Sorry, something went wrong on our side" error page; this release fixes the underlying race. Related fix: Medium comment "more" expand buttons keep their underline styling and remain clickable after translation (previously the button was replaced by the bare text "更多" with no underline and no click handler).</li>
+
+    <li><strong>Gemini 3.1 Flash Lite promoted from preview to stable</strong>: Google released this model out of preview, and this version updates the default model ID from <code>gemini-3.1-flash-lite-preview</code> to <code>gemini-3.1-flash-lite</code> accordingly. Existing user settings are migrated automatically on upgrade — no manual action required.</li>
+
+    <li><strong>Auto-translate site list treats <code>www.</code> prefix interchangeably</strong>: an entry of <code>example.com</code> in the "Auto-translate listed sites" list now also applies to <code>www.example.com</code> (and vice versa); the match is case-insensitive.</li>
+
+    <li><strong>Settings import dropped 13 fields — fixed</strong>: previously, importing a backed-up settings file silently dropped 13 fields — fixed glossary entries, translation target language, UI language, display mode, display currency, translation accent color, toast opacity and position, "skip already-Traditional pages" toggle, "disable update notice" toggle, custom translation presets, YouTube subtitle settings, and others — so settings imports effectively reset most preferences. This release imports those 13 fields as well, with per-field validation that filters out malformed values.</li>
+  </ul>
+
   <h2>v1.9.8 <span class="release-date">Released 2026-05-12</span></h2>
   <p class="release-meta">Compared with the previous store version v1.9.0</p>
 
