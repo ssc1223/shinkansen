@@ -823,7 +823,13 @@
   //
   // 三優先序（taken from caption track metadata, not text content):
   //   1) target lang 原生 track（任 kind,zh-TW target → zh-TW / zh-Hant / zh-HK)
-  //      → action='skip'，不啟動翻譯，讓 YouTube 自己顯示原生字幕
+  //      → activeTrack 已是該 native 軌(同 kind 且沒 translation)→ action='skip'
+  //         (YT 已在顯示原生中文,Shinkansen 不必動)
+  //      → activeTrack 不是該 native 軌(常見:影片同時有 native EN + native zh-Hant,
+  //         YT 帳號預設顯示 EN)→ action='switch-to-native' 主動切到 native 軌
+  //         單語:caller 切完 stopYouTubeTranslation(讓 YT 顯示原生中文)
+  //         雙語:caller 切完不 stop(留 Shinkansen 監聽,使用者後續手動切到非 target
+  //              軌時自動翻譯;_applyBilingualMode 在 captionLang=target 時不藏 native CC)
   //   2) 影片原始語 manual track（kind=''，creator-uploaded）→ action='switch'
   //   3) 影片原始語 ASR track（kind='asr'）→ action='switch'
   //   都沒命中 / activeTrack 已對得上目標 → action='noop'，留 YT 既有行為
@@ -853,17 +859,25 @@
   // tracks: [{ languageCode, kind: '' | 'asr', isTranslatable?, vssId?, name? }]
   // activeTrack: { languageCode, kind, translationLanguageCode } | null
   // targetLanguage: 'zh-TW' / 'zh-CN' / 'en' / ...
-  // 回傳： { action: 'skip' | 'switch' | 'noop', track?: <選中的 track>, reason }
+  // 回傳： { action: 'skip' | 'switch' | 'switch-to-native' | 'noop', track?: <選中的 track>, reason }
   function _chooseBestCaptionTrack(tracks, activeTrack, targetLanguage) {
     if (!Array.isArray(tracks) || tracks.length === 0) {
       return { action: 'noop', reason: 'no-tracks' };
     }
     const targetLangs = _resolveTargetNativeLangs(targetLanguage);
 
-    // P1: target lang 原生 track（任 kind)
+    // P1: target lang 原生 track（任 kind)。不分單語/雙語都優先切到 native target;
+    // bilingualMode 下使用者後續手動切到非 target 軌時 Shinkansen 才接管翻譯+overlay。
     const p1 = tracks.find(t => targetLangs.includes(t.languageCode));
     if (p1) {
-      return { action: 'skip', track: p1, reason: 'p1-target-lang-native' };
+      const activeIsP1 = activeTrack
+        && activeTrack.languageCode === p1.languageCode
+        && (activeTrack.kind || '') === (p1.kind || '')
+        && !activeTrack.translationLanguageCode;
+      if (activeIsP1) {
+        return { action: 'skip', track: p1, reason: 'p1-active-already-native' };
+      }
+      return { action: 'switch-to-native', track: p1, reason: 'p1-switch-to-native' };
     }
 
     // 從唯一 ASR track 動態推導影片原始語（一支影片 YT 只會產一條 ASR）
@@ -898,8 +912,8 @@
   SK._chooseBestCaptionTrack = _chooseBestCaptionTrack;
 
   // 包裹 pure function 的 side-effectful wrapper:dispatch 兩條 bridge event,
-  // 處理 retry / timeout，在 'switch' 命中時實際呼叫 setOption。
-  // 回傳：'skip' / 'switch' / 'noop'（由 caller 決定接續行為）。
+  // 處理 retry / timeout，在 'switch' / 'switch-to-native' 命中時實際呼叫 setOption。
+  // 回傳：'skip' / 'switch' / 'switch-to-native' / 'noop'（由 caller 決定接續行為）。
   async function _runCaptionTrackChooser(targetLanguage) {
     // Step 1:query player response bridge 拿 tracks + activeTrack
     const detail = await new Promise((resolve) => {
@@ -938,8 +952,8 @@
       trackCount:     detail.captionTracks?.length || 0,
     });
 
-    // Step 3:'switch' 命中 → dispatch setOption bridge + 等回應
-    if (decision.action === 'switch') {
+    // Step 3:'switch' 或 'switch-to-native' 命中 → dispatch setOption bridge + 等回應
+    if (decision.action === 'switch' || decision.action === 'switch-to-native') {
       await new Promise((resolve) => {
         const handler = (e) => {
           window.removeEventListener('shinkansen-yt-set-caption-track-result', handler);
@@ -1220,10 +1234,13 @@
     for (const seg of segs) {
       const txt = (seg.textContent || '').trim();
       if (!txt) continue;
-      if (RE_CJK.test(txt)) continue;
+      // 不能用 RE_CJK 過濾源文 — 那會誤殺 ja / ko / zh-Hans / 俄等非 zh-TW 但含 CJK chars 的源語。
+      // 「我們自己注入的 zh-TW 譯文」這個 case(toggle bilingual off→on 殘留)由
+      // captionMap lookup 自然處理:注入的 zh 文本 normText 不會 match 任何 captionMap key
+      // (key 是原文 normText)→ cached===undefined → continue,自動排除。
       const cached = YT.captionMap.get(normText(txt));
-      // 只在 captionMap 已知此 key(命中 - 不論 cached 為空或譯文)才把英文搬上 overlay,
-      // 避免把「尚未翻譯」的 segment 推上 overlay 造成只有英文沒中文的閃爍
+      // 只在 captionMap 已知此 key(命中 - 不論 cached 為空或譯文)才把源文搬上 overlay,
+      // 避免把「尚未翻譯」的 segment 推上 overlay 造成只有源文沒譯文的閃爍
       if (cached === undefined) continue;
       srcBits.push(txt);
       if (cached) transBits.push(cached);
@@ -1388,7 +1405,10 @@
     //   ASR + 純中文   :藏(中文 overlay 取代)
     //   non-ASR + 雙語  :藏(英文 + 中文都搬到 overlay 同一塊)
     //   non-ASR + 純中文:不藏(native segment 內已被替換成中文)
-    const shouldHideNative = bilingual || SK.YT.isAsr;
+    // 動態例外:caption 已是 target lang(skip-translate 路徑)→ overlay 不會有內容,
+    //         強制不藏 native CC,避免整片空白(OHAjc-ayhus 類:全 manual + active=target + bilingual)
+    const captionInTarget = _shouldSkipBecauseAlreadyInTarget();
+    const shouldHideNative = (bilingual || SK.YT.isAsr) && !captionInTarget;
     _setAsrHidingMode(shouldHideNative);
     // 確保 host 存在(ASR 在 captionsXHR 已 _ensureOverlay 過,non-ASR 雙語進入這條路徑首次需要)
     if (bilingual) _ensureOverlay();
@@ -3073,10 +3093,23 @@
     if (config.preferOriginalTrack !== false) {
       const { targetLanguage = 'zh-TW' } = await browser.storage.sync.get('targetLanguage');
       const action = await _runCaptionTrackChooser(targetLanguage);
-      // YT.active 仍為 true,activate 邏輯已開始 → 用 stopYouTubeTranslation 把監聽 / observer 清乾淨
-      if (action === 'skip') {
-        SK.sendLog('info', 'youtube', 'activation skipped (P1 target-lang-native track exists)');
-        stopYouTubeTranslation();
+      // skip / switch-to-native:YT 顯示 native target,Shinkansen 沒翻譯工作
+      // - 單語:stopYouTubeTranslation 清監聽(target 顯示就是終點)
+      // - 雙語:留 Shinkansen 監聽,等使用者手動切到非 target 軌 → XHR interceptor 抓到後
+      //        translateWindowFrom(line 586 自動觸發)→ captionMap 寫入 → _applyBilingualMode
+      //        在 caption 非 target 時自動藏 native + 顯示 overlay
+      //        順帶 fire 一次提示 toast 告訴使用者「要看雙語請從 CC 選單切」
+      if (action === 'skip' || action === 'switch-to-native') {
+        const isBilingual = config.bilingualMode === true;
+        SK.sendLog('info', 'youtube', `activation ${isBilingual ? 'kept-listening-for-bilingual' : 'skipped'} (${action})`, { action, isBilingual });
+        if (!isBilingual) {
+          stopYouTubeTranslation();
+        } else if (action === 'switch-to-native' && typeof SK.showToast === 'function') {
+          // 一次性 hint:讓使用者知道為什麼 bilingual 沒立刻啟動
+          SK.showToast('info', '已自動切到原生繁中字幕。如需雙語對照,請從 YT CC 選單手動切到要對照的源語(如英文或日文)', {
+            autoHideMs: 7000,
+          });
+        }
         return;
       }
       if (action === 'switch') {

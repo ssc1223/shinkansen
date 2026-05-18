@@ -71,12 +71,47 @@
       // v1.2.52: 清除持久化 log（測試前呼叫，避免舊資料干擾）
       forwardToBackground('CLEAR_PERSISTED_LOGS');
     } else if (action === 'GET_STATE') {
-      respond({
+      // YT 頁多附 yt 子物件(精簡版供「一鍵全看」),完整 raw / captionMap 內容仍走 GET_YT_DEBUG
+      const out = {
         ok: true,
         translated: STATE.translated,
         translating: STATE.translating,
         segmentCount: STATE.originalHTML.size,
-      });
+      };
+      if (SK.isYouTubePage?.() && SK.YT) {
+        out.yt = {
+          active:          SK.YT.active,
+          translating:     SK.YT.translating,
+          rawCount:        SK.YT.rawSegments?.length ?? 0,
+          captionMapSize:  SK.YT.captionMap?.size ?? 0,
+          captionLang:     SK.YT.captionLang,
+          isAsr:           SK.YT.isAsr,
+          displayCuesLen:  SK.YT.displayCues?.length ?? 0,
+          ytConfig:        SK.YT.config,
+        };
+      }
+      respond(out);
+    } else if (action === 'GET_STORAGE') {
+      // Debug Bridge:暴露 storage.sync 設定供除錯讀取
+      // (Chrome for Claude / 主世界 javascript_tool 拿不到 chrome.storage,需 isolated 端橋接)
+      const keys = (e.detail && e.detail.keys) || null;  // null = 全部 key
+      browser.storage.sync.get(keys)
+        .then((data) => respond({ ok: true, sync: data }))
+        .catch((err) => respond({ ok: false, error: err?.message || String(err) }));
+    } else if (action === 'YT_TRANSLATE') {
+      // Debug Bridge:觸發 YouTube 字幕翻譯(等同 Alt+S 在 YT 頁的行為)
+      if (!SK.isYouTubePage?.()) {
+        respond({ ok: false, error: 'not on YouTube page' });
+      } else {
+        respond({ ok: true, triggered: true });
+        SK.translateYouTubeSubtitles?.({ source: 'debug' }).catch((err) => {
+          SK.sendLog('warn', 'system', 'YT_TRANSLATE failed', { error: err?.message });
+        });
+      }
+    } else if (action === 'YT_STOP') {
+      // Debug Bridge:停掉 YouTube 字幕翻譯(乾淨重啟測試循環)
+      try { SK.stopYouTubeTranslation?.(); respond({ ok: true }); }
+      catch (err) { respond({ ok: false, error: err?.message || String(err) }); }
     } else if (action === 'RELOAD_EXTENSION') {
       // DEBUG: hot reload extension(讀磁碟新 code),sendResponse 同步先回再讓
       // background 重啟 SW；此 tab 的 content script 會變成 orphan，下次 navigate
