@@ -560,18 +560,24 @@
             if (stats) stats.hardExcludeTag = (stats.hardExcludeTag || 0) + 1;
             return NodeFilter.FILTER_REJECT;
           }
-          // (b) 語法高亮 <pre>:GitHub PrettyLights / hljs / prism / shiki 等用 <span>
+          // (b) 語法高亮 <pre>：GitHub PrettyLights / hljs / prism / shiki 等用 <span>
           //     做 token，結構是「<pre>{text + <span>}*</pre>」，沒有 <code> 包裹。
-          //     直接 element 子全是 <span>(且至少有一個)、無 <a>/<em>/<strong> 等
-          //     自然語言 inline → 視為 code。
-          //     不誤殺 Medium 留言用 <pre> 引用文字（那種通常含 <a> / <em>)。
-          let hasSpan = false;
+          //     直接 element 子是 ≥2 個 <span> 且無 <a>/<em>/<strong> 等自然語言
+          //     inline → 視為 code。
+          //
+          //     issue #50 fix：要求 ≥2 個 span。原規則「至少一個 span」會誤殺單一
+          //     span 包整段純文字的場景（asuswrt-merlin.net changelog 用
+          //     `<pre><span style="font-size:12px;">純文字</span></pre>` 控字級），
+          //     真語法高亮一定是每個 token 包 span，單 span 是純樣式 wrapper。
+          //
+          //     不誤殺 Medium 留言用 <pre> 引用文字（那種通常含 <a> / <em>）。
+          let spanCount = 0;
           let hasProseInline = false;
           for (const child of el.children) {
-            if (child.tagName === 'SPAN') hasSpan = true;
+            if (child.tagName === 'SPAN') spanCount++;
             else if (PROSE_INLINE_TAGS.has(child.tagName)) hasProseInline = true;
           }
-          if (hasSpan && !hasProseInline) {
+          if (spanCount >= 2 && !hasProseInline) {
             if (stats) stats.hardExcludeTag = (stats.hardExcludeTag || 0) + 1;
             return NodeFilter.FILTER_REJECT;
           }

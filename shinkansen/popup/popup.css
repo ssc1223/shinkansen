@@ -1,3 +1,9 @@
+:root {
+  /* 同 column 兄弟元件對齊基準寬（CLAUDE.md §1）——.display-mode-toggle + .row select
+     共用同一寬，所有 locale 內 toggle 自然寬都 ≤ 此值（zh-TW 139px / en 132px 量過）。 */
+  --popup-row-control-w: 140px;
+}
+
 body {
   width: 280px;
   margin: 0;
@@ -8,14 +14,14 @@ body {
 
 header {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
-  padding: 14px 16px 10px;
+  padding: 10px 16px;
   border-bottom: 1px solid #eee;
 }
 
 header h1 { font-size: 16px; margin: 0; display: flex; align-items: center; gap: 8px; }
-header h1 .page-title-icon { width: 22px; height: 22px; flex-shrink: 0; }
+header h1 .page-title-icon { width: 32px; height: 32px; flex-shrink: 0; }
 .version { font-size: 11px; color: #86868b; }
 
 main { padding: 14px 16px; }
@@ -65,7 +71,7 @@ button.secondary:hover { background: #f0f4ff; }
   border-radius: 6px;
   font-size: 12px;
   background: #fff;
-  max-width: 60%;
+  width: var(--popup-row-control-w);
 }
 
 .status {
@@ -117,12 +123,15 @@ button.link {
   color: #1d1d1f;
 }
 .display-mode-toggle {
-  display: inline-flex;
+  display: flex;
+  box-sizing: border-box;
+  width: var(--popup-row-control-w);
   border: 1px solid #d2d2d7;
   border-radius: 6px;
   overflow: hidden;
 }
 .mode-btn {
+  flex: 1;
   padding: 4px 10px;
   font-size: 12px;
   background: #fff;

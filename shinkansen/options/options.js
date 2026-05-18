@@ -1529,6 +1529,20 @@ function sanitizeImport(raw) {
     autoTranslateSlot:   { type: 'number', min: 1, max: 3, int: true }, // v1.6.13
     modelPricingOverrides: { type: 'object' }, // v1.6.14
     showProgressToast:   { type: 'boolean' }, // v1.6.8
+    // issue #48 fix：之前漏列導致匯入時這些 key 默默丟掉
+    targetLanguage:      { type: 'string', oneOf: TARGET_LANGUAGES },
+    uiLanguage:          { type: 'string', oneOf: UI_LANGUAGES },
+    displayMode:         { type: 'string', oneOf: ['single', 'dual'] },
+    displayCurrency:     { type: 'string', oneOf: ['USD', 'TWD'] },
+    translationMarkStyle:{ type: 'string', oneOf: ['tint', 'bar', 'dashed', 'none'] },
+    // dualAccentColor：'auto' / color token / #RRGGBB hex 大小寫不拘。
+    // 非法值 content script 端會 fallback 回 'auto'，此處只做型別檢查不嚴格 oneOf。
+    dualAccentColor:     { type: 'string' },
+    // UI range 10-100% → 儲存 0.1-1.0
+    toastOpacity:        { type: 'number', min: 0.1, max: 1 },
+    toastPosition:       { type: 'string', oneOf: ['bottom-right', 'bottom-left', 'top-right', 'top-left'] },
+    skipTraditionalChinesePage: { type: 'boolean' },
+    disableUpdateNotice: { type: 'boolean' },
   };
 
   for (const [key, rule] of Object.entries(topRules)) {
@@ -1685,6 +1699,108 @@ function sanitizeImport(raw) {
       }
     }
     if (Object.keys(drClean).length > 0) clean.domainRules = drClean;
+  }
+
+  // fixedGlossary 子物件：{ global: Array<{source,target}>, byDomain: { [domain]: Array<{source,target}> } }
+  // 結構性過濾——只保留 source/target 字串欄位，空 source+target 的 entry 丟掉，空陣列的 domain 丟掉
+  if (raw.fixedGlossary && typeof raw.fixedGlossary === 'object') {
+    const fg = raw.fixedGlossary;
+    const fgClean = {};
+    const sanitizeEntries = (arr) => {
+      if (!Array.isArray(arr)) return [];
+      const out = [];
+      for (const e of arr) {
+        if (!e || typeof e !== 'object') continue;
+        const source = typeof e.source === 'string' ? e.source : '';
+        const target = typeof e.target === 'string' ? e.target : '';
+        if (!source && !target) continue;
+        out.push({ source, target });
+      }
+      return out;
+    };
+    if (Array.isArray(fg.global)) {
+      fgClean.global = sanitizeEntries(fg.global);
+    }
+    if (fg.byDomain && typeof fg.byDomain === 'object' && !Array.isArray(fg.byDomain)) {
+      const byDomainClean = {};
+      for (const [domain, entries] of Object.entries(fg.byDomain)) {
+        if (typeof domain !== 'string' || !domain) continue;
+        const cleanEntries = sanitizeEntries(entries);
+        if (cleanEntries.length > 0) byDomainClean[domain] = cleanEntries;
+      }
+      fgClean.byDomain = byDomainClean;
+    }
+    if (Object.keys(fgClean).length > 0) clean.fixedGlossary = fgClean;
+  }
+
+  // issue #48 fix：translatePresets 陣列（三組翻譯快速鍵預設）
+  // 結構：[{ slot: 1|2|3, engine: 'gemini'|'google'|'openai-compat', model: string|null, label: string }]
+  // 整個陣列替換（不做 per-slot merge）——跟 getSettings 行為一致（非空 saved 完全覆蓋預設）。
+  // 來源檔可能少於 3 slot / slot 順序亂 / 缺欄位 → 過濾掉無效，合法 entry 保留。
+  if (Array.isArray(raw.translatePresets)) {
+    const cleanPresets = [];
+    for (const p of raw.translatePresets) {
+      if (!p || typeof p !== 'object') continue;
+      if (![1, 2, 3].includes(p.slot)) continue;
+      const engine = ['gemini', 'google', 'openai-compat'].includes(p.engine) ? p.engine : 'gemini';
+      // model 對 gemini 是字串（空 = inherit 全域），google/openai-compat 預期 null
+      let model = null;
+      if (typeof p.model === 'string') model = p.model;
+      else if (p.model === null) model = null;
+      const label = typeof p.label === 'string' ? p.label : '';
+      cleanPresets.push({ slot: p.slot, engine, model, label });
+    }
+    if (cleanPresets.length > 0) clean.translatePresets = cleanPresets;
+  }
+
+  // issue #48 fix：ytSubtitle 子物件（YouTube 字幕翻譯設定，14 個欄位）
+  if (raw.ytSubtitle && typeof raw.ytSubtitle === 'object') {
+    const yt = raw.ytSubtitle;
+    const ytClean = {};
+    const ytRules = {
+      autoTranslate:       { type: 'boolean' },
+      temperature:         { type: 'number', min: 0, max: 2 },
+      systemPrompt:        { type: 'string' },
+      windowSizeS:         { type: 'number', min: 10, max: 120 },
+      lookaheadS:          { type: 'number', min: 3, max: 30 },
+      debugToast:          { type: 'boolean' },
+      onTheFly:            { type: 'boolean' },
+      engine:              { type: 'string', oneOf: ['gemini', 'google', 'openai-compat'] },
+      model:               { type: 'string' }, // 空字串 = 與主模型相同
+      applyFixedGlossary:  { type: 'boolean' },
+      applyForbiddenTerms: { type: 'boolean' },
+      asrMode:             { type: 'string', oneOf: ['heuristic', 'progressive', 'llm'] },
+      bilingualMode:       { type: 'boolean' },
+      preferOriginalTrack: { type: 'boolean' },
+    };
+    for (const [key, rule] of Object.entries(ytRules)) {
+      if (!(key in yt)) continue;
+      const v = yt[key];
+      const fullKey = `ytSubtitle.${key}`;
+      if (typeof v !== rule.type) { warnings.push(_t('options.import.warningSkipType', { key: fullKey })); continue; }
+      if (rule.type === 'number' && !Number.isFinite(v)) { warnings.push(_t('options.import.warningSkipNum', { key: fullKey })); continue; }
+      if (rule.min !== undefined && v < rule.min) { warnings.push(_t('options.import.warningSkipMin', { key: fullKey, value: v, min: rule.min })); continue; }
+      if (rule.max !== undefined && v > rule.max) { warnings.push(_t('options.import.warningSkipMax', { key: fullKey, value: v, max: rule.max })); continue; }
+      if (rule.oneOf && !rule.oneOf.includes(v)) { warnings.push(_t('options.import.warningSkipOneOf', { key: fullKey, value: v })); continue; }
+      ytClean[key] = v;
+    }
+    // pricing 特殊處理：null（與主模型相同）或 { inputPerMTok, outputPerMTok }（欄位可為 null）
+    if ('pricing' in yt) {
+      if (yt.pricing === null) {
+        ytClean.pricing = null;
+      } else if (yt.pricing && typeof yt.pricing === 'object') {
+        const pr = yt.pricing;
+        const prClean = {};
+        for (const k of ['inputPerMTok', 'outputPerMTok']) {
+          if (!(k in pr)) continue;
+          const v = pr[k];
+          if (v === null) { prClean[k] = null; continue; }
+          if (typeof v === 'number' && Number.isFinite(v) && v >= 0) prClean[k] = v;
+        }
+        if (Object.keys(prClean).length > 0) ytClean.pricing = prClean;
+      }
+    }
+    if (Object.keys(ytClean).length > 0) clean.ytSubtitle = ytClean;
   }
 
   // v1.8.3: partialMode 子物件
