@@ -1665,10 +1665,6 @@
       handleTranslatePreset(2);
       return;
     }
-    if (msg?.type === 'TOGGLE_YT_BORDERLESS') {
-      SK.YT?.Borderless?.toggle();
-      return;
-    }
     if (msg?.type === 'TOGGLE_EDIT_MODE') {
       sendResponse(toggleEditMode());
       return true;

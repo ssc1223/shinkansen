@@ -6,6 +6,7 @@ import { getCachedRate, FALLBACK_USD_TWD_RATE } from '../lib/exchange-rate.js';
 import { RELEASE_HIGHLIGHTS } from '../lib/release-highlights.js';
 import { shouldShowWelcomeNotice } from '../lib/welcome-notice.js';
 import { isWorthNotifying } from '../lib/update-check.js';
+import { IS_MAS_BUILD } from '../lib/distribution.js';
 import { pickPopupSlot, presetsRequireGemini, TARGET_LANGUAGES, DEFAULT_SETTINGS } from '../lib/storage.js';
 
 // P2 (v1.8.60):i18n. lib/i18n.js 在 popup.html 內以普通 <script> 早於本 module 載入,
@@ -144,17 +145,31 @@ document.addEventListener('click', async (e) => {
 // v1.6.3: 用 document-level event delegation 處理 update banner 點擊，
 // 不依賴 init() async timing 也不靠 a-tag navigate 行為——任何時候 button 出現在
 // DOM 都能 click 觸發。click handler 內臨時讀 storage 拿 release URL，最穩固。
+//
+// Safari macOS 分支(路徑 A 半鍵更新):直接 navigate 到 .pkg 下載 URL,
+// 觸發瀏覽器下載(Developer ID 簽 + 公證的 pkg),省掉「開 release page → 找
+// asset 連結」兩步,使用者下載完雙擊 pkg 即可重裝。其他 platform 維持開
+// release page,讓使用者選要下載哪個 asset。
+// 偵測:safari-web-extension:// = Safari(macOS)。註:未來 iOS Safari 上架後
+// 同一 scheme 也會 match,但 iOS 不裝 .pkg,屆時需加 `os==='mac'` 守衛。
 document.addEventListener('click', async (e) => {
   if (!e.target.closest('#update-banner')) return;
   e.preventDefault();
   try {
     const { updateAvailable } = await browser.storage.local.get('updateAvailable');
-    // 三層 fallback：storage.releaseUrl > 用 version 組 tag URL > releases 索引頁
-    // 即使 storage 內缺 releaseUrl 或損壞也能跳到合理頁面
-    const url = updateAvailable?.releaseUrl
-      || (updateAvailable?.version
-        ? `https://github.com/jimmysu0309/shinkansen/releases/tag/v${updateAvailable.version}`
-        : 'https://github.com/jimmysu0309/shinkansen/releases');
+    const version = updateAvailable?.version;
+    const isSafari = browser.runtime.getURL('').startsWith('safari-web-extension://');
+    let url;
+    if (isSafari && version) {
+      url = `https://github.com/jimmysu0309/shinkansen/releases/download/v${version}/shinkansen-macos-v${version}.pkg`;
+    } else {
+      // 三層 fallback:storage.releaseUrl > 用 version 組 tag URL > releases 索引頁
+      // 即使 storage 內缺 releaseUrl 或損壞也能跳到合理頁面
+      url = updateAvailable?.releaseUrl
+        || (version
+          ? `https://github.com/jimmysu0309/shinkansen/releases/tag/v${version}`
+          : 'https://github.com/jimmysu0309/shinkansen/releases');
+    }
     await browser.tabs.create({ url });
     window.close();
   } catch (err) {
@@ -195,7 +210,10 @@ async function init() {
   } catch { /* 略 */ }
 
   // v1.6.1: 更新提示 — 有新版時顯示版本紅點 + banner（welcome 顯示時跳過）
-  if (!welcomeShown) {
+  // MAS build:整段跳過 — defense in depth,即使 storage 殘留舊 updateAvailable
+  // 也不錯顯 banner(checkForUpdate 已在 update-check.js 內 MAS gate,正常不會
+  // 寫入 storage,但若使用者從 Developer ID 切換到 MAS 安裝,storage 可能殘留)。
+  if (!welcomeShown && !IS_MAS_BUILD) {
     try {
       const { disableUpdateNotice } = await browser.storage.sync.get('disableUpdateNotice');
       if (disableUpdateNotice !== true) {

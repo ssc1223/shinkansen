@@ -547,8 +547,6 @@
     'options.yt.advanced.batch.windowHint': '每次送去翻譯的字幕涵蓋幾秒（預設 30 秒）。數字越大每次翻越多，但第一次等待時間也越長',
     'options.yt.advanced.batch.lookaheadLabel': '提前觸發秒數',
     'options.yt.advanced.batch.lookaheadHint': '在目前批次快用完前幾秒，提前翻好下一批（預設 10 秒）。建議不低於 5 秒',
-    'options.yt.advanced.borderless.summary': '進階：YouTube 無邊模式',
-    'options.yt.advanced.borderless.intro.html': '隱藏 YouTube 介面、讓影片填滿視窗、自動依影片長寬比調整視窗高度。預設未綁定快速鍵，可至 <a href="#" class="open-shortcuts-link" id="open-shortcuts-yt">chrome://extensions/shortcuts</a> 設定「切換 YouTube 無邊模式」',
 
     // ── options 動態錯誤訊息 ─────────────────────────────
     'options.import.warningSkipType': '{key}：型別錯誤，已略過',
@@ -1312,8 +1310,6 @@
     'options.yt.advanced.batch.windowHint': '每次发送去翻译的字幕涵盖几秒（默认 30 秒）。数字越大每次翻越多，但第一次等待时间也越长',
     'options.yt.advanced.batch.lookaheadLabel': '提前触发秒数',
     'options.yt.advanced.batch.lookaheadHint': '在目前批次快用完前几秒，提前翻好下一批（默认 10 秒）。建议不低于 5 秒',
-    'options.yt.advanced.borderless.summary': '高级：YouTube 无边模式',
-    'options.yt.advanced.borderless.intro.html': '隐藏 YouTube 界面、让视频填满窗口、自动依视频长宽比调整窗口高度。默认未绑定快捷键，可至 <a href="#" class="open-shortcuts-link" id="open-shortcuts-yt">chrome://extensions/shortcuts</a> 设置「切换 YouTube 无边模式」',
 
     // ── options 动态错误消息 ─────────────────────────────
     'options.import.warningSkipType': '{key}：类型错误，已略过',
@@ -2075,8 +2071,6 @@
     'options.yt.advanced.batch.windowHint': 'How many seconds of subtitles each translation batch covers (default 30 sec). Larger = more per batch but longer initial wait time',
     'options.yt.advanced.batch.lookaheadLabel': 'Lookahead trigger seconds',
     'options.yt.advanced.batch.lookaheadHint': 'How many seconds before the current batch runs out, the next batch is pre-translated (default 10 sec). Recommended at least 5 seconds',
-    'options.yt.advanced.borderless.summary': 'Advanced: YouTube borderless mode',
-    'options.yt.advanced.borderless.intro.html': 'Hides the YouTube interface, fills the window with the video, and auto-resizes window height by aspect ratio. No shortcut bound by default; set "Toggle YouTube borderless mode" at <a href="#" class="open-shortcuts-link" id="open-shortcuts-yt">chrome://extensions/shortcuts</a>',
 
     // ── options dynamic error messages ────────────────────
     'options.import.warningSkipType': '{key}: type error, skipped',
@@ -2838,8 +2832,6 @@
     'options.yt.advanced.batch.windowHint': '1 回の翻訳でカバーする字幕の秒数（デフォルト 30 秒）。数値が大きいほど 1 回で多く翻訳しますが、初回待機時間も長くなります',
     'options.yt.advanced.batch.lookaheadLabel': '事前トリガ秒数',
     'options.yt.advanced.batch.lookaheadHint': '現在のバッチを使い切る前の数秒で次のバッチを先に翻訳します（デフォルト 10 秒）。5 秒以上を推奨',
-    'options.yt.advanced.borderless.summary': '詳細：YouTube ボーダーレスモード',
-    'options.yt.advanced.borderless.intro.html': 'YouTube インターフェースを非表示にして動画をウィンドウ全体に表示し、動画のアスペクト比に応じてウィンドウ高さを自動調整します。デフォルトはショートカット未設定。<a href="#" class="open-shortcuts-link" id="open-shortcuts-yt">chrome://extensions/shortcuts</a> で「YouTube ボーダーレスモード切り替え」を設定できます',
 
     // ── options 動的エラーメッセージ ─────────────────────────────
     'options.import.warningSkipType': '{key}：型エラー、スキップしました',
@@ -3601,8 +3593,6 @@
     'options.yt.advanced.batch.windowHint': '한 번에 번역하는 자막의 커버 초 (기본 30초). 숫자가 클수록 한 번에 많이 번역하지만 첫 번째 대기 시간도 길어집니다',
     'options.yt.advanced.batch.lookaheadLabel': '미리 트리거 초',
     'options.yt.advanced.batch.lookaheadHint': '현재 배치가 거의 끝나기 몇 초 전에 다음 배치를 미리 번역합니다 (기본 10초). 5초 이상 권장',
-    'options.yt.advanced.borderless.summary': '고급: YouTube 보더리스 모드',
-    'options.yt.advanced.borderless.intro.html': 'YouTube 인터페이스를 숨기고 동영상이 창을 가득 채우도록 하며 동영상 종횡비에 따라 창 높이를 자동 조정합니다. 기본은 단축키 미할당; <a href="#" class="open-shortcuts-link" id="open-shortcuts-yt">chrome://extensions/shortcuts</a>에서 "YouTube 보더리스 모드 전환"을 설정할 수 있습니다',
 
     // ── options 동적 오류 메시지 ─────────────────────────────
     'options.import.warningSkipType': '{key}: 타입 오류, 건너뛰어짐',
@@ -4363,8 +4353,6 @@
     'options.yt.advanced.batch.windowHint': 'Cuántos segundos de subtítulos cubre cada envío a traducción (por defecto 30 s). Cuanto mayor, más se traduce de una vez, pero también es mayor la espera inicial',
     'options.yt.advanced.batch.lookaheadLabel': 'Anticipación (segundos)',
     'options.yt.advanced.batch.lookaheadHint': 'Cuántos segundos antes de que termine el lote actual se empieza a traducir el siguiente (por defecto 10 s). Se recomienda no bajar de 5 s',
-    'options.yt.advanced.borderless.summary': 'Avanzado: modo sin bordes de YouTube',
-    'options.yt.advanced.borderless.intro.html': 'Oculta la interfaz de YouTube, hace que el vídeo llene la ventana y ajusta automáticamente la altura según la relación de aspecto del vídeo. Sin atajo asignado por defecto; configúralo en <a href="#" class="open-shortcuts-link" id="open-shortcuts-yt">chrome://extensions/shortcuts</a> → "Alternar modo sin bordes de YouTube"',
 
     // ── options mensajes de error dinámicos ─────────────────────────────
     'options.import.warningSkipType': '{key}: error de tipo, omitido',
@@ -5125,8 +5113,6 @@
     'options.yt.advanced.batch.windowHint': 'Combien de secondes de sous-titres sont envoyées à la traduction à chaque fois (par défaut 30 s). Plus grand = plus traduit en une fois, mais aussi temps d\'attente initial plus long',
     'options.yt.advanced.batch.lookaheadLabel': 'Anticipation (secondes)',
     'options.yt.advanced.batch.lookaheadHint': 'Combien de secondes avant la fin du lot actuel le suivant est pré-traduit (par défaut 10 s). Pas en dessous de 5 s recommandé',
-    'options.yt.advanced.borderless.summary': 'Avancé : mode sans bordure YouTube',
-    'options.yt.advanced.borderless.intro.html': 'Masque l\'interface YouTube, fait remplir la fenêtre par la vidéo, ajuste automatiquement la hauteur selon le ratio d\'aspect de la vidéo. Aucun raccourci par défaut ; configurez « Basculer le mode sans bordure YouTube » dans <a href="#" class="open-shortcuts-link" id="open-shortcuts-yt">chrome://extensions/shortcuts</a>',
 
     // ── options messages d\'erreur dynamiques ─────────────────────────────
     'options.import.warningSkipType': '{key} : erreur de type, ignoré',
@@ -5887,8 +5873,6 @@
     'options.yt.advanced.batch.windowHint': 'Wie viele Sekunden Untertitel jeweils zur Übersetzung gesendet werden (Standard 30 Sek.). Größer = mehr pro Übersetzung, aber auch längere erste Wartezeit',
     'options.yt.advanced.batch.lookaheadLabel': 'Sekunden für Vorab-Auslösung',
     'options.yt.advanced.batch.lookaheadHint': 'Wie viele Sekunden vor Verbrauch des aktuellen Batches der nächste vorab übersetzt wird (Standard 10 Sek.). Nicht unter 5 Sek. empfohlen',
-    'options.yt.advanced.borderless.summary': 'Erweitert: YouTube-Randlos-Modus',
-    'options.yt.advanced.borderless.intro.html': 'Verbirgt die YouTube-Oberfläche, lässt das Video das Fenster ausfüllen und passt die Fensterhöhe automatisch an das Seitenverhältnis des Videos an. Standardmäßig kein Tastenkürzel zugeordnet; konfiguriere in <a href="#" class="open-shortcuts-link" id="open-shortcuts-yt">chrome://extensions/shortcuts</a> „YouTube-Randlos-Modus umschalten"',
 
     // ── options dynamische Fehlermeldungen ─────────────────────────────
     'options.import.warningSkipType': '{key}: Typfehler, übersprungen',

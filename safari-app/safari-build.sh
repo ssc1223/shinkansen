@@ -65,6 +65,27 @@ echo "==> Sync extension Resources..."
 mkdir -p "$EXTENSION_RESOURCES"
 rsync -a --delete shinkansen/ "$EXTENSION_RESOURCES/"
 
+# 1.5 MAS build override:strip update-check banner 整套路徑
+# 為什麼:Apple Review Guideline 2.3.10 不准 app 內引導使用者到 App Store 外
+# 下載 app;且同 Bundle ID(app.shinkansen.macos)使用者點 banner 載
+# Developer ID .pkg 雙擊會覆蓋 MAS 安裝,從此 MAS 不再自動更新。
+# 詳見 shinkansen/lib/distribution.js 註解。drift check(步驟 6)排除兩檔。
+# 兩檔分別給 ES module(popup / options / background)跟 content script 用,
+# 值必須同步。
+echo "==> Override distribution{,-cs}.js → IS_MAS_BUILD=true(strip update-check for MAS)..."
+cat > "$EXTENSION_RESOURCES/lib/distribution.js" <<'EOF'
+// distribution.js — MAS build override(由 safari-app/safari-build.sh 寫入,不要編輯)
+// 原檔見 shinkansen/lib/distribution.js,預設 false。
+export const IS_MAS_BUILD = true;
+EOF
+cat > "$EXTENSION_RESOURCES/lib/distribution-cs.js" <<'EOF'
+// distribution-cs.js — MAS build override(由 safari-app/safari-build.sh 寫入,不要編輯)
+// 原檔見 shinkansen/lib/distribution-cs.js,預設 false。值必跟 distribution.js 同步。
+if (window.__SK) {
+  window.__SK.IS_MAS_BUILD = true;
+}
+EOF
+
 # 2. 版本號同步進 pbxproj
 echo "==> Sync version to project.pbxproj..."
 sed -i '' -E "s/MARKETING_VERSION = [^;]+;/MARKETING_VERSION = ${VERSION};/g" "$PBXPROJ"
@@ -98,8 +119,11 @@ MAS_PKG="safari-app/shinkansen-macos-v${VERSION}-mas.pkg"
 mv "$BUILD_DIR/safari-export-mas/Shinkansen.pkg" "$MAS_PKG"
 
 # 6. Source drift forcing function
-echo "==> Source drift check..."
-DRIFT=$(diff -r --brief shinkansen/ "$EXTENSION_RESOURCES/" 2>&1 || true)
+# 排除 lib/distribution.js + lib/distribution-cs.js — MAS build 故意把它們
+# override 成 IS_MAS_BUILD=true,跟 shinkansen/ 原檔的 false 必定不同,
+# 這是預期 drift(見步驟 1.5)。
+echo "==> Source drift check(排除 lib/distribution*.js 預期 override)..."
+DRIFT=$(diff -r --brief shinkansen/ "$EXTENSION_RESOURCES/" 2>&1 | grep -vE "lib/distribution(-cs)?\.js" || true)
 if [ -n "$DRIFT" ]; then
   echo "ERROR: source drift between shinkansen/ and Resources/:" >&2
   echo "$DRIFT" >&2

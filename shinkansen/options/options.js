@@ -6,6 +6,7 @@ import { DEFAULT_SETTINGS, DEFAULT_SYSTEM_PROMPT, DEFAULT_GLOSSARY_PROMPT, DEFAU
 import { TIER_LIMITS } from '../lib/tier-limits.js';
 import { formatTokens, formatUSD, formatMoney, parseUserNum, buildUsageCsvFilename } from '../lib/format.js';
 import { isWorthNotifying } from '../lib/update-check.js'; // v1.6.5
+import { IS_MAS_BUILD } from '../lib/distribution.js';
 
 // 向下相容：舊程式碼大量使用 DEFAULTS，保留別名避免大範圍搜尋取代
 const DEFAULTS = DEFAULT_SETTINGS;
@@ -317,7 +318,9 @@ async function load() {
   //         （updateAvailable.releaseUrl undefined / race condition）保留 "#" 時，
   //         <a target="_blank"> 會 navigate 到 options.html# 跳出另一個設定頁。
   try {
-    const disableUpdateNotice = s.disableUpdateNotice === true;
+    // MAS build:不顯示 update banner(同 popup / content toast 守衛理由,
+    // 見 lib/distribution.js)。defense in depth — storage 殘留也不錯顯。
+    const disableUpdateNotice = s.disableUpdateNotice === true || IS_MAS_BUILD;
     if (!disableUpdateNotice) {
       const { updateAvailable } = await browser.storage.local.get('updateAvailable');
       const manifest = browser.runtime.getManifest();

@@ -18,6 +18,7 @@
 
 import { browser } from './compat.js';
 import { debugLog } from './logger.js';
+import { IS_MAS_BUILD } from './distribution.js';
 
 const GITHUB_RELEASES_URL =
   'https://api.github.com/repos/jimmysu0309/shinkansen/releases/latest';
@@ -113,6 +114,12 @@ function isManualInstall() {
  * @returns {Promise<{ checked: boolean, hasUpdate: boolean, version?: string, releaseUrl?: string, error?: string }>}
  */
 export async function checkForUpdate() {
+  // MAS build:整套 update-check 不執行 — Apple Review Guideline 2.3.10 不准
+  // 引導使用者到 App Store 外下載 app;且同 Bundle ID 下載 Developer ID .pkg
+  // 會覆蓋 MAS 安裝。詳見 lib/distribution.js 註解。
+  if (IS_MAS_BUILD) {
+    return { checked: false, hasUpdate: false, error: 'MAS build — skipped' };
+  }
   if (!isManualInstall()) {
     return { checked: false, hasUpdate: false, error: 'CWS install — skipped' };
   }

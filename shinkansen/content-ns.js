@@ -708,6 +708,12 @@ if (window.__shinkansen_loaded) {
 
   SK.maybeBuildUpdateNotice = async function maybeBuildUpdateNotice() {
     try {
+      // MAS build:不顯示 update notice toast(同 popup banner 守衛理由 — Apple
+      // Review Guideline 2.3.10 + 同 Bundle ID 覆蓋風險,見 lib/distribution.js)。
+      // defense in depth — checkForUpdate 已 gate,storage 正常不會有資料,但
+      // 從 Developer ID 切 MAS 的使用者可能殘留 storage。SK.IS_MAS_BUILD 由
+      // lib/distribution-cs.js 設(content-ns.js 之後注入)。
+      if (SK.IS_MAS_BUILD) return null;
       const { disableUpdateNotice } = await browser.storage.sync.get('disableUpdateNotice');
       if (disableUpdateNotice === true) return null;
       const { updateAvailable } = await browser.storage.local.get('updateAvailable');
