@@ -139,13 +139,17 @@
       margin: 0 auto 32px;
     }
     .btn-row {
-      display: flex;
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
       gap: 12px;
-      justify-content: center;
-      flex-wrap: wrap;
+      max-width: 600px;
+      margin: 0 auto;
     }
     .btn-download {
-      display: inline-block;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
       background: #2563eb;
       color: #fff;
       font-size: 1.05rem;
@@ -154,9 +158,9 @@
       border-radius: 10px;
       text-decoration: none;
       transition: background 0.2s;
-      min-width: 280px;
       text-align: center;
       box-sizing: border-box;
+      min-height: 74px;
     }
     .btn-download:hover { background: #1d4ed8; }
     .btn-download.secondary {
@@ -175,9 +179,9 @@
       margin-top: 3px;
     }
     @media (max-width: 600px) {
-      .btn-download {
-        width: 100%;
-        min-width: 0;
+      .btn-row {
+        grid-template-columns: 1fr;
+        max-width: none;
       }
     }
     .hero-sub {
@@ -383,6 +387,10 @@
           <span data-i18n="btn.amo.text">從 Firefox Add-ons 安裝</span>
           <span class="btn-version">v<!-- amo-version-start -->1.9.24<!-- amo-version-end --> · <span data-i18n="btn.amo.status">已上架</span></span>
         </a>
+        <a href="https://github.com/jimmysu0309/shinkansen/releases/download/v1.9.24/shinkansen-macos-v1.9.24.pkg" class="btn-download">
+          <span data-i18n="btn.safari.text">Safari 手動安裝</span>
+          <span class="btn-version">v1.9.24 · macOS</span>
+        </a>
         <a href="https://github.com/jimmysu0309/shinkansen/releases/download/v1.9.24/shinkansen-v1.9.24.zip" class="btn-download secondary">
           <span data-i18n="btn.github.text">GitHub 下載 beta 版手動安裝</span>
           <span class="btn-version">v1.9.24 · beta</span>
@@ -555,6 +563,7 @@
           'btn.cws.status': '已上架',
           'btn.amo.text': '從 Firefox Add-ons 安裝',
           'btn.amo.status': '已上架',
+          'btn.safari.text': 'Safari 手動安裝',
           'btn.github.text': 'GitHub 下載 beta 版手動安裝',
           'hero.sub': '開放原始碼 · <a href="https://github.com/jimmysu0309/shinkansen#readme">使用說明</a> · <a href="release-notes.html">更新紀錄</a> · <a href="https://github.com/jimmysu0309/shinkansen">GitHub</a>',
 
@@ -628,6 +637,7 @@
           'btn.cws.status': 'published',
           'btn.amo.text': 'Install from Firefox Add-ons',
           'btn.amo.status': 'published',
+          'btn.safari.text': 'Safari manual install',
           'btn.github.text': 'Manual install (beta from GitHub)',
           'hero.sub': 'Open source · <a href="https://github.com/jimmysu0309/shinkansen#readme">Documentation</a> · <a href="release-notes.en.html">Release notes</a> · <a href="https://github.com/jimmysu0309/shinkansen">GitHub</a>',
 
