@@ -52,7 +52,6 @@ test('8 dict 對應同 key 的 placeholder set 一致(翻譯保留 {name} 不變
     'popup.usage.value',             // {cost} {tokens}
     'popup.status.editMode',         // {count}
     'popup.status.cacheCleared',     // {count}
-    'toast.alreadyInTarget',         // {lang}
     'toast.translateProgress',       // {prefix} {done} {total}
     'options.gemini.cost.estimateGlossary.html',  // {count} {tok} {usd} {usdCache}
     'options.usage.pageInfo',        // {page} {total} {count}

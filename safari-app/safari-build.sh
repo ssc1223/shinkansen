@@ -30,7 +30,12 @@ PROJECT_FILE="$PROJECT_DIR/Shinkansen.xcodeproj"
 PBXPROJ="$PROJECT_FILE/project.pbxproj"
 EXTENSION_RESOURCES="$PROJECT_DIR/Shinkansen Extension/Resources"
 EXPORT_OPTS="safari-app/safari-export-options.plist"
-BUILD_DIR="safari-app/build"
+# v1.9.26: BUILD_DIR 改用 $TMPDIR(macOS /var/folders/.../T/)而非 safari-app/build。
+# 原因:repo 在 ~/Documents/(iCloud Drive 同步範圍)內,xcodebuild signed bundle 寫進
+# safari-app/build/ 後會被 iCloud fileprovider 接管成 root:wheel ownership,下次
+# build 連 sudo rm -rf 都不一定清得掉(SIP / fileprovider 競態)。$TMPDIR 在 iCloud
+# 同步範圍外,不會被接管。同根本 cause 的 JRead 專案已驗此修法。
+BUILD_DIR="${TMPDIR%/}/shinkansen-build"
 
 if [ ! -f "shinkansen/manifest.json" ]; then
   echo "ERROR: shinkansen/manifest.json not found." >&2

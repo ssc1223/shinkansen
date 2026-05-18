@@ -206,18 +206,6 @@
       </label>
     </section>
 
-    <section>
-      <h2 data-i18n="options.langDetect.heading">語言偵測</h2>
-      <label class="switch">
-        <input type="checkbox" id="skipTraditionalChinesePage" checked>
-        <!-- v1.8.61:label / hint 用 {lang} placeholder + JS 動態 render(同 target 切換 / UI 切換),
-             舊 dict key skipTraditional / skipTraditionalHint 廢除。實際 storage key 仍叫
-             skipTraditionalChinesePage(historical name,語意已是「整頁同 target 語言時跳過」)。 -->
-        <span id="skipTargetPageLabel">跳過繁體中文網頁</span>
-      </label>
-      <small class="muted" id="skipTargetPageHint">開啟時，若整頁文字以繁體中文為主，按翻譯會直接跳過。關閉後仍會逐段跳過繁體中文段落，只翻譯其他語言內容。例如 Gmail 等介面為某種語言但內容多為其他語言的網站，建議關閉此選項</small>
-    </section>
-
     <!-- v1.5.0: 雙語對照視覺標記 -->
     <section>
       <h2 data-i18n="options.dualMark.heading">雙語對照視覺標記</h2>

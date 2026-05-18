@@ -21,10 +21,11 @@
 
 兩部分綁一起,因為都跟 `safari-web-extension://` 通路的 update-check 行為相關。
 
-**Part 1:popup banner Safari 分支改直連 .pkg 下載 URL(路徑 A 半鍵更新)**
+~~**Part 1:popup banner Safari 分支改直連 .pkg 下載 URL(路徑 A 半鍵更新)**~~ — ✅ **SANITY 驗收完成(2026-05-18)**
 
-- **改動**:`popup/popup.js` update banner click handler 加 Safari 分支——`browser.runtime.getURL('')` startsWith `safari-web-extension://` 時 URL 從「release tag page」改為「直連 GitHub Release .pkg 下載 URL」(`releases/download/v${version}/shinkansen-macos-v${version}.pkg`)。Chrome / Firefox 維持原本三層 fallback 開 release page。
-- **動機**:macOS Safari 使用者沒有 CWS 自動更新,看到 banner 後原流程是「點 banner → 開 release page → 找 pkg asset → 下載」四步,改成「點 banner → 觸發瀏覽器下載 → 雙擊 pkg 重裝」省兩步。
+~~- **改動**:`popup/popup.js` update banner click handler 加 Safari 分支——`browser.runtime.getURL('')` startsWith `safari-web-extension://` 時 URL 從「release tag page」改為「直連 GitHub Release .pkg 下載 URL」(`releases/download/v${version}/shinkansen-macos-v${version}.pkg`)。Chrome / Firefox 維持原本三層 fallback 開 release page。~~
+~~- **動機**:macOS Safari 使用者沒有 CWS 自動更新,看到 banner 後原流程是「點 banner → 開 release page → 找 pkg asset → 下載」四步,改成「點 banner → 觸發瀏覽器下載 → 雙擊 pkg 重裝」省兩步。~~
+~~- **SANITY 驗收結果(2026-05-18 macOS Safari 26 真機 + v1.9.25 Developer ID `.pkg`)**:構造 `updateAvailable: {version: '1.10.0'}` 假 storage → popup banner 顯示「📦 有新版可下載 v1.10.0」✅ / 點 banner 新分頁 URL = `https://github.com/jimmysu0309/shinkansen/releases/download/v1.10.0/shinkansen-macos-v1.10.0.pkg`(直連 .pkg,非 release tag page)✅ / options 頁 reload 後也顯示 banner ✅ / 翻譯英文文章 toast 帶 update notice ✅。四項全綠,path A 邏輯在真機跑對。~~
 
 **Part 2:MAS build 編譯期 strip update-check 全套路徑**
 

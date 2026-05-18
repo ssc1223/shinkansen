@@ -35,9 +35,6 @@ test('toast: zh-CN target 走簡中 dict(含 placeholder)', async ({ context, lo
   const page = await context.newPage();
   expect(await loadAndQuery(page, localServer, 'zh-CN', 'toast.cancelling'))
     .toBe('正在取消翻译⋯');
-  // alreadyInTarget 帶 {lang} placeholder
-  expect(await loadAndQuery(page, localServer, 'zh-CN', 'toast.alreadyInTarget', { lang: '简体中文' }))
-    .toBe('此页面已是简体中文，无需翻译');
 });
 
 test('toast: en target 走英文 dict', async ({ context, localServer }) => {

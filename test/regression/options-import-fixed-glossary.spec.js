@@ -5,17 +5,18 @@
 // （含 fixedGlossary）但 import 走白名單過濾，結果整塊 fixedGlossary 被丟。使用者報告
 // 「網域專用區塊沒匯入」實際上 global 也沒匯入。
 //
-// 全面 audit：同樣被丟的還有 12 條——targetLanguage / uiLanguage / displayMode /
+// 全面 audit：同樣被丟的還有 11 條——targetLanguage / uiLanguage / displayMode /
 // displayCurrency / translationMarkStyle / dualAccentColor / toastOpacity / toastPosition /
-// skipTraditionalChinesePage / disableUpdateNotice / translatePresets / ytSubtitle。
-// 第 3 條 spec round-trip 全部 12 條，確保再也不會默默掉。
+// disableUpdateNotice / translatePresets / ytSubtitle。
+// 第 3 條 spec round-trip 全部 11 條，確保再也不會默默掉。
+// (v1.9.26: skipTraditionalChinesePage 移除,原 12 條變 11 條)
 //
 // SANITY 紀錄（已驗證）:
 //   1）把 options.js sanitizeImport() 內新增的 fixedGlossary 區塊整段註解掉，
 //     spec 1 + 2 fail(Expected fixedGlossary 含 byDomain;Received undefined）。
-//   2）把 sanitizeImport() topRules 新增的 10 條 scalar(targetLanguage / uiLanguage /
+//   2）把 sanitizeImport() topRules 新增的 9 條 scalar(targetLanguage / uiLanguage /
 //     displayMode / displayCurrency / translationMarkStyle / dualAccentColor /
-//     toastOpacity / toastPosition / skipTraditionalChinesePage / disableUpdateNotice)
+//     toastOpacity / toastPosition / disableUpdateNotice)
 //     全砍 + translatePresets / ytSubtitle 兩塊砍，spec 3 fail。
 //   還原 → 三條皆 pass。
 
@@ -182,7 +183,6 @@ test('匯入設定時 12 條 audit 漏掉的 key 必須全部 round-trip', async
     dualAccentColor: 'blue',
     toastOpacity: 0.5,
     toastPosition: 'top-left',
-    skipTraditionalChinesePage: false,
     disableUpdateNotice: true,
     // translatePresets 陣列
     translatePresets: [
@@ -234,7 +234,6 @@ test('匯入設定時 12 條 audit 漏掉的 key 必須全部 round-trip', async
   expect(stored.dualAccentColor).toBe('blue');
   expect(stored.toastOpacity).toBe(0.5);
   expect(stored.toastPosition).toBe('top-left');
-  expect(stored.skipTraditionalChinesePage).toBe(false);
   expect(stored.disableUpdateNotice).toBe(true);
 
   // translatePresets

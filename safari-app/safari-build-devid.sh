@@ -33,7 +33,9 @@ PROJECT_FILE="$PROJECT_DIR/Shinkansen.xcodeproj"
 PBXPROJ="$PROJECT_FILE/project.pbxproj"
 EXTENSION_RESOURCES="$PROJECT_DIR/Shinkansen Extension/Resources"
 EXPORT_OPTS_DEVID="safari-app/safari-export-options-developerid.plist"
-BUILD_DIR="safari-app/build"
+# v1.9.26: BUILD_DIR 改用 $TMPDIR 繞開 iCloud Drive fileprovider 接管成 root:wheel
+# 問題(詳見 safari-build.sh 同段註解)。
+BUILD_DIR="${TMPDIR%/}/shinkansen-build"
 NOTARY_PROFILE="shinkansen-notary"
 DEVID_INSTALLER_CERT="Developer ID Installer: Zhimin Su (PR6NG3PH45)"
 

@@ -588,10 +588,6 @@ export const DEFAULT_SETTINGS = {
   // 不建 DOM、不開 Shadow root、不發訊息（與單純調 opacity=0 不同——後者仍會渲染）。
   // 使用情境：使用者翻譯流量大、不在乎個別頁面進度，希望全靜音。
   showProgressToast: true,
-  // v1.0.21: 頁面層級繁體中文偵測開關。開啟時若整頁文字以繁中為主則跳過不翻譯；
-  // 關閉時不做頁面層級檢查（元素層級仍會個別跳過繁中段落）。
-  // Gmail 等介面語言為繁中但內容多為英文的網站，可關閉此選項。
-  skipTraditionalChinesePage: true,
   // v1.5.0: 顯示模式（'single' 覆蓋 / 'dual' 雙語對照），由 popup toggle 切換。
   // 'single' 沿用 v1.4 之前所有路徑，'dual' 走 content-inject.js 的 injectDual。
   displayMode: 'single',

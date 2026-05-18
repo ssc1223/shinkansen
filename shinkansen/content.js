@@ -784,26 +784,15 @@
       ? settings.targetLanguage : 'zh-TW';
     STATE.targetLanguage = TARGET;
 
-    // P1: 頁面層級「源語言已等於目標」偵測(原為「整頁繁中就跳過」,改成依 target 動態比對)。
-    // 設定 skipTraditionalChinesePage 沿用舊名,但實際語意是「整頁同 target 語言時跳過」。
-    {
-      const skipCheck = settings.skipTraditionalChinesePage === false;
-      if (!skipCheck) {
-        const contentRoot =
-          document.querySelector('article') ||
-          document.querySelector('main') ||
-          document.querySelector('[role="main"]') ||
-          document.body;
-        const pageSample = (contentRoot.innerText || '').slice(0, 2000);
-        if (pageSample.length > 20 && SK.isAlreadyInTarget(pageSample, TARGET)) {
-          // P2 (v1.8.60): toast 走 SK.t — target label 也由 dict 提供
-          const lang = SK.t(`lang.${TARGET}`, undefined, TARGET) || SK.t('lang.zh-TW', undefined, TARGET);
-          SK.showToast('error', SK.t('toast.alreadyInTarget', { lang }, TARGET), { autoHideMs: 3000 });
-          return;
-        }
-      }
-    }
-    SK.sendLog('info', 'translate', 'milestone:zh_check_done', { t: Date.now() - entryTime });
+    // v1.9.26:原「頁面層級整頁同 target skip」機制移除——`document.querySelector('article')`
+    // 第一個 sampling 在 SPA 多 article 站(X / Twitter)會被「先載入的繁中 article」或
+    // 「Shinkansen 上輪殘留譯文 DOM」誤導整頁 skip;且 X 自家繁中 UI 字串(「4 小時前」
+    // 等)混入 article container 會讓 detectTextLang trad 命中,簡中原文被誤判 zh-Hant
+    // fallback。整頁 skip 是早期 optimization,paragraph-level isCandidateText 已涵蓋
+    // 「逐段判 target lang 跳過」語意,移除整頁 skip 後 X 多 article SPA 場景簡中內容
+    // 可正常翻;對純繁中網頁 paragraph 全 skip 結果相同(只少跳一個 toast)。
+    // 對應移除:storage.skipTraditionalChinesePage / options.html#skipTraditionalChinesePage /
+    // options.js _renderLangDetectLabels / i18n options.langDetect.* + toast.alreadyInTarget。
 
     // v1.5.0: 讀顯示模式設定，寫進 STATE.translatedMode 鎖定本次翻譯用的模式。
     // 同一頁中途切模式不會即時生效（避免半翻半改），需重新觸發翻譯。
@@ -1440,23 +1429,7 @@
     const TARGET = (typeof settings.targetLanguage === 'string' && ['zh-TW','zh-CN','en','ja','ko','es','fr','de'].includes(settings.targetLanguage))
       ? settings.targetLanguage : 'zh-TW';
     STATE.targetLanguage = TARGET;
-    // P1: 頁面層級「源語言已等於目標」偵測,target-aware
-    {
-      const skipCheck = settings.skipTraditionalChinesePage === false;
-      if (!skipCheck) {
-        const contentRoot =
-          document.querySelector('article') ||
-          document.querySelector('main') ||
-          document.querySelector('[role="main"]') ||
-          document.body;
-        const pageSample = (contentRoot.innerText || '').slice(0, 2000);
-        if (pageSample.length > 20 && SK.isAlreadyInTarget(pageSample, TARGET)) {
-          const lang = SK.t(`lang.${TARGET}`, undefined, TARGET) || SK.t('lang.zh-TW', undefined, TARGET);
-          SK.showToast('error', SK.t('toast.alreadyInTarget', { lang }, TARGET), { autoHideMs: 3000 });
-          return;
-        }
-      }
-    }
+    // v1.9.26:整頁同 target skip 移除(同 Gemini 路徑,見上方註解)
 
     // v1.5.0: 顯示模式（與 Gemini 路徑相同邏輯）
     {

@@ -75,7 +75,6 @@
     'toast.detectGoogleDocs': '偵測到 Google Docs，正在開啟可翻譯的閱讀版⋯',
     'toast.cancelling': '正在取消翻譯⋯',
     'toast.offline': '目前處於離線狀態，無法翻譯。請確認網路連線後再試',
-    'toast.alreadyInTarget': '此頁面已是{lang}，不需翻譯',
     'toast.noContent': '找不到可翻譯的內容',
     'toast.glossaryBuilding': '建立術語表⋯',
     'toast.translateProgress': '{prefix}翻譯中⋯ {done} / {total}',
@@ -176,9 +175,6 @@
     'options.domain.autoTranslateSlotHint': '進入白名單網域時走哪一組預設（等同自動按下對應的快速鍵）',
 
     // ── options 語言偵測 ─────────────────────────────────
-    'options.langDetect.heading': '語言偵測',
-    'options.langDetect.skipInTarget': '跳過{lang}網頁',
-    'options.langDetect.skipInTargetHint': '開啟時，若整頁文字以{lang}為主，按翻譯會直接跳過。關閉後仍會逐段跳過{lang}段落，只翻譯其他語言內容。例如 Gmail 等介面為某種語言但內容多為其他語言的網站，建議關閉此選項',
 
     // ── options 雙語對照視覺標記 ────────────────────────
     'options.dualMark.heading': '雙語對照視覺標記',
@@ -838,7 +834,6 @@
     'toast.detectGoogleDocs': '检测到 Google Docs，正在打开可翻译的阅读版⋯',
     'toast.cancelling': '正在取消翻译⋯',
     'toast.offline': '目前处于离线状态，无法翻译。请确认网络连接后再试',
-    'toast.alreadyInTarget': '此页面已是{lang}，无需翻译',
     'toast.noContent': '找不到可翻译的内容',
     'toast.glossaryBuilding': '建立术语表⋯',
     'toast.translateProgress': '{prefix}翻译中⋯ {done} / {total}',
@@ -939,9 +934,6 @@
     'options.domain.autoTranslateSlotHint': '进入白名单域名时走哪一组预设（等同自动按下对应的快捷键）',
 
     // ── options 语言检测 ─────────────────────────────────
-    'options.langDetect.heading': '语言检测',
-    'options.langDetect.skipInTarget': '跳过{lang}网页',
-    'options.langDetect.skipInTargetHint': '开启时，若整页文字以{lang}为主，按翻译会直接跳过。关闭后仍会逐段跳过{lang}段落，只翻译其他语言内容。例如 Gmail 等界面为某种语言但内容多为其他语言的网站，建议关闭此选项',
 
     // ── options 双语对照视觉标记 ────────────────────────
     'options.dualMark.heading': '双语对照视觉标记',
@@ -1599,7 +1591,6 @@
     'toast.detectGoogleDocs': 'Google Docs detected, opening translatable reader view…',
     'toast.cancelling': 'Cancelling translation…',
     'toast.offline': 'You are offline, cannot translate. Please check your network and retry',
-    'toast.alreadyInTarget': 'This page is already in {lang}, translation not needed',
     'toast.noContent': 'No translatable content found',
     'toast.glossaryBuilding': 'Building glossary…',
     'toast.translateProgress': '{prefix}Translating… {done} / {total}',
@@ -1700,9 +1691,6 @@
     'options.domain.autoTranslateSlotHint': 'Which preset to use when entering whitelisted domains (equivalent to pressing the corresponding shortcut)',
 
     // ── options language detection ───────────────────────
-    'options.langDetect.heading': 'Language detection',
-    'options.langDetect.skipInTarget': 'Skip {lang} pages',
-    'options.langDetect.skipInTargetHint': 'When enabled, if a page is mostly {lang}, pressing translate skips it. When disabled, {lang} paragraphs are still skipped per-segment, only other-language text is translated. For sites where the UI is one language but content is mostly another (e.g. Gmail), disable this option',
 
     // ── options bilingual visual marks ───────────────────
     'options.dualMark.heading': 'Bilingual visual marks',
@@ -2360,7 +2348,6 @@
     'toast.detectGoogleDocs': 'Google Docs を検出しました。翻訳可能なリーダー版を開いています⋯',
     'toast.cancelling': '翻訳をキャンセル中⋯',
     'toast.offline': '現在オフラインのため翻訳できません。ネットワーク接続を確認してください',
-    'toast.alreadyInTarget': 'このページは既に{lang}のため、翻訳は不要です',
     'toast.noContent': '翻訳可能なコンテンツが見つかりません',
     'toast.glossaryBuilding': '用語集を作成中⋯',
     'toast.translateProgress': '{prefix}翻訳中⋯ {done} / {total}',
@@ -2461,9 +2448,6 @@
     'options.domain.autoTranslateSlotHint': 'ホワイトリストドメインに入る際に使用するプリセット（対応するショートカットを自動で押すのと同等）',
 
     // ── options 言語検出 ─────────────────────────────────
-    'options.langDetect.heading': '言語検出',
-    'options.langDetect.skipInTarget': '{lang}ページをスキップ',
-    'options.langDetect.skipInTargetHint': '有効時、ページ全体が主に{lang}の場合、翻訳ボタンを押しても直接スキップします。無効化しても{lang}の段落は段落単位でスキップされ、他言語のコンテンツのみ翻訳されます。Gmail などインターフェースが特定言語で内容が他言語のサイトでは無効化を推奨',
 
     // ── options 対訳表示マーカー ────────────────────────
     'options.dualMark.heading': '対訳表示の視覚マーカー',
@@ -3121,7 +3105,6 @@
     'toast.detectGoogleDocs': 'Google Docs 감지됨, 번역 가능한 리더 버전 여는 중⋯',
     'toast.cancelling': '번역 취소 중⋯',
     'toast.offline': '현재 오프라인 상태로 번역할 수 없습니다. 네트워크 연결을 확인하세요',
-    'toast.alreadyInTarget': '이 페이지는 이미 {lang}이므로 번역이 필요하지 않습니다',
     'toast.noContent': '번역 가능한 콘텐츠를 찾을 수 없음',
     'toast.glossaryBuilding': '용어집 작성 중⋯',
     'toast.translateProgress': '{prefix}번역 중⋯ {done} / {total}',
@@ -3222,9 +3205,6 @@
     'options.domain.autoTranslateSlotHint': '화이트리스트 도메인에 진입할 때 사용할 프리셋(대응하는 단축키를 자동으로 누르는 것과 동일)',
 
     // ── options 언어 감지 ─────────────────────────────
-    'options.langDetect.heading': '언어 감지',
-    'options.langDetect.skipInTarget': '{lang} 페이지 건너뛰기',
-    'options.langDetect.skipInTargetHint': '활성화 시 페이지 텍스트 전체가 주로 {lang}이면 번역 버튼을 눌러도 직접 건너뜁니다. 비활성화 후에도 {lang} 단락은 단락 단위로 건너뛰며, 다른 언어 콘텐츠만 번역합니다. Gmail 등 인터페이스가 특정 언어이고 콘텐츠가 다른 언어인 사이트는 비활성화 권장',
 
     // ── options 대역 표시 시각 마커 ────────────────────────
     'options.dualMark.heading': '대역 표시 시각 마커',
@@ -3881,7 +3861,6 @@
     'toast.detectGoogleDocs': 'Google Docs detectado, abriendo versión de lector traducible⋯',
     'toast.cancelling': 'Cancelando traducción⋯',
     'toast.offline': 'Sin conexión, no se puede traducir. Comprueba tu red e inténtalo de nuevo',
-    'toast.alreadyInTarget': 'Esta página ya está en {lang}, no necesita traducción',
     'toast.noContent': 'No se encontró contenido traducible',
     'toast.glossaryBuilding': 'Generando glosario⋯',
     'toast.translateProgress': '{prefix}Traduciendo⋯ {done} / {total}',
@@ -3982,9 +3961,6 @@
     'options.domain.autoTranslateSlotHint': 'Qué preajuste se usa al entrar en un dominio de la lista blanca (equivale a pulsar automáticamente el atajo correspondiente)',
 
     // ── options detección de idioma ─────────────────────────────
-    'options.langDetect.heading': 'Detección de idioma',
-    'options.langDetect.skipInTarget': 'Saltar páginas en {lang}',
-    'options.langDetect.skipInTargetHint': 'Si está activado, cuando la página esté principalmente en {lang}, al pulsar Traducir se saltará directamente. Si está desactivado, los párrafos en {lang} se siguen saltando segmento a segmento y solo se traducen los de otros idiomas. Recomendado desactivar para sitios cuya interfaz está en un idioma pero cuyo contenido es mayoritariamente otro idioma (Gmail, etc.)',
 
     // ── options marca visual del modo bilingüe ────────────────────────
     'options.dualMark.heading': 'Marca visual del modo bilingüe',
@@ -4641,7 +4617,6 @@
     'toast.detectGoogleDocs': 'Google Docs détecté, ouverture de la version lecteur traduisible⋯',
     'toast.cancelling': 'Annulation de la traduction⋯',
     'toast.offline': 'Hors ligne, traduction impossible. Vérifiez votre connexion réseau et réessayez',
-    'toast.alreadyInTarget': 'Cette page est déjà en {lang}, traduction inutile',
     'toast.noContent': 'Aucun contenu traduisible trouvé',
     'toast.glossaryBuilding': 'Construction du glossaire⋯',
     'toast.translateProgress': '{prefix}Traduction⋯ {done} / {total}',
@@ -4742,9 +4717,6 @@
     'options.domain.autoTranslateSlotHint': 'Quel préréglage est utilisé en entrant sur un domaine de la liste blanche (équivaut à appuyer automatiquement sur le raccourci correspondant)',
 
     // ── options détection de langue ─────────────────────────────
-    'options.langDetect.heading': 'Détection de langue',
-    'options.langDetect.skipInTarget': 'Ignorer les pages en {lang}',
-    'options.langDetect.skipInTargetHint': 'Si activé, lorsque le texte de la page est principalement en {lang}, appuyer sur Traduire passera directement. Si désactivé, les paragraphes en {lang} sont quand même ignorés segment par segment, seul le contenu d\'autres langues est traduit. Recommandé de désactiver pour les sites comme Gmail dont l\'interface est dans une langue mais le contenu majoritairement dans une autre',
 
     // ── options marqueur visuel du mode bilingue ────────────────────────
     'options.dualMark.heading': 'Marqueur visuel du mode bilingue',
@@ -5401,7 +5373,6 @@
     'toast.detectGoogleDocs': 'Google Docs erkannt, übersetzbare Reader-Version wird geöffnet⋯',
     'toast.cancelling': 'Übersetzung wird abgebrochen⋯',
     'toast.offline': 'Derzeit offline, Übersetzung nicht möglich. Bitte Netzwerkverbindung prüfen und erneut versuchen',
-    'toast.alreadyInTarget': 'Diese Seite ist bereits auf {lang}, keine Übersetzung nötig',
     'toast.noContent': 'Kein übersetzbarer Inhalt gefunden',
     'toast.glossaryBuilding': 'Glossar wird erstellt⋯',
     'toast.translateProgress': '{prefix}Übersetze⋯ {done} / {total}',
@@ -5502,9 +5473,6 @@
     'options.domain.autoTranslateSlotHint': 'Welche Voreinstellung beim Betreten einer Whitelist-Domain verwendet wird (entspricht dem automatischen Drücken des entsprechenden Tastenkürzels)',
 
     // ── options Spracherkennung ─────────────────────────────
-    'options.langDetect.heading': 'Spracherkennung',
-    'options.langDetect.skipInTarget': 'Seiten in {lang} überspringen',
-    'options.langDetect.skipInTargetHint': 'Wenn aktiviert: Wenn der Seitentext überwiegend in {lang} ist, überspringt das Drücken von Übersetzen direkt. Bei deaktiviertem Zustand werden {lang}-Absätze trotzdem absatzweise übersprungen, nur Inhalte anderer Sprachen werden übersetzt. Empfohlen für Sites wie Gmail, deren Oberfläche in einer Sprache, deren Inhalt aber überwiegend in einer anderen Sprache ist',
 
     // ── options Visuelle Markierung des zweisprachigen Modus ────────────────────────
     'options.dualMark.heading': 'Visuelle Markierung des zweisprachigen Modus',

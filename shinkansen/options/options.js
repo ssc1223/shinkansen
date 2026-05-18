@@ -164,7 +164,6 @@ async function load() {
   $('showProgressToast').checked = s.showProgressToast !== false;
 
   // v1.0.21: 頁面層級繁中偵測開關
-  $('skipTraditionalChinesePage').checked = s.skipTraditionalChinesePage !== false;
 
   // v1.5.0: 雙語對照視覺標記
   const validMarks = ['tint', 'bar', 'dashed', 'none'];
@@ -367,8 +366,6 @@ async function load() {
     // picker.value 還沒從 storage sync(走 navigator.language 推 auto),Jimmy 機器是
     // 繁中環境就拿到繁中,即使 stored uiLanguage='en' 也無效。picker.value sync 後重 render 一次。
     updateYtPromptCostHint();
-    // v1.8.61:語言偵測 label / hint 動態 render
-    _renderLangDetectLabels();
     I18N.subscribeUiLanguageChange((newUi /* , newPref */) => {
       I18N.applyI18n(document, newUi);
       // 動態 dropdown(refreshSlotDropdownLabels)用 _t() 取 prefix,UI 語系切換要重組
@@ -383,8 +380,6 @@ async function load() {
       // v1.8.61:字幕 prompt token 開銷 hint 是純動態 _t() 計算,applyI18n 不碰,
       // 主動 reapply 才會看到新語言的 dict 字串
       updateYtPromptCostHint();
-      // v1.8.61:語言偵測 label / hint 跟著 UI 語系重 render
-      _renderLangDetectLabels();
     });
   }
 }
@@ -564,20 +559,6 @@ function _renderToastOpacityLabel(value) {
   const wrap = document.getElementById('toastOpacityLabelWrap');
   if (!wrap) return;
   wrap.textContent = _t('options.toast.opacity', { value });
-}
-
-// v1.8.61:語言偵測 toggle 的 label / hint 是「跳過{lang}網頁」這類動態字串。
-// {lang} 從 lang.${TARGET} dict 動態注入(共 8 個 target 對應的 native name)。
-// v1.9.16:呼叫點從「targetLanguage picker change」改為 storage.onChanged listener,
-// 因為 picker 搬到 popup;當前 target 從 module-level _currentTargetLang 讀。
-function _renderLangDetectLabels() {
-  const labelEl = document.getElementById('skipTargetPageLabel');
-  const hintEl = document.getElementById('skipTargetPageHint');
-  if (!labelEl && !hintEl) return;
-  const tl = _currentTargetLang;
-  const lang = _t(`lang.${tl}`);
-  if (labelEl) labelEl.textContent = _t('options.langDetect.skipInTarget', { lang });
-  if (hintEl)  hintEl.textContent  = _t('options.langDetect.skipInTargetHint', { lang });
 }
 
 // v1.8.61:「金額顯示幣值」section 只在繁中 UI 顯示。
@@ -870,7 +851,6 @@ async function _saveImpl() {
     // v1.8.41：金額顯示幣值
     displayCurrency: getSelectedCurrency(),
     // v1.0.21: 頁面層級繁中偵測開關
-    skipTraditionalChinesePage: $('skipTraditionalChinesePage').checked,
     // v1.2.11: YouTube 字幕設定
     ytSubtitle: {
       engine: ($('ytEngine')?.value || 'gemini'),  // v1.4.0
@@ -1106,7 +1086,6 @@ browser.storage.onChanged.addListener((changes, area) => {
   if (nv === _currentTargetLang) return;
   _currentTargetLang = nv;
   updateAllPromptTargetHints();
-  _renderLangDetectLabels();
   // 禁用詞清單依 target 重對:目前內容 == DEFAULT_FORBIDDEN_TERMS(視為未客製)
   // 切到非 zh-TW → 清空(en/zh-CN 不需要禁用中國用語);切到 zh-TW → 還原預設。
   // 已客製化(內容跟 DEFAULT 不同)不動,保留使用者手動編輯結果。
@@ -1136,8 +1115,6 @@ $('uiLanguage')?.addEventListener('change', async () => {
     _renderToastOpacityLabel($('toastOpacity')?.value || 70);
     // v1.8.61:字幕 prompt token 開銷 hint 是純動態 _t() 計算,主動 reapply
     updateYtPromptCostHint();
-    // v1.8.61:語言偵測 label / hint 跟著 UI 語系重 render
-    _renderLangDetectLabels();
   }
 });
 
@@ -1544,7 +1521,6 @@ function sanitizeImport(raw) {
     // UI range 10-100% → 儲存 0.1-1.0
     toastOpacity:        { type: 'number', min: 0.1, max: 1 },
     toastPosition:       { type: 'string', oneOf: ['bottom-right', 'bottom-left', 'top-right', 'top-left'] },
-    skipTraditionalChinesePage: { type: 'boolean' },
     disableUpdateNotice: { type: 'boolean' },
   };
 
