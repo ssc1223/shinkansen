@@ -82,6 +82,10 @@ if (window.__shinkansen_loaded) {
     // 修法:inject 完成同步把 originalText → savedHTML 寫進此 Map;SPA observer rescan 時
     // 用此 Map 預檢 newUnits,命中就 reuse 既有譯文 inject 進新 element,0 API + 譯文一致。
     translatedHTMLByText: new Map(),
+    // v1.9.27 Layer A1: nodeValue mutate backup。framework-managed element 走
+    // nodeValue mutate path 後,記錄每個 mutated text node 的 original value,
+    // restorePage 還原時逐個寫回。Map<el, [{node, originalValue}]>。
+    nodeValueMutateBackup: new Map(),
     // v1.0.23: 續翻模式
     stickyTranslate: false,
     // v1.4.12: 記錄本次翻譯使用的 preset slot（1/2/3），供 SPA 導航續翻 + 跨 tab sticky 用。
@@ -374,6 +378,26 @@ if (window.__shinkansen_loaded) {
   // 表示「使用者停手 1s 內 fire,連續滑也每 2s fire」,batch 仍有合併機會不會退化成
   // 每 mutation 一個 API call。
   SK.SPA_OBSERVER_MAX_WAIT_MS = 2000;
+
+  // v1.9.27 Layer 13:per-host fast profile 機制(預設關)
+  // 兩次嘗試都沒救 Finding 3 X 串尾 stall(SPEC-PRIVATE §25.20.5 + §25.20.9):
+  //   1. debounce 250/maxWait 500 → 連續 mutation 各 fire 迷你 batch,toast 18s 體感差
+  //   2. debounce 1000/maxWait 500 → over-fire 沒發生但 stall 沒解(2/2 runs sy=10465 仍 100%)
+  // Root cause 不在 timing,在 detect 路徑(SPA observer 第一輪 mount 後沒抓到該 tweet,
+  // 後續 rescan 補但 > 3s window)。正解需 IntersectionObserver rootMargin pre-scan(下輪做)。
+  // 架構保留(常數 + getObserverTiming),FAST_HOSTS 暫空。
+  SK.SPA_OBSERVER_FAST_DEBOUNCE_MS = SK.SPA_OBSERVER_DEBOUNCE_MS;
+  SK.SPA_OBSERVER_FAST_MAX_WAIT_MS = 500;
+  SK.SPA_OBSERVER_FAST_HOSTS = [];  // 暫空,兩次嘗試都無效,留架構供未來 IntersectionObserver 路線用
+  // 子域名(如 www.x.com / m.reddit.com)由 endsWith('.' + host) 攔截
+  SK.getObserverTiming = function getObserverTiming(hostnameOverride) {
+    const host = (hostnameOverride ?? location.hostname ?? '').toLowerCase();
+    if (!host) return { debounce: SK.SPA_OBSERVER_DEBOUNCE_MS, maxWait: SK.SPA_OBSERVER_MAX_WAIT_MS, host: '', profile: 'default' };
+    const isFast = SK.SPA_OBSERVER_FAST_HOSTS.some(h => host === h || host.endsWith('.' + h));
+    return isFast
+      ? { debounce: SK.SPA_OBSERVER_FAST_DEBOUNCE_MS, maxWait: SK.SPA_OBSERVER_FAST_MAX_WAIT_MS, host, profile: 'fast' }
+      : { debounce: SK.SPA_OBSERVER_DEBOUNCE_MS, maxWait: SK.SPA_OBSERVER_MAX_WAIT_MS, host, profile: 'default' };
+  };
   SK.SPA_OBSERVER_MAX_RESCANS = Infinity;
   SK.SPA_OBSERVER_MAX_UNITS = 50;
   SK.SPA_NAV_SETTLE_MS = 800;
@@ -657,6 +681,48 @@ if (window.__shinkansen_loaded) {
       if (t.nodeValue.length > main.nodeValue.length) main = t;
     }
     return main;
+  };
+
+  // v1.9.27: 偵測 element 是否被 framework(React / Vue)直接管理。
+  // 用途:inject 時若 element 被 framework 接管,改子樹會破 framework 的 DOM
+  // node ref(典型 React fiber),導致使用者後續點按鈕(X 推文「顯示更多」/
+  // Reddit/Threads/Medium 留言「展開」)後 framework click handler 失效
+  // 或 silent bail out(facebook/react#11538 同類)。
+  //
+  // 對應 facebook/react#11538 系列 issue:framework 認知的 DOM ref 在外部
+  // mutation 後變孤兒,framework reconcile 失敗。修法是「不動 element 子樹」=
+  // 退回 dual mode(sibling 加 wrapper),由 SK.injectTranslation 入口分派。
+  //
+  // 偵測必須走 main world bridge:Chrome content script isolated world 看不到
+  // main world expando 屬性(`__reactFiber$xxx` / `__vue_app__` 等),
+  // `for(k in el)` 對 isolated world 直接 reactKeysFound=0(Chrome for Claude
+  // 2026-05-19 在真實 X 推文上 probe 驗證)。修法:content-fw-detect-main.js
+  // 跑在 world: MAIN,監聽 CustomEvent bridge,sync dispatch detect 結果(primitive
+  // string,跨 world clone safe)。
+  //
+  // 結構性通則(§8):描述「element 被前端 framework instance 直接接管」這個
+  // runtime 特徵,不綁站點 / class / hostname。X / Threads / Reddit / Medium
+  // 留言 / Mastodon CW 等所有 React-based SPA 上的同類問題都套用。
+  const _fwQueryCache = new WeakMap();
+  SK.isFrameworkManaged = function isFrameworkManaged(el) {
+    if (!el || el.nodeType !== Node.ELEMENT_NODE) return false;
+    if (_fwQueryCache.has(el)) return _fwQueryCache.get(el);
+    let result = false;
+    const handler = (e) => {
+      const r = e?.detail?.result;
+      if (r === 'react' || r === 'vue') result = true;
+    };
+    el.addEventListener('shinkansen-fw-detect-response', handler, { once: true });
+    try {
+      el.dispatchEvent(new CustomEvent('shinkansen-fw-detect-request', { bubbles: true }));
+    } catch (_) {
+      // dispatch 失敗(極罕見)→ 視為非 framework-managed
+    } finally {
+      // once: true 已自動 remove,這層只是保險(處理 dispatch 拋例外的情境)
+      el.removeEventListener('shinkansen-fw-detect-response', handler);
+    }
+    _fwQueryCache.set(el, result);
+    return result;
   };
 
   // v1.6.5: 「今日」鍵字串 'YYYY-MM-DD'——**本地時區**而非 UTC。鏡像 lib/update-check.js

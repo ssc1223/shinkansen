@@ -367,6 +367,82 @@
       return;
     }
 
+    // v1.9.27: 即便全局 mode 是 single,個別 framework-managed element 也 fall back
+    // 到 dual inject(append sibling wrapper,不動原 element 子樹),保 framework
+    // 的 DOM node ref 完整。
+    // Why:single mode 改 element.innerHTML / text node nodeValue 會讓 React fiber
+    // 認知的 DOM ref 變孤兒,使用者後續點按鈕(X 推文「顯示更多」、Reddit/Threads/
+    // Medium 留言「展開」)時 framework click handler 失效或 silent bail out
+    // (Chrome for Claude 在真實 X 推文上 probe 2026-05-19 驗證:single inject 後
+    // click 不展開;dual inject 後 click 正常展開到 4663 chars,btn 消失)。
+    // Trade-off:framework-managed 段落變雙語(原文 + 譯文 sibling),違反使用者
+    // 預期的「single 全頁原地替換」+ Readwise Reader 擷取對應段帶 wrapper 噪音。
+    // 但對 X / Threads / Reddit 這類 React SPA,寧可保 click 互動 work,使用者
+    // 體驗整體較好。詳見 facebook/react#11538 系列。
+    if (STATE.translatedMode !== 'dual' && unit.kind !== 'fragment'
+        && SK.injectDual && SK.isFrameworkManaged?.(unit.el)) {
+      // v1.9.27 Layer A2 局部 dedup:framework-managed 場景下 collectParagraphs 對
+      // X tweetText 可能同時抓父 + 內部 inline 子 element(各為一個 unit)。兩個都
+      // inject 會造成雙倍中文(父走 dual sibling wrapper、子走 nodeValue mutate)。
+      // dedup 限縮在此 branch 內不影響其他合法雙段 inject(outer fragment + inner
+      // element 等場景,SPEC §15 path)。
+      if (unit.el.hasAttribute) {
+        let anc = unit.el.parentElement;
+        while (anc && anc !== document.body) {
+          if (anc.hasAttribute && (
+            anc.hasAttribute('data-shinkansen-translated') ||
+            anc.hasAttribute('data-shinkansen-dual-source') ||
+            anc.hasAttribute('data-shinkansen-nodevalue-mutated')
+          )) return;
+          anc = anc.parentElement;
+        }
+        if (unit.el.querySelector && unit.el.querySelector(
+          '[data-shinkansen-translated], [data-shinkansen-dual-source], [data-shinkansen-nodevalue-mutated]'
+        )) return;
+      }
+
+      SK.snapshotOnce(unit.el);
+
+      // v1.9.27 Layer A1: 先試 nodeValue mutate(類似 Immersive Translate SR()):
+      // 對「source 是 single visible text node」場景,直接改 text node 的 nodeValue
+      // 為譯文,不動 element 結構。React fiber 認識的 text node 物件 ref 不變,
+      // click handler 在它上面操作仍 work(Chrome for Claude 早期 probe 證實:單一
+      // text node nodeValue mutate 後 X click show more 仍能 expand)。
+      // 視覺等同 single mode(只看到中文,沒並列原文),且 Readwise Reader 擷取
+      // 乾淨(無 wrapper sibling 噪音)。
+      // 配對失敗(multi text node、含 placeholder、含 \n 多段)→ fallback dual visible。
+      if (SK.tryInjectNodeValueMutate?.(unit.el, translation, slots)) {
+        unit.el.setAttribute('data-shinkansen-nodevalue-mutated', '1');
+        // 同時設 single-mode attribute 讓 collectParagraphs / SPA observer 既有
+        // skip 邏輯仍 work(避免重複 inject)。restorePage 兩個 attribute 都清。
+        unit.el.setAttribute('data-shinkansen-translated', '1');
+        return;
+      }
+
+      // fallback: dual visible(layer 1-8 path)
+      // 確保 dual wrapper style 已注入(translatePage 入口在 single mode 下沒 ensure)
+      SK.ensureDualWrapperStyle?.();
+      SK.injectDual(unit, translation, slots);
+      // v1.9.27 設計決策:framework-managed fallback 走 dual visible,不嘗試
+      // hide-original「視覺 single」。Chrome for Claude probe 在真實 X 推文上
+      // 試過多種隱藏方式:
+      //   - display:none → 撞 X flex parent 重算 height,wrapper 壓 8px
+      //   - position:absolute + clip-path:inset(100%) + opacity 0 套件:初翻 work
+      //     (wrapper 208px / single-look),但 click show more 觸發 X article
+      //     re-mount 後,wrapper 仍變 8px(可能 deserializer 在新 wrapper 重設
+      //     display:none child,或 X 重 mount 環境跟初始不同)
+      // 業界對齊:Immersive Translate 在 X / Reddit / Threads / Medium / Facebook
+      // 等 React SPA + 留言系統全部走 paragraph mode(等同 dual visible),也不嘗試
+      // hide-original。沒看到任何 reference 解決「React click-triggered re-mount
+      // 場景下單語視覺」的 robust workaround。
+      // Trade-off vs §15「single 必須原地替換」:framework site 上原文 + 譯文並列
+      // 違反原始設計,但保 click 互動可運作 + 譯文視覺呈現比「點按鈕沒反應」優先。
+      // Non-framework site 維持 single 原地替換,符合 §15。
+      // hide-original 留 future:可考慮對「無 click-triggered re-mount」的 framework
+      // site(若有的話)再啟用 position absolute 路線。
+      return;
+    }
+
     if (unit.kind === 'fragment') {
       return injectFragmentTranslation(unit, translation, slots);
     }
@@ -904,6 +980,160 @@
     original.setAttribute('data-shinkansen-dual-source', '1');
     STATE.translationCache.set(original, { wrapper, insertMode });
     SK._guardObserveEl?.(original); // v1.8.20: dual 路徑也要進 IO subset
+  };
+
+  /**
+   * v1.9.27 Layer A2: 對 framework-managed element 試做 nodeValue mutate。
+   * 不動 element 結構,保 framework DOM ref(類似 Immersive Translate SR())。
+   *
+   * 三條配對 path:
+   *   Case 1: slots > 0 → fallback(inline element placeholder 重建只能走 fragment)
+   *   Case 2: 1 source text node → 直接 mutate 整段譯文(允許 \n,LLM 譯文含 \n
+   *     會由站點 CSS 的 white-space: pre-wrap 等 render 出視覺換行)
+   *   Case 3: N > 1 source text nodes → 譯文按 /\n+/ split 成 chunks,N == chunks
+   *     才 1:1 順序配對 mutate;N != chunks 視為配對失敗 → fallback dual
+   *
+   * 所有 case mutate 前都存 backup 到 STATE.nodeValueMutateBackup,供 restorePage
+   * 還原。multi-inject 場景(同 el 第二次 inject)保第一次 backup,不覆蓋。
+   */
+  // Layer A3 helper:遞迴抽 element 內 [text|inline] 序列。
+  // SPAN 純 wrapper(無 class、無 style)被當「透明 container」拆解進子節點;
+  // 帶 class / style 的 SPAN 跟其他 inline tag(A / EM / STRONG ...)被當 inline unit。
+  function extractA3Seq(rootEl) {
+    const seq = [];
+    for (const child of rootEl.childNodes) {
+      if (child.nodeType === Node.TEXT_NODE) {
+        if (child.nodeValue && child.nodeValue.trim()) {
+          seq.push({ type: 'text', node: child });
+        }
+        continue;
+      }
+      if (child.nodeType !== Node.ELEMENT_NODE) continue;
+      const tag = child.tagName;
+      // inline 判斷:跟 serializer isPreservableInline 對齊
+      const isInline = SK.PRESERVE_INLINE_TAGS?.has(tag) || (
+        tag === 'SPAN' && (
+          child.hasAttribute('class') ||
+          (child.getAttribute('style') || '').trim().length > 0
+        )
+      );
+      if (isInline) {
+        seq.push({ type: 'inline', node: child, tag });
+      } else {
+        // 透明 container(像 unstyled SPAN / DIV)拆解進子節點
+        const inner = extractA3Seq(child);
+        for (const item of inner) seq.push(item);
+      }
+    }
+    return seq;
+  }
+
+  // Layer A3 helper:source seq vs target seq 對齊檢查 + 收集 text mutation pairs。
+  // 配對成功 return mutation list(尚未實作 mutate);任何位置 type / inline tag 不對 → null。
+  // inline element 內部遞迴對齊,因此 source 跟 target 結構必須完全同構。
+  // Layer A3 helper:把 target container 內 text+br 結構還原成含 \n 的字串。
+  // 對應 deserializer 的 buildFragmentFromTextWithBr:原 LLM \n 轉成 br,還原時 br 轉回 \n。
+  function targetContainerToText(targetContainer) {
+    let s = '';
+    for (const child of targetContainer.childNodes) {
+      if (child.nodeType === Node.TEXT_NODE) {
+        s += child.nodeValue;
+      } else if (child.nodeType === Node.ELEMENT_NODE && child.tagName === 'BR') {
+        s += '\n';
+      }
+    }
+    return s;
+  }
+
+  function collectA3Mutations(sourceContainer, targetContainer, mutations) {
+    const sourceSeq = extractA3Seq(sourceContainer);
+    const targetSeq = extractA3Seq(targetContainer);
+    // Special case:source 是單一 text node(內含 \n)+ target 是純 text 序列(deserialize
+    // 把原 LLM \n 拆成 br,extractA3Seq 不收 br → target seq 純 text 但 length > 1)。
+    // 還原 target br 為 \n 接成完整字串設給 source text node。對應 X tweetText 結構:
+    // source SPAN 內 1 text node 含 \n\n vs target SPAN 內 text+br+text 混合。
+    if (sourceSeq.length === 1 && sourceSeq[0].type === 'text' &&
+        targetSeq.length > 1 && targetSeq.every(t => t.type === 'text')) {
+      mutations.push({
+        node: sourceSeq[0].node,
+        newValue: targetContainerToText(targetContainer),
+      });
+      return true;
+    }
+    if (sourceSeq.length !== targetSeq.length) return false;
+    for (let i = 0; i < sourceSeq.length; i++) {
+      const s = sourceSeq[i];
+      const t = targetSeq[i];
+      if (s.type !== t.type) return false;
+      if (s.type === 'text') {
+        mutations.push({ node: s.node, newValue: t.node.nodeValue });
+      } else if (s.type === 'inline') {
+        if (s.tag !== t.tag) return false;
+        const innerOk = collectA3Mutations(s.node, t.node, mutations);
+        if (!innerOk) return false;
+      }
+    }
+    return true;
+  }
+
+  SK.tryInjectNodeValueMutate = function tryInjectNodeValueMutate(el, translation, slots) {
+    if (!el || el.nodeType !== Node.ELEMENT_NODE) return false;
+    if (!translation || typeof translation !== 'string') return false;
+
+    // Layer A3:slots > 0 場景(source 含 inline element 像 <a> / 帶 class SPAN)
+    // 走「同構序列配對」path:source 跟 target 各自抽 [text|inline] 序列,N==N 同 type
+    // 同 inline tag → 收集 text mutation list → 一次性 mutate text nodes nodeValue;
+    // inline element 結構不動,React fiber DOM ref 完整保留。
+    // 配對失敗(序列長度不一 / type 不對 / inline tag 不對)→ return false 走 fallback dual。
+    if (slots && slots.length > 0) {
+      if (!SK.deserializeWithPlaceholders) return false;
+      const { frag, ok } = SK.deserializeWithPlaceholders(translation, slots);
+      if (!ok || !frag) return false;
+      // 快速 short-circuit:source 沒任何 visible content → 不適合 mutate
+      if (extractA3Seq(el).length === 0) return false;
+      const mutations = [];
+      const aligned = collectA3Mutations(el, frag, mutations);
+      if (!aligned) return false;
+      if (mutations.some(m => !m.node.isConnected)) return false;
+      if (!STATE.nodeValueMutateBackup) STATE.nodeValueMutateBackup = new Map();
+      if (!STATE.nodeValueMutateBackup.has(el)) {
+        STATE.nodeValueMutateBackup.set(el,
+          mutations.map(m => ({ node: m.node, originalValue: m.node.nodeValue }))
+        );
+      }
+      for (const m of mutations) m.node.nodeValue = m.newValue;
+      return true;
+    }
+
+    const textNodes = SK.collectVisibleTextNodes?.(el);
+    if (!textNodes || textNodes.length === 0) return false;
+    if (textNodes.some(n => !n.isConnected)) return false;
+
+    if (!STATE.nodeValueMutateBackup) STATE.nodeValueMutateBackup = new Map();
+
+    // Case 2: single source text node — 整段譯文(含 \n)mutate 進去
+    if (textNodes.length === 1) {
+      const node = textNodes[0];
+      if (!STATE.nodeValueMutateBackup.has(el)) {
+        STATE.nodeValueMutateBackup.set(el, [{ node, originalValue: node.nodeValue }]);
+      }
+      node.nodeValue = translation;
+      return true;
+    }
+
+    // Case 3: multi source text nodes — 譯文按 \n+ 切 chunks,N == chunks 1:1 配對
+    const chunks = translation.split(/\n+/).map(s => s).filter(s => s.length > 0);
+    if (chunks.length !== textNodes.length) return false; // N != M → fallback
+
+    // 都 OK,做 backup + mutate
+    if (!STATE.nodeValueMutateBackup.has(el)) {
+      const backup = textNodes.map(node => ({ node, originalValue: node.nodeValue }));
+      STATE.nodeValueMutateBackup.set(el, backup);
+    }
+    for (let i = 0; i < textNodes.length; i++) {
+      textNodes[i].nodeValue = chunks[i];
+    }
+    return true;
   };
 
   /** 還原 dual 模式：移除所有 wrapper、清乾淨 attribute（restorePage 雙語分支用） */

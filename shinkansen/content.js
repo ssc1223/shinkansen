@@ -1226,8 +1226,27 @@
     // v1.8.14: dual 與 single 共用 originalHTML 還原迴圈（原本兩分支字字相同）。
     // dual 額外多一步：先移除 wrapper（同時清 data-shinkansen-dual-source attribute);
     // 之後共用 forEach 還原 dual fallback 元素 + single 全部元素。
-    if (STATE.translatedMode === 'dual') {
+    // v1.9.27: dual mode 或混合模式(single 全局 + framework-managed element 走 dual)
+    // 都要清掉所有 sibling wrapper。混合模式下 STATE.translationCache 有項即代表
+    // 有 dual wrapper 要清。
+    if (STATE.translatedMode === 'dual' || (STATE.translationCache && STATE.translationCache.size > 0)) {
       SK.removeDualWrappers?.();
+    }
+    // v1.9.27 Layer A1: 還原 nodeValue mutate 過的 text node。對 el 內存的每個
+    // {node, originalValue} 寫回 originalValue。
+    if (STATE.nodeValueMutateBackup && STATE.nodeValueMutateBackup.size > 0) {
+      STATE.nodeValueMutateBackup.forEach((backup, el) => {
+        backup.forEach(({ node, originalValue }) => {
+          if (node && node.isConnected) {
+            try { node.nodeValue = originalValue; } catch (_) {}
+          }
+        });
+        try {
+          el.removeAttribute('data-shinkansen-nodevalue-mutated');
+          SK.restoreLocaleStyling?.(el);
+        } catch (_) {}
+      });
+      STATE.nodeValueMutateBackup.clear();
     }
     // v1.8.20: 跳過已 detached 的元素（SPA framework 重建 DOM tree 後對舊 ref 寫入無效）,
     // 並 log 出來讓使用者知道原文未必能完整還原（這在 SPA 上是不可逆的）

@@ -239,9 +239,14 @@
     spaObserverRescanCount = 0;
     spaObserverSeenTexts.clear();
     spaObserver = new MutationObserver(onSpaObserverMutations);
+    // v1.9.27: 加 characterData 監聽,讓 framework 用 textNode.replaceData() partial
+    // update text node 的場景(X 推文點「顯示更多」→ React 改 tweetText 子 text node
+    // nodeValue,**不** fire childList)能被 dual-aware detect 捕捉,觸發重翻新展開
+    // 內容。原 config 只 childList,完全錯過此場景。
     spaObserver.observe(document.body, {
       childList: true,
       subtree: true,
+      characterData: true,
     });
     if (!contentGuardInterval) {
       contentGuardInterval = setInterval(runContentGuard, GUARD_SWEEP_INTERVAL_MS);
@@ -385,6 +390,12 @@
       runContentGuardDual(false);
       return;
     }
+    // v1.9.27: 混合模式(single 全局 + framework-managed element 走 dual)場景,
+    // STATE.translationCache 會有項。先跑 dual sweep 守 wrapper,再跑 single
+    // sweep 守 innerHTML。互不打架(分別走 STATE.translatedHTML / translationCache)。
+    if (STATE.translationCache && STATE.translationCache.size > 0) {
+      runContentGuardDual(false);
+    }
     let restored = 0;
     // v1.8.14: 優先走 IO subset(viewport 附近的 entry),沒 IO 時 fallback 全表
     const candidates = guardVisibleSet
@@ -464,6 +475,10 @@
       return runContentGuardDual(true);
     }
     let restored = 0;
+    // v1.9.27: 混合模式下也 sweep dual wrapper(對應 production runContentGuard)
+    if (STATE.translationCache && STATE.translationCache.size > 0) {
+      restored += runContentGuardDual(true);
+    }
     for (const [el, savedHTML] of STATE.translatedHTML) {
       if (!el.isConnected) continue;
       if (el.innerHTML === savedHTML) continue;
@@ -530,7 +545,16 @@
       deferredRestore();
     }
 
-    const hasNewContent = mutations.some(m =>
+    // v1.9.27: detect 「使用者點按鈕後 framework in-place 改 dual-source element 內容
+    // 做展開」(典型:X 推文點顯示更多)。沿 mutation target 往上找 translationCache key
+    // element,滿足「textContent 顯著變長 + startsWith origText」就 remove wrapper +
+    // clear STATE,讓下游 collectParagraphs 把它當新段落重收 + 重翻 + dual inject。
+    // 必須 layer 1(framework-managed → dual fallback inject)配合使用,否則此 detect
+    // 對 single inject 的 element 不適用。
+    const hadDualExpandedUnmark = detectAndUnmarkExpandedDual(mutations);
+    const hadNvMutateExpandedUnmark = detectAndUnmarkExpandedNodeValueMutate(mutations);
+
+    const hasNewContent = hadDualExpandedUnmark || hadNvMutateExpandedUnmark || mutations.some(m =>
       m.type === 'childList' && m.addedNodes.length > 0 &&
       // 排除已翻譯節點內部的變動
       !(m.target.nodeType === 1 && m.target.closest?.('[data-shinkansen-translated]')) &&
@@ -548,6 +572,116 @@
     armSpaObserverRescan();
   }
 
+  // v1.9.27: dual mode expanded element detect + unmark。對應 layer B 修法
+  // (per-element framework-managed → dual fallback inject):當使用者點按鈕後
+  // X 推文等 React-managed element 內 text node 透過 replaceData 變長,需要
+  // 重翻並更新 sibling wrapper 內譯文。
+  //
+  // 守門:
+  //   - currentText.length > origText.length * 1.5:顯著變長才視為「展開」,
+  //     避免 framework 改 1-2 個 token 誤判
+  //   - startsWith(origText):確認展開後文字以原本短版為 prefix,排除「替換成
+  //     另一段不同內容」這種 framework 錯誤 path
+  //
+  // 操作:remove wrapper + remove data-shinkansen-dual-source attribute + 清
+  //   STATE.translationCache / originalText / originalHTML entry。下游
+  //   collectParagraphs 重收 + injectDual(line 718 attribute dedup pass)重 inject。
+  function detectAndUnmarkExpandedDual(mutations) {
+    if (!STATE.translationCache || STATE.translationCache.size === 0) return false;
+    if (!STATE.originalText) return false;
+
+    const candidates = new Set();
+    for (const m of mutations) {
+      let t = m.target;
+      if (!t) continue;
+      if (t.nodeType !== Node.ELEMENT_NODE) t = t.parentElement;
+      while (t && t.nodeType === Node.ELEMENT_NODE) {
+        if (STATE.translationCache.has(t)) { candidates.add(t); break; }
+        t = t.parentElement;
+      }
+    }
+    if (candidates.size === 0) return false;
+
+    let unmarked = 0;
+    for (const el of candidates) {
+      if (!el.isConnected) continue;
+      const origText = STATE.originalText.get(el);
+      if (!origText) continue;
+      const currentText = (el.textContent || '').trim();
+      if (currentText.length <= origText.length * 1.5) continue;
+      if (!currentText.startsWith(origText)) continue;
+
+      // remove wrapper sibling + clear STATE,讓 collectParagraphs / injectDual 重跑
+      const info = STATE.translationCache.get(el);
+      if (info?.wrapper) {
+        try { info.wrapper.remove(); } catch (_) {}
+      }
+      el.removeAttribute('data-shinkansen-dual-source');
+      STATE.translationCache.delete(el);
+      STATE.originalText.delete(el);
+      STATE.originalHTML?.delete?.(el);
+      unmarked++;
+    }
+    if (unmarked > 0) {
+      SK.sendLog('info', 'spa', `detect-expanded-dual: ${unmarked} element(s) unmarked for retranslation`);
+    }
+    return unmarked > 0;
+  }
+  SK._detectAndUnmarkExpandedDual = detectAndUnmarkExpandedDual;
+
+  // 給 spec 用的測試 hook
+  SK._testNvMutateStubSetup = function _testNvMutateStubSetup(el, origText, backupEntries) {
+    if (!STATE.nodeValueMutateBackup) STATE.nodeValueMutateBackup = new Map();
+    STATE.nodeValueMutateBackup.set(el, backupEntries);
+    STATE.originalText.set(el, origText);
+  };
+
+  // v1.9.27 Layer A4: detect-expand 對 nodeValue mutate 路徑(Layer A3 inject 的 element)。
+  // 對應 dual map 的 detectAndUnmarkExpandedDual 同套邏輯,只是換 map:
+  // STATE.nodeValueMutateBackup 取代 STATE.translationCache。
+  //
+  // 使用者點 X 顯示更多後 X 把 tt text node nodeValue 改成完整原文(textContent
+  // 從中文短譯 134 chars 變英文完整 4663 chars),Shinkansen 需偵測 + unmark + 重翻。
+  function detectAndUnmarkExpandedNodeValueMutate(mutations) {
+    if (!STATE.nodeValueMutateBackup || STATE.nodeValueMutateBackup.size === 0) return false;
+    if (!STATE.originalText) return false;
+
+    const candidates = new Set();
+    for (const m of mutations) {
+      let t = m.target;
+      if (!t) continue;
+      if (t.nodeType !== Node.ELEMENT_NODE) t = t.parentElement;
+      while (t && t.nodeType === Node.ELEMENT_NODE) {
+        if (STATE.nodeValueMutateBackup.has(t)) { candidates.add(t); break; }
+        t = t.parentElement;
+      }
+    }
+    if (candidates.size === 0) return false;
+
+    let unmarked = 0;
+    for (const el of candidates) {
+      if (!el.isConnected) continue;
+      const origText = STATE.originalText.get(el);
+      if (!origText) continue;
+      const currentText = (el.textContent || '').trim();
+      if (currentText.length <= origText.length * 1.5) continue;
+      if (!currentText.startsWith(origText)) continue;
+
+      // unmark + clear STATE,讓 collectParagraphs / Layer A3 inject 重跑
+      el.removeAttribute('data-shinkansen-nodevalue-mutated');
+      el.removeAttribute('data-shinkansen-translated');
+      STATE.nodeValueMutateBackup.delete(el);
+      STATE.originalText.delete(el);
+      STATE.originalHTML?.delete?.(el);
+      unmarked++;
+    }
+    if (unmarked > 0) {
+      SK.sendLog('info', 'spa', `detect-expanded-nv-mutate: ${unmarked} element(s) unmarked for retranslation`);
+    }
+    return unmarked > 0;
+  }
+  SK._detectAndUnmarkExpandedNodeValueMutate = detectAndUnmarkExpandedNodeValueMutate;
+
   // Idle debounce + maxWait combined:
   //   - idle timer 每次 mutation reset(SPA_OBSERVER_DEBOUNCE_MS)
   //   - maxWait timer 第一次 arm 時設,連續 mutation 不 reset(SPA_OBSERVER_MAX_WAIT_MS)
@@ -557,10 +691,15 @@
   // maxWait 保證即使連續滑也至少 SPA_OBSERVER_MAX_WAIT_MS 一次 fire,使用者體感
   // 「滑動期間譯文也會週期性追上」。
   function armSpaObserverRescan() {
+    // v1.9.27 Layer 13:per-host fast profile(X / Threads / Reddit / Mastodon)
+    // 把 1s/2s 縮到 250ms/500ms,對應虛擬化 timeline 邊滑邊讀 UX。SPEC-PRIVATE §25.20。
+    const timing = (typeof SK.getObserverTiming === 'function')
+      ? SK.getObserverTiming()
+      : { debounce: SK.SPA_OBSERVER_DEBOUNCE_MS, maxWait: SK.SPA_OBSERVER_MAX_WAIT_MS };
     if (spaObserverDebounceTimer) clearTimeout(spaObserverDebounceTimer);
-    spaObserverDebounceTimer = setTimeout(triggerSpaObserverRescan, SK.SPA_OBSERVER_DEBOUNCE_MS);
+    spaObserverDebounceTimer = setTimeout(triggerSpaObserverRescan, timing.debounce);
     if (!spaObserverMaxWaitTimer) {
-      spaObserverMaxWaitTimer = setTimeout(triggerSpaObserverRescan, SK.SPA_OBSERVER_MAX_WAIT_MS);
+      spaObserverMaxWaitTimer = setTimeout(triggerSpaObserverRescan, timing.maxWait);
     }
   }
 
@@ -746,13 +885,17 @@
    * 應 silent(把 loading toast 藏掉、不顯示 success toast),使用者看到內容回到中文
    * 就是足夠回饋。
    *
-   * @param {{ done: number, failedCount: number, pageUsage: { cacheHits?: number } | null, totalRequested: number }} args
+   * @param {{ done: number, failedCount: number, pageUsage: { cacheHits?: number } | null, totalRequested: number, isTinyRescan?: boolean }} args
    * @returns {{ type: 'silent' } | { type: 'error', msg: string } | { type: 'success', msg: string }}
    */
-  function pickRescanToast({ done, failedCount, pageUsage, totalRequested }) {
+  function pickRescanToast({ done, failedCount, pageUsage, totalRequested, isTinyRescan }) {
     if (failedCount > 0) {
       return { type: 'error', msg: `新內容翻譯部分失敗:${failedCount} / ${totalRequested} 段` };
     }
+    // v1.9.27:tiny rescan(1-2 unit 且 < 200 char)走靜默路徑。X / Threads / Reddit
+    // 邊滑邊 lazy mount link card / OG preview / 推文 metadata 一直觸發迷你 rescan,
+    // 真彈 toast「已翻 1 段新內容」對體感雜訊極差(SPEC-PRIVATE §25.20.6)。
+    if (isTinyRescan) return { type: 'silent' };
     // v1.9.8: silent 條件從「全部 cache hit」放寬到「有任何 cache hit」。
     // SPA rescan 是 scroll / lazy-load 被動觸發,使用者沒按按鈕、沒期待 toast 回饋;
     // 在 X / Reddit / Threads 等虛擬化 timeline 場景 mount/unmount 同段推文常產出
@@ -836,14 +979,29 @@
     }
 
     SK.sendLog('info', 'spa', `SPA observer rescan #${spaObserverRescanCount}`, { newUnits: newUnits.length });
-    // 延後 200ms 顯示 loading toast,避開「純 cache hit 場景 streaming fast path < 50ms
-    // 完成 silent」造成的 flash:timer 在 translateUnits 結束時 clearTimeout 取消;
-    // 真送 API 通常 > 200ms 才會 fire 顯示。
+    // 延後顯示 loading toast,避開「cache hit 場景 streaming fast path < 50ms 完成 silent」
+    // 造成的 flash:timer 在 translateUnits 結束時 clearTimeout 取消;真送 API 通常 >
+    // delay 才會 fire 顯示。
+    //
+    // v1.9.27:「tiny rescan 不彈 loading toast」— X 滑到串尾,X 對推文內嵌的 link
+    // card / OG preview / 推文 metadata 等小元素 lazy mount 進 DOM,SPA observer 抓到
+    // 1 個 < 100 char 的新 unit 送 API,toast「翻譯新內容 1/1 18 秒」對使用者體感雜訊
+    // 極差(SPEC-PRIVATE §25.20.6)。tiny rescan(1-2 unit 且總字數 < 200)走靜默翻譯
+    // 不彈 loading toast;翻完成功才彈 success(2s 自動消)。
+    //
+    // v1.9.27:delay 從 200ms → 800ms(SPEC-PRIVATE §25.20.7)。原 200ms 對「純 cache
+    // hit」夠快但對「混合 cache + 1 API」仍會 flash 顯示 loading toast。Jimmy 要求
+    // 「cache 的內容不顯示 toast」。延長到 800ms 把「混合 cache + 1 API 短譯文」這類
+    // 場景也涵蓋(SW cache lookup + 1 短 API call 通常 < 800ms)。純 API 翻 3+ 段才會
+    // 撐到 800ms 後彈 loading toast 給 user 看進度。Trade-off:純 API 但很快(< 800ms)
+    // 完成的 rescan 也不彈 loading,user 看到內容變中文足夠回饋。
+    const totalChars = newUnits.reduce((sum, u) => sum + (unitText(u).length || 0), 0);
+    const isTinyRescan = newUnits.length <= 2 && totalChars < 200;
     let loadingShown = false;
-    const loadingTimer = setTimeout(() => {
+    const loadingTimer = isTinyRescan ? null : setTimeout(() => {
       loadingShown = true;
       SK.showToast('loading', SK.t('toast.translateNew', { done: 0, total: newUnits.length }), { progress: 0, startTimer: true });
-    }, 200);
+    }, 800);
     try {
       const { done, failures, pageUsage } = await SK.translateUnitsByProvider(newUnits, {
         onProgress: (d, t) => {
@@ -858,7 +1016,7 @@
       if (done > 0) {
         SK.sendLog('info', 'spa', `SPA observer rescan #${spaObserverRescanCount} done`, { done, failures: failures.length });
         const failedCount = failures.length;
-        const decision = pickRescanToast({ done, failedCount, pageUsage, totalRequested: newUnits.length });
+        const decision = pickRescanToast({ done, failedCount, pageUsage, totalRequested: newUnits.length, isTinyRescan });
         if (decision.type === 'silent') {
           // loading toast 從未顯示就直接 silent;只有當它已 fire 才需 hideToast
           if (loadingShown) SK.hideToast();

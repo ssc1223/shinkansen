@@ -561,7 +561,12 @@ export const DEFAULT_SETTINGS = {
   tpmOverride: null,
   rpdOverride: null,
   // 每個 tab 同時最多飛出幾個翻譯批次（content.js 側的並發上限，與 limiter 雙重保險）
-  maxConcurrentBatches: 10,
+  // v1.9.27: 10 → 30。Gemini tier1 1000 RPM (~16 RPS) 下 30 並行 safe；
+  // 對 free tier (60 RPM) 使用者建議在 options 降到 5-10,但 limiter 本身會
+  // throttle 不會真的瞬間爆 burst。長頁 (段落數 > 10) 初翻 latency 明顯下降。
+  // 對齊業界 reference (Immersive Translate default concurrency 200,但用非 LLM
+  // service 無 RPM 限制；Shinkansen 走 LLM 受 RPM 限制,30 是 Gemini tier1 sweet spot)。
+  maxConcurrentBatches: 30,
   // v1.0.2: 每批段數上限與字元預算，使用者可在設定頁自行調整。
   // 段數上限：避免單批 placeholder slot 過多導致 LLM 對齊失準。
   // 字元預算：作為 token proxy（3500 chars ≈ 1000 英文 tokens），留足 output headroom。

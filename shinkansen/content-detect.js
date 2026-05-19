@@ -1045,8 +1045,25 @@
     return score;
   }
 
+  // v1.9.27 Layer 11(viewport prefetch):計算 element 距 viewport 的距離。
+  // viewport 內 → 0(優先翻譯);viewport 外 → 元素中心點到 viewport 中心的絕對距離。
+  // 用作 prioritizeUnits 同 tier 內的 secondary sort,讓使用者看到的段落最先翻好;
+  // viewport 外的段落仍然會翻,只是排在後面 batch。
+  function computeViewportDistance(unit) {
+    const el = unit.el;
+    if (!el || typeof el.getBoundingClientRect !== 'function') return Infinity;
+    let rect;
+    try { rect = el.getBoundingClientRect(); } catch (_) { return Infinity; }
+    const vh = (typeof window !== 'undefined' && window.innerHeight) || 800;
+    if (rect.bottom >= 0 && rect.top <= vh) return 0;
+    const elCenter = (rect.top + rect.bottom) / 2;
+    const viewportCenter = vh / 2;
+    return Math.abs(elCenter - viewportCenter);
+  }
+
   SK.prioritizeUnits = function prioritizeUnits(units) {
     const tierCache = new Map();
+    const viewportCache = new Map();
 
     function computeTier(unit) {
       // fragment 用 unit.el(parent block，符合 extractInlineFragments push 結構);
@@ -1088,8 +1105,17 @@
       return 2;
     }
 
-    for (const u of units) tierCache.set(u, computeTier(u));
-    return units.slice().sort((a, b) => tierCache.get(a) - tierCache.get(b));
+    for (const u of units) {
+      tierCache.set(u, computeTier(u));
+      viewportCache.set(u, computeViewportDistance(u));
+    }
+    // 主排序 tier ASC,同 tier 內 secondary 距 viewport 距離 ASC。同距離 stable
+    // 保 DOM 順序(JS Array.sort 對等價值穩定,V8 / Node 22+ 規範)。
+    return units.slice().sort((a, b) => {
+      const tierDiff = tierCache.get(a) - tierCache.get(b);
+      if (tierDiff !== 0) return tierDiff;
+      return viewportCache.get(a) - viewportCache.get(b);
+    });
   };
 
 })(window.__SK);
