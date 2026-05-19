@@ -996,6 +996,10 @@
       startTimer: true,
     });
 
+    // v1.9.28:onProgress race guard。await return / catch 後 set true,後續
+    // SW 殘留 STREAMING_PROGRESS message 觸發的 onProgress 不再蓋 success/error toast。
+    let _progressClosed = false;
+
     try {
       if (!glossary && STATE._glossaryPromise) {
         try {
@@ -1016,11 +1020,15 @@
         engine: options.engine || 'gemini',
         // v1.8.8: 「翻譯剩餘段落」路徑要繞過 partialMode 的 skip batch 1+ 邏輯
         ignorePartialMode: !!options.ignorePartialMode,
-        onProgress: (d, t, mismatch) => SK.showToast('loading', SK.t('toast.translateProgress', { prefix: labelPrefix, done: d, total: t }), {
-          progress: d / t,
-          mismatch: !!mismatch,
-        }),
+        onProgress: (d, t, mismatch) => {
+          if (_progressClosed) return;
+          SK.showToast('loading', SK.t('toast.translateProgress', { prefix: labelPrefix, done: d, total: t }), {
+            progress: d / t,
+            mismatch: !!mismatch,
+          });
+        },
       });
+      _progressClosed = true;
 
       if (abortSignal.aborted) {
         SK.sendLog('info', 'translate', 'translation aborted', { done, total });
@@ -1169,11 +1177,13 @@
       scheduleRescanForLateContent();
       SK.startSpaObserver();
     } catch (err) {
+      _progressClosed = true;
       SK.sendLog('error', 'translate', 'translatePage error', { error: err.message || String(err) });
       if (!abortSignal.aborted) {
         SK.showToast('error', SK.t('toast.translateFailed', { error: err.message }), { stopTimer: true });
       }
     } finally {
+      _progressClosed = true;
       STATE.translating = false;
       STATE.abortController = null;
     }
@@ -1502,13 +1512,20 @@
 
     SK.showToast('loading', SK.t('toast.translateProgressGoogle', { prefix: labelPrefix, done: 0, total }), { progress: 0, startTimer: true });
 
+    // v1.9.28:onProgress race guard,同 translatePage 修法
+    let _progressClosed = false;
+
     try {
       const { done, failures, chars } = await SK.translateUnitsGoogle(units, {
         signal: abortSignal,
-        onProgress: (d, t) => SK.showToast('loading', SK.t('toast.translateProgressGoogle', { prefix: labelPrefix, done: d, total: t }), {
-          progress: d / t,
-        }),
+        onProgress: (d, t) => {
+          if (_progressClosed) return;
+          SK.showToast('loading', SK.t('toast.translateProgressGoogle', { prefix: labelPrefix, done: d, total: t }), {
+            progress: d / t,
+          });
+        },
       });
+      _progressClosed = true;
 
       if (abortSignal.aborted) {
         restoreOriginalHTMLAndReset();
@@ -1561,11 +1578,13 @@
       scheduleRescanForLateContent();
       SK.startSpaObserver();
     } catch (err) {
+      _progressClosed = true;
       SK.sendLog('error', 'translate', 'translatePageGoogle error', { error: err.message || String(err) });
       if (!abortSignal.aborted) {
         SK.showToast('error', SK.t('toast.translateFailed', { error: err.message }), { stopTimer: true });
       }
     } finally {
+      _progressClosed = true;
       STATE.translating = false;
       STATE.abortController = null;
     }

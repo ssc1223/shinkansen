@@ -252,6 +252,10 @@
       contentGuardInterval = setInterval(runContentGuard, GUARD_SWEEP_INTERVAL_MS);
     }
     initGuardIntersectionObserver();
+    // v1.9.28 Layer 14:host 命中 PRESCAN_HOSTS 就啟動 IntersectionObserver pre-scan,
+    // 跟 SPA observer 共存(SPA observer 處理 selector 抓不到的 link card / OG preview
+    // 等 fallback,prescan 處理 viewport 即將進入的命中 selector 元素)。
+    startPrescanObserver();
     SK.sendLog('info', 'spa', 'SPA observer started');
   };
 
@@ -288,6 +292,132 @@
     }
     guardVisibleSet = null;
   }
+
+  // ─── v1.9.28 Layer 14:IntersectionObserver pre-scan ────
+  //
+  // 對 PRESCAN_HOSTS 命中的 host(X / Twitter)觀察 selector(`[data-testid="tweetText"]
+  // :not([data-shinkansen-translated])`)元素 → 元素「即將進 viewport(rootMargin 1000px)」
+  // 時觸發 `triggerSpaObserverRescan`,跳過 SPA observer 1s debounce + 2s maxWait 時序鏈。
+  //
+  // Why:SPEC-PRIVATE §25.20 Finding 3 stall 100% × 5/5(sy=10465「I love your works ❤」
+  // 推文 user dwell window 內永遠沒翻完)。v1.9.27 兩次嘗試(Phase 5 debounce 250 / maxWait
+  // 500)都沒解。POC 數據(SPEC-PRIVATE §25.20.10)實測 IO `rootMargin:1000px` fire 比
+  // user dwell on 該 tweet 早約 3.3s,API 1.5-2s 內 inject 完成。
+  //
+  // 走同條 `spaObserverRescan` 主體:by-text reuse / seen-texts TTL / tiny silent /
+  // 800ms loading delay 全 inherit,不另開 pipeline。
+  //
+  // 不會回到 §25.20.5 over-fire:IO 只看 selector 命中元素 + unobserve 一次性 fire,
+  // POC 實測 19+ tweet 收進約 10 個 callback(瀏覽器原生合成 + 100ms 微 batch)。
+  let prescanIO = null;
+  let prescanMO = null;
+  let prescanScheduledTimer = null;
+  let _dbgPrescanFires = 0;
+  let _dbgPrescanScheduled = 0;
+  let _dbgPrescanObserved = 0;
+
+  function schedulePrescanRescan() {
+    if (prescanScheduledTimer) return; // 100ms 微 batch window 內合成
+    _dbgPrescanScheduled++;
+    prescanScheduledTimer = setTimeout(() => {
+      prescanScheduledTimer = null;
+      if (!STATE.translated) return;
+      SK.sendLog?.('info', 'spa', 'prescan IO triggered rescan');
+      // 重用既有 triggerSpaObserverRescan:disarm SPA observer 兩條 timer + reset idle gate
+      // + 跑 spaObserverRescan(by-text reuse / seen-texts TTL / tiny silent / 800ms 全套)
+      triggerSpaObserverRescan();
+    }, SK.PRESCAN_BATCH_WINDOW_MS || 100);
+  }
+
+  function startPrescanObserver() {
+    if (prescanIO) return; // already running
+    if (typeof IntersectionObserver === 'undefined') return; // Safari 舊版 fallback
+    const config = typeof SK.getPrescanConfig === 'function' ? SK.getPrescanConfig() : null;
+    if (!config) return; // host 沒命中,不啟動
+    _dbgPrescanFires = 0;
+    _dbgPrescanScheduled = 0;
+    _dbgPrescanObserved = 0;
+
+    prescanIO = new IntersectionObserver((entries) => {
+      let fired = false;
+      for (const e of entries) {
+        if (!e.isIntersecting) continue;
+        // 一次性:fire 後 unobserve,避免 unmount/remount 重 fire。
+        // 同 element 若被 X virtualization unmount + remount(全新 element)會走
+        // prescanMO 路徑重 observe + 重 fire 一次,by-text reuse 攔 cache hit 不重打 API。
+        try { prescanIO.unobserve(e.target); } catch (_) {}
+        // v1.9.28 候選 第二輪 B:從 seenTexts 30s TTL 名單豁免該 tweet,讓後續
+        // schedulePrescanRescan → spaObserverRescan → collectParagraphs 收到該
+        // tweet 後不被 isSeenTextRecent filter 擋。
+        // Why:SPA observer 第一輪 rescan 對該 tweet 已 markSeen(防 widget 高頻
+        // 重 inject),30s 內後續 rescan 看到該 tweet 直接 filter 掉。對 X 串尾
+        // 「I love your works」場景:第一輪 SPA rescan 走 mutation debounce 慢
+        // 一拍,user dwell window 過了沒翻完。後續 prescan IO trigger 的 rescan
+        // 看到該 tweet 在 seenTexts 內,被 filter 掉 → 永遠補不上。explicit
+        // delete 讓 prescan 路徑「重啟翻譯資格」。
+        try {
+          const text = (e.target?.innerText || '').trim();
+          if (text) spaObserverSeenTexts.delete(text);
+        } catch (_) {}
+        _dbgPrescanFires++;
+        fired = true;
+      }
+      if (fired) schedulePrescanRescan();
+    }, { rootMargin: config.rootMargin || '1000px' });
+
+    // 初始 register:頁面載入時已 mount 的命中元素
+    try {
+      const initial = document.querySelectorAll(config.selector);
+      for (const el of initial) {
+        prescanIO.observe(el);
+        _dbgPrescanObserved++;
+      }
+    } catch (_) { /* selector 解析失敗 → 不啟動 MO,prescan 形同 no-op */ }
+
+    // MO 攔 X virtualization 後續 mount:tweet 進 DOM 時加 io.observe()。
+    // 走 selector match 過濾,避免每 mutation 都檢查;:not([data-shinkansen-translated])
+    // 排除已翻段(常見 v1.9.27 _detectAndUnmarkExpandedNodeValueMutate 重 mark 路徑)。
+    prescanMO = new MutationObserver((muts) => {
+      if (!prescanIO) return;
+      for (const m of muts) {
+        if (m.type !== 'childList') continue;
+        for (const n of m.addedNodes) {
+          if (!n || n.nodeType !== 1) continue;
+          let matches;
+          try {
+            matches = n.matches?.(config.selector)
+              ? [n]
+              : (n.querySelectorAll ? n.querySelectorAll(config.selector) : []);
+          } catch (_) { continue; }
+          for (const t of matches) {
+            try { prescanIO.observe(t); _dbgPrescanObserved++; } catch (_) {}
+          }
+        }
+      }
+    });
+    prescanMO.observe(document.body, { childList: true, subtree: true });
+
+    SK.sendLog?.('info', 'spa', 'prescan IO started', { host: config.host, initial: _dbgPrescanObserved });
+  }
+
+  function stopPrescanObserver() {
+    if (prescanIO) { try { prescanIO.disconnect(); } catch (_) {} prescanIO = null; }
+    if (prescanMO) { try { prescanMO.disconnect(); } catch (_) {} prescanMO = null; }
+    if (prescanScheduledTimer) { clearTimeout(prescanScheduledTimer); prescanScheduledTimer = null; }
+  }
+
+  // 給 spec / Debug Bridge 用
+  SK._prescanDebug = function _prescanDebug() {
+    return {
+      active: !!prescanIO,
+      observed: _dbgPrescanObserved,
+      fires: _dbgPrescanFires,
+      scheduled: _dbgPrescanScheduled,
+      scheduledTimerArmed: !!prescanScheduledTimer,
+    };
+  };
+  SK._startPrescanObserver = startPrescanObserver;
+  SK._stopPrescanObserver = stopPrescanObserver;
 
   // SPA virtualization 對抗:inject 完成同步把 originalText → savedHTML 寫進 STATE.translatedHTMLByText,
   // 之後 SPA observer rescan 看到 textContent 命中此 cache 的「全新 element」,直接 inject 既有譯文,
@@ -371,6 +501,7 @@
       spaObserver = null;
     }
     teardownGuardIntersectionObserver();
+    stopPrescanObserver();
     spaObserverRescanCount = 0;
     spaObserverSeenTexts.clear();
   }
@@ -979,6 +1110,8 @@
     }
 
     SK.sendLog('info', 'spa', `SPA observer rescan #${spaObserverRescanCount}`, { newUnits: newUnits.length });
+    // v1.9.28:watchdog 用 t0 計時(loading toast 顯示 30s 沒結束 → dump 診斷)
+    const _watchdog_t0 = performance.now();
     // 延後顯示 loading toast,避開「cache hit 場景 streaming fast path < 50ms 完成 silent」
     // 造成的 flash:timer 在 translateUnits 結束時 clearTimeout 取消;真送 API 通常 >
     // delay 才會 fire 顯示。
@@ -997,21 +1130,62 @@
     // 完成的 rescan 也不彈 loading,user 看到內容變中文足夠回饋。
     const totalChars = newUnits.reduce((sum, u) => sum + (unitText(u).length || 0), 0);
     const isTinyRescan = newUnits.length <= 2 && totalChars < 200;
+    // v1.9.28:loading toast 改成「lazy fire on first onProgress」。
+    // Why:原 800ms 後無條件 showToast('loading', '0/N', startTimer) 在 SW sleep /
+    // stream hang case → 0/N 永遠不變、timer 一路跑到 timeout(8s 仍嫌長)。
+    // 改成只有 onProgress 真的有進度進來時才彈,沒進度進來(SW 沒回應)→
+    // 完全不彈 toast → silent timeout 8s 後悄悄收場,user 體感無干擾。
     let loadingShown = false;
-    const loadingTimer = isTinyRescan ? null : setTimeout(() => {
+    let watchdogTimer = null;
+    const loadingTimer = null; // 不再用 800ms 預先彈 toast,改 lazy
+    const tryShowLoadingToast = (d, t) => {
+      if (loadingShown || isTinyRescan) return;
       loadingShown = true;
-      SK.showToast('loading', SK.t('toast.translateNew', { done: 0, total: newUnits.length }), { progress: 0, startTimer: true });
-    }, 800);
+      SK.showToast('loading', SK.t('toast.translateNew', { done: d, total: t }), { progress: d / t, startTimer: true });
+      // watchdog 在 loading toast 真的顯示後才 schedule(8s timeout 已足夠 cover,watchdog 30s 仍保留作極端 case 紀錄)
+      watchdogTimer = setTimeout(() => {
+        const diag = {
+          rescanId: spaObserverRescanCount,
+          dt: Math.round(performance.now() - _watchdog_t0),
+          prescan: typeof SK._prescanDebug === 'function' ? SK._prescanDebug() : null,
+          spa: typeof SK._spaDebug === 'function' ? SK._spaDebug() : null,
+          stateTranslating: STATE.translating,
+          hasAbort: !!STATE.abortController,
+          newUnitsSample: newUnits.slice(0, 3).map(u => (u.el?.innerText || '').trim().slice(0, 40)),
+        };
+        SK.sendLog('warn', 'spa', 'rescan watchdog: 30s no progress', diag);
+      }, 30000);
+    };
+    // v1.9.28:onProgress race guard。await return / catch 後 set true,後續
+    // SW 殘留 STREAMING_PROGRESS message 觸發的 onProgress 不再蓋 success/error toast。
+    let _progressClosed = false;
+    // v1.9.28:總體 8s timeout 兜底。Root cause:MV3 SW 30s idle 後 sleep,sleep 期間
+    // in-flight stream.donePromise 等不到 STREAMING_DONE message 永遠 pending,
+    // 用戶看到「翻譯新內容 0/4 8 分 40 秒」這種 toast 卡死。
+    // 8s 涵蓋 Gemini stream typical firstChunk 1.2s + response ~5s(SPEC-PRIVATE
+    // §25.20.4),正常 rescan 不誤殺;SW sleep / stream hang 異常 case 最多 8s
+    // toast 就 silent hide,user 體感「過去了沒翻到」遠優於「卡 30 秒進度 0」。
+    // timeout → silent hide toast,不彈 error(避免假錯誤打擾);user 滑回該 viewport
+    // 時下一次 SPA mutation 會重新 trigger rescan,by-text reuse 命中即可補上譯文。
+    const _RESCAN_TIMEOUT_MS = 8000;
     try {
-      const { done, failures, pageUsage } = await SK.translateUnitsByProvider(newUnits, {
-        onProgress: (d, t) => {
-          // 只在 loading toast 已顯示時才更新 progress(避免「toast 還沒顯示卻被 onProgress 喚出」)
-          if (loadingShown) {
-            SK.showToast('loading', SK.t('toast.translateNew', { done: d, total: t }), { progress: d / t });
-          }
-        },
-      });
+      const { done, failures, pageUsage } = await Promise.race([
+        SK.translateUnitsByProvider(newUnits, {
+          onProgress: (d, t) => {
+            if (_progressClosed) return;
+            // v1.9.28:lazy fire loading toast,只有真的有進度進來才彈
+            tryShowLoadingToast(d, t);
+            // toast 已 show 後持續 update progress
+            if (loadingShown) {
+              SK.showToast('loading', SK.t('toast.translateNew', { done: d, total: t }), { progress: d / t });
+            }
+          },
+        }),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('SK_RESCAN_TIMEOUT')), _RESCAN_TIMEOUT_MS)),
+      ]);
+      _progressClosed = true;
       clearTimeout(loadingTimer);
+      if (watchdogTimer) { clearTimeout(watchdogTimer); watchdogTimer = null; }
       if (!STATE.translated) return;
       if (done > 0) {
         SK.sendLog('info', 'spa', `SPA observer rescan #${spaObserverRescanCount} done`, { done, failures: failures.length });
@@ -1027,9 +1201,18 @@
         }
       }
     } catch (err) {
+      _progressClosed = true;
       clearTimeout(loadingTimer);
-      SK.sendLog('warn', 'spa', 'SPA observer rescan failed', { error: err.message });
-      SK.showToast('error', SK.t('toast.translateNewFailed', { error: err.message }), { stopTimer: true });
+      if (watchdogTimer) { clearTimeout(watchdogTimer); watchdogTimer = null; }
+      if (err.message === 'SK_RESCAN_TIMEOUT') {
+        // SW sleep / stream hang 兜底:silent hide,不彈 error toast(假錯誤體感差)。
+        // 下一次 SPA mutation 觸發 rescan + by-text reuse 命中可補上。
+        SK.sendLog('warn', 'spa', 'SPA rescan 30s timeout, silent hide', { units: newUnits.length });
+        if (loadingShown) SK.hideToast();
+      } else {
+        SK.sendLog('warn', 'spa', 'SPA observer rescan failed', { error: err.message });
+        SK.showToast('error', SK.t('toast.translateNewFailed', { error: err.message }), { stopTimer: true });
+      }
     }
   }
 

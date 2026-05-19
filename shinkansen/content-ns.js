@@ -402,6 +402,37 @@ if (window.__shinkansen_loaded) {
   SK.SPA_OBSERVER_MAX_UNITS = 50;
   SK.SPA_NAV_SETTLE_MS = 800;
 
+  // v1.9.28 Layer 14:IntersectionObserver pre-scan(SPEC-PRIVATE §25.20.9 Finding 3 正解)
+  // POC 數據(2026-05-19 aimikoda 串實測):IO `rootMargin:1000px` fire 比 user dwell on
+  // 該 tweet 早約 3.3s,API 1.5-2s 內 inject → user dwell window 開始已是中文。MO mount
+  // 觸發 io.observe,IO `isIntersecting:true` callback 走 100ms 微 batch → 直接呼叫
+  // `triggerSpaObserverRescan`,跳過 SPA observer debounce 1s + maxWait 2s 整條時序鏈。
+  // 走同條 spaObserverRescan 主體 → tiny silent / by-text reuse / seen-texts TTL /
+  // 800ms loading delay 全 inherit。
+  //
+  // 為什麼不會回到 §25.20.5 over-fire bug:IO 只觀察 selector 命中元素,且每個元素
+  // unobserve 後不重 fire;Phase 5 fast debounce 失敗是因為 mutation 對整片 DOM noise
+  // 開 fire。POC 實測 19+ tweet 收進 ~10 個 IO callback batch(瀏覽器原生合成)。
+  SK.PRESCAN_BATCH_WINDOW_MS = 100;
+  SK.PRESCAN_ROOT_MARGIN = '1000px';
+  // 子域名(如 www.x.com / m.twitter.com)由 endsWith('.' + host) 攔截
+  SK.PRESCAN_HOSTS = ['x.com', 'twitter.com'];
+  // 每個 host 對應的 selector — 沒對到 selector 即使 host 命中也不啟動。
+  // `:not([data-shinkansen-translated])` 排除已翻段,避免重複 enqueue。
+  SK.PRESCAN_SELECTORS = {
+    'x.com':       '[data-testid="tweetText"]:not([data-shinkansen-translated])',
+    'twitter.com': '[data-testid="tweetText"]:not([data-shinkansen-translated])',
+  };
+  SK.getPrescanConfig = function getPrescanConfig(hostnameOverride) {
+    const host = (hostnameOverride ?? location.hostname ?? '').toLowerCase();
+    if (!host) return null;
+    const matched = SK.PRESCAN_HOSTS.find(h => host === h || host.endsWith('.' + h));
+    if (!matched) return null;
+    const selector = SK.PRESCAN_SELECTORS[matched];
+    if (!selector) return null;
+    return { host, matched, selector, rootMargin: SK.PRESCAN_ROOT_MARGIN, batchWindowMs: SK.PRESCAN_BATCH_WINDOW_MS };
+  };
+
   // 術語表常數
   // v1.7.3: blockingThreshold 從 5 提高到 10——中等長度頁面（6-10 批）走 fire-and-forget
   // 不阻塞首字，省下 EXTRACT_GLOSSARY 1.5-7.4 秒等待。長頁（>10 批）仍 blocking。

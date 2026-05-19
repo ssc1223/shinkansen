@@ -17,42 +17,6 @@
 
 ## 條目
 
-### B4: Finding 3 — X 串尾 sy=10465 tweet 「I love your works ❤」 一致 100% stall(v1.9.27 留下輪解)
-
-**症狀**(SPEC-PRIVATE §25.20.1 Finding 3 + §25.20.9):
-5-run 真實 X 推文(`https://x.com/aimikoda/status/2055969783951093986`)實測,每次 user 滑到 sy≈10465 viewport 停 3s,該 viewport 內**永遠有 1 個 tweet 沒翻譯完**(specifically「I love your works ❤」短文+1 emoji)。`stall_pct=100%, first_clear_ms=null` 跨 5/5 runs 一致重現。
-
-實際該 tweet 最終會翻譯(整頁 coverage 仍 95%),只是**不在 user 停 3s window 內**。
-
-**Root cause 推斷**:
-- SPA observer 第一輪 collectParagraphs 在該 tweet mount 後 race miss(可能因短 emoji 文字 / DOM 時序 / first-pass filter 邊角)
-- 後續更晚 mutation 觸發 rescan 補抓 → 翻譯完成時 user 已滑過 3s window
-- 不論 maxWait 多短,**第一輪 detect 漏了就救不回**
-
-**兩次嘗試都失敗**(都已 revert):
-1. v1.9.27 Phase 5 第一版:debounce 1000→250 / maxWait 2000→500 → 連續 mutation 各觸發迷你 batch,toast「翻譯新內容 1/1 18 秒」18s 體感比原 stall 更糟(§25.20.5)
-2. v1.9.27 Phase 5 第二版:debounce 1000 不動 / maxWait 2000→500 → over-fire 沒發生但 stall 仍 100% × 2/2 runs,完全無效(§25.20.9)
-
-**正解方向**(預估 200-400 行 code,**不是小 patch**):
-- 用 IntersectionObserver `rootMargin: '1000px'` 主動觀察 `[data-testid="tweetText"]:not([data-shinkansen-translated])` 等 per-site selector
-- 元素一 mount 進 DOM 立即 IO callback → 直接 enqueue 翻譯 + scope-limit rescan
-- **跳過 MutationObserver debounce 整鏈 timing race**,從根本不依賴 detect-then-rescan 設計
-- 架構保留:`SK.SPA_OBSERVER_FAST_DEBOUNCE_MS / FAST_MAX_WAIT_MS / FAST_HOSTS / getObserverTiming` 常數 + function 都還在(v1.9.27 留下),`SPA_OBSERVER_FAST_HOSTS = []` 暫空,3 spec 仍 pass
-
-**為什麼進 PENDING(路徑 B)**:
-- 屬「結構性新 detect 路徑」非「bug fix」— 工程量超出 v1.9.27 patch 範圍
-- 對應 regression spec 需要設計 mock IO 行為 + 真實 X 端 e2e 驗,跟 maxWait timing 改動的單元 spec 不同層級
-- v1.9.27 留以下三條 spec 鎖住現有架構不退化:
-  - `test/regression/spa-observer-fast-host.spec.js`(3 條,getObserverTiming 預設 default,白箱注入 fast 對映正確)
-  - `test/regression/spa-rescan-tiny-silent.spec.js`(4 條,tiny rescan silent + 守門)
-
-**SANITY 驗收計畫**(下輪修完):
-1. 重跑 5-run X 推文(同 URL),sy=10000 桶 stall_pct 從 100% 降到 ≤ 50%(或 < 100% 都算成功)
-2. `first_clear_ms` 從 null 變成 < 3000ms(在 dwell window 內成功補上)
-3. 其他 sy 桶 stall_pct 不退化(別救一頭炸另一頭)
-4. rescan/api 數量不爆(避免回到 §25.20.5 over-fire)
-5. 體感:user 滑動沒看到「翻譯新內容 1/1 18 秒」toast spam(tiny silent + 800ms delay 已修,須維持)
-
 ### B3: macOS Safari update-check 半鍵更新 + MAS distribution gate
 
 兩部分綁一起,因為都跟 `safari-web-extension://` 通路的 update-check 行為相關。
@@ -85,6 +49,23 @@
 **未來 iOS 守衛**
 
 iOS Safari 同樣是 `safari-web-extension://` scheme 但不能裝 pkg。`project_ios_scope_decisions.md` 記載 iOS 動工等 macOS MAS 過審後啟動,屆時 popup.js Safari 分支需加 `chrome.runtime.getPlatformInfo().os === 'mac'` 守衛,且 iOS build pipeline 也應該走類似 `IS_MAS_BUILD=true` 路徑(iOS 全部走 App Store 上架)。
+
+<!-- v1.9.28 清空紀錄(2026-05-20):
+  - B4: Finding 3 X 串尾「I love your works ❤」stall **完全解了**(v1.9.27.x diagnostic
+    sentinel 過程後 ship v1.9.28)。Prescan IntersectionObserver `rootMargin:1000px`
+    觀察 `[data-testid="tweetText"]:not([data-shinkansen-translated])` + IO callback
+    內 explicit `spaObserverSeenTexts.delete(text)` 豁免 30s TTL 黑名單。POC 純觀測
+    顯示 IO fire 比 user dwell 早 3.3s。5-run cross-run consistency sy=10000 桶
+    stall_pct 全 0%/0%/0%/0%/0%(baseline 累積 9 runs 全 100%)。
+  - 對應 regression spec:`test/regression/spa-prescan-intersection-observer.spec.js`
+    8 條 + SANITY(常數定義 / subdomain 命中 / no-op 條件 / 初始 register / MO 攔
+    mount / IO callback 觸發 rescan / 100ms batch coalesce / stopSpaObserver lifecycle),
+    SANITY 暫破壞 batch 合成驗 spec fail 還原 pass。
+  - 並發發現修法(在 Finding 3 修復過程中浮現,非原 §25.20 規劃):
+    onProgress race guard(3 處 _progressClosed)/ SPA rescan 8s Promise.race timeout /
+    loading toast lazy fire(只 onProgress 真有進度才彈)。全部在 v1.9.28 同輪解。
+  - 完整紀錄 SPEC-PRIVATE §25.20.10。
+-->
 
 <!-- v1.9.11 清空紀錄(2026-05-12,Phase 1 macOS Safari 真機驗證 + Phase 1.5 release 完整收尾):
 
