@@ -500,6 +500,9 @@
 
       // v1.8.0 instrumentation：第一個 segment inject 時間（對應使用者首字延遲）
       let firstSegmentInjectedT = null;
+      // v1.9.29-DEV instrument(Finding 4 streaming inject 段拆解):量 firstChunk → first inject 2.5s gap 內部組成
+      let firstSegMsgLogged = false;
+      let idleGateInstrumented = false;
 
       // v1.8.0: abort 傳播 — 使用者按 Option+S 取消 → 通知 SW 中斷 streaming + 清理 listener
       const abortHandler = () => {
@@ -526,6 +529,11 @@
           firstChunkResolve(true);
         } else if (message.type === 'STREAMING_SEGMENT') {
           const idx = message.payload.segmentIdx;
+          // v1.9.29-DEV instrument: 量 STREAMING_SEGMENT 第一次抵達 cs 的時點(扣 stream start 起)
+          if (!firstSegMsgLogged) {
+            SK.sendLog('info', 'translate', 'milestone:stream_first_seg_msg', { streamId, idx, t: Date.now() - t0 });
+            firstSegMsgLogged = true;
+          }
           // v1.8.10 A:strip LLM 偷懶殘留的 SEP / «N» 標記
           const tr = SK.sanitizeMarkers(message.payload.translation);
           if (typeof idx === 'number' && idx >= 0 && idx < job.texts.length && tr) {
@@ -558,7 +566,17 @@
             };
             if (SK._idleGateReached) {
               performInject();
+            } else if (!idleGateInstrumented) {
+              // v1.9.29-DEV instrument: idle gate 第一次啟動(setTimeout 1500ms 開始等)
+              idleGateInstrumented = true;
+              const gateStartT = Date.now() - t0;
+              SK.sendLog('info', 'translate', 'milestone:stream_idle_gate_start', { streamId, idx, t: gateStartT, waitMs: SK.FIRST_INJECT_HYDRATION_WAIT_MS });
+              SK.ensureFirstInjectIdle().then(() => {
+                SK.sendLog('info', 'translate', 'milestone:stream_idle_gate_resolved', { streamId, t: Date.now() - t0, dt: Date.now() - t0 - gateStartT });
+                performInject();
+              });
             } else {
+              // idx > 0 共享同一條 gate promise,不重複 log
               SK.ensureFirstInjectIdle().then(performInject);
             }
           }

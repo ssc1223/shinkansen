@@ -124,25 +124,35 @@ if (window.__shinkansen_loaded) {
     { slot: 3, engine: 'google', model: null, label: 'Google MT' },
   ];
 
-  // ─── v1.9.17: 首次 inject hydration wait gate ──────────
-  // SPA framework(Medium React 18 + streaming hydration / Substack / Notion 等)
-  // page reload 後 hydration 期間,Shinkansen auto-translate 早於 hydration 完成
-  // 就 inject DOM → 移走 React reconciliation 認為仍掛在 parent 的 child →
-  // React 內部 removeChild 找不到 child → throw NotFoundError → React Router
-  // error boundary fallback render「500 系統出狀況」error page。
+  // ─── v1.9.17: 首次 inject hydration wait gate(2026-05-20 已停用,值改 0)──────────
   //
-  // 修法:首次 inject 用固定 setTimeout 等待。
+  // 【歷史脈絡】v1.9.17 修 SPA framework(Medium React 18 + streaming hydration /
+  // Substack / Notion 等)page reload 後 hydration 期間,Shinkansen auto-translate
+  // 早於 hydration 完成就 inject DOM → 移走 React reconciliation 認為仍掛在 parent
+  // 的 child → React 內部 removeChild 找不到 child → throw NotFoundError → React
+  // Router error boundary fallback render「500 系統出狀況」error page。
   //
-  // 為什麼不用 requestIdleCallback:RIC 只看主執行緒 frame 之間的 microsecond 級
-  // idle window,跟 React 完成 hydration / commit 沒 sync。Medium hydration 跨多
-  // task 跑,每 task 間 RIC 立刻 fire,實質上 idle gate 20-50ms 就 reach,完全沒擋
-  // 到 inject 跟 React commit 的 race(2026-05-14 實測:使用者完全感覺不到 delay,
-  // 仍 500)。固定 setTimeout 是粗暴但確定的等法。
+  // 【2026-05-20 對照實驗結果】Finding 4 instrument-first 5-run 分析發現此 1500ms
+  // gate 是 OP first-paint 3.9s 中**固定 64% 的延遲源頭**。對照實驗(SPEC-PRIVATE
+  // §25.20.12):暫時 disable gate(本常數設 0)+ reload + 跑 3 種 Medium 場景
+  // (cache hit / 404 page / 真實 cold API),全部沒重現 React 500 race,h1 完整
+  // 翻成中文,errors:[]。判斷 Medium 自 v1.9.17 至今(~2026-05-13 → 2026-05-20)
+  // React 版本升級已內部解掉這條 race,gate 已成 dead code。
   //
-  // 只 gate 「首次 inject」一次,後續 segment / batch / re-translate 全部直接通過,
-  // 對 wall-time 影響只在首次。手動 Alt+S 也走此 gate(_idleGateReached 預設 false),
-  // 但 user 主動觸發時 hydration 通常已完,1.5s 是冗餘 — 可接受成本。
-  SK.FIRST_INJECT_HYDRATION_WAIT_MS = 1500;
+  // 【決策】常數改 0(等同跳過 gate),保留 `SK.ensureFirstInjectIdle` machinery
+  // 跟 streaming inject 路徑的 gate 呼叫(content.js:559-578),萬一未來新 SPA
+  // 站再出現相同 race,只需把這條常數改回 1500 就能一鍵 rollback,不需重新
+  // implement gate 機制。
+  //
+  // 【為什麼不直接刪整套 gate 程式碼】保留 ensureFirstInjectIdle 機制等於保留
+  // 「未來如果某個 site 又出 hydration race,可以 host-scoped 加回 gate」的退路。
+  // 完全刪掉等於下次踩到同樣 race 要從 git history 撈回來重 implement。
+  //
+  // 【效能改進】Finding 4 5-run 實測:
+  // - X 手動 TRANSLATE:OP first-paint 3.9s → 預估 2.4s(-38%)
+  // - Medium auto-translate cache hit:1.5s → ~50ms(-97%)
+  // - Medium auto-translate cold API:8.5s → 預估 7s(-18%)
+  SK.FIRST_INJECT_HYDRATION_WAIT_MS = 0;
   SK._idleGateReached = false;
   SK._idleGatePromise = null;
 
