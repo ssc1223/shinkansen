@@ -99,6 +99,25 @@
   <h1>Store Release Notes</h1>
   <p class="subtitle">Update summary for users on Chrome Web Store and Firefox Add-ons. Lists only changes that directly affect end users; bug fixes and refactors are omitted unless user-visible. The full version history (every patch and technical detail) lives in the GitHub <a href="https://github.com/jimmysu0309/shinkansen/blob/main/CHANGELOG.md" target="_blank" rel="noopener">CHANGELOG.md</a>.</p>
 
+  <h2>v1.10.0 <span class="release-date">Released 2026-05-20</span></h2>
+  <p class="release-meta">Compared with the previous store version v1.9.24</p>
+
+  <p class="lead">This release focuses on structural fixes for X (Twitter) and Instagram comment translation, plus an updated Gemini model lineup and pricing.</p>
+
+  <ul>
+    <li><strong>X / Twitter tweet translation — structural fixes</strong>: tweets containing URLs, @mentions, #hashtags, emoji images, and multi-line paragraphs are now translated in place (single-language overlay) instead of showing a grey-bordered bilingual block below. Specifically: URL anchor inner structure (https:// prefix / main domain / truncation ellipsis) is preserved; @mention and #hashtag clickability is intact; emoji images stay at their original positions in text; original paragraph blank lines (double newlines) are preserved; connectors like "by @username" merge into the translated main text without leaving English remnants.</li>
+
+    <li><strong>Instagram comment translation</strong>: when you open the comment dialog on an Instagram photo post (the modal viewer), comments used to be excluded because they sit inside a "like / reply / more" button group. This release now excludes only the buttons themselves, leaving the comment text translatable. Nested replies that expand from "View replies" — including short ones starting with @mention like "@username ja wirklich!" — are also translated.</li>
+
+    <li><strong>"Translate into" picker in toolbar popup</strong> (since v1.9.16, reminder for users jumping multiple versions): the target language picker has moved from the settings page into the toolbar icon popup. Click the toolbar icon and pick from 8 languages directly (Traditional Chinese / Simplified Chinese / English / Japanese / Korean / Spanish / French / German). Changes take effect immediately for the next translation. UI language and translation target remain independently configurable.</li>
+
+    <li><strong>YouTube subtitle bug fixes accumulated</strong>: multiple YouTube subtitle improvements since v1.9.25 — batch size tuning to save tokens, subtitle timing correction at faster playback speeds, sentence segmentation stability for auto-generated (ASR) subtitles, "Translating..." overlay disappears immediately when CC button turns off subtitles, and automatic fallback to the original spoken-language track when your YouTube account has "auto-translate to Simplified Chinese" preference set — avoiding double-translation quality loss.</li>
+
+    <li><strong>Gemini model lineup update</strong>: the legacy Gemini 3.1 Pro Preview is retired and replaced with Gemini 3.5 Flash ($1.50 / $9.00 per 1M tokens). Users who previously selected 3.1 Pro will see the dropdown swap to 3.5 Flash after upgrade. Gemini 3.1 Flash Lite pricing updated from $0.10 / $0.30 to $0.25 / $1.50 (per Google's new pricing). Pricing calibration date updated to 2026-05.</li>
+
+    <li><strong>macOS Safari version available for public download</strong>: the macOS Safari `.pkg` installer (previously only accessible via GitHub Releases manual search) now has a direct download button on the landing page (Developer ID signed + Apple notarized). Double-click the `.pkg` to install. The App Store version is still in review; we'll announce when it ships.</li>
+  </ul>
+
   <h2>v1.9.24 <span class="release-date">Released 2026-05-18</span></h2>
   <p class="release-meta">Compared with the previous store version v1.9.8</p>
 

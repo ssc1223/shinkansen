@@ -99,6 +99,25 @@
   <h1>商店上架版本更新紀錄</h1>
   <p class="subtitle">給 Chrome Web Store 與 Firefox Add-ons 使用者的更新摘要，只列出對使用者直接有感的功能變更與重要修正。完整的版本歷史（含每一個 patch 與技術細節）請見 GitHub <a href="https://github.com/jimmysu0309/shinkansen/blob/main/CHANGELOG.md" target="_blank" rel="noopener">CHANGELOG.md</a>。</p>
 
+  <h2>v1.10.0 <span class="release-date">2026-05-20 上架</span></h2>
+  <p class="release-meta">相對於上一個商店版本 v1.9.24</p>
+
+  <p class="lead">這版以 X（Twitter）與 Instagram 留言翻譯結構性修補為主軸，並更新 Gemini 模型清單與價格。</p>
+
+  <ul>
+    <li><strong>X / Twitter 推文翻譯結構性修補</strong>：含 URL 連結、@mention、#hashtag、emoji 圖片、換行段落的推文，譯文現在會以單語覆蓋方式直接塞回原推文，不再多出灰底框的雙語並列。具體 case 包含：URL 連結內部結構（網址前綴 / 主網域 / 截斷省略號）完整保留、@mention 跟 #hashtag 連結點擊行為不變、emoji 圖片仍出現在文字原位、原推文段落空行（雙換行）保留、「by @username」這類連接詞翻譯後語意合進主文不殘留英文殘渣</li>
+
+    <li><strong>Instagram 留言翻譯</strong>：點開 Instagram 照片貼文的留言區（彈出視窗那種），原本因為留言外層被「按讚 / 回覆 / 更多」按鈕包住整段被排除，這版改成只排除按鈕本身、保留留言文字翻譯。展開「查看回覆」後巢狀回覆也會被翻譯（含 @mention 開頭的短回覆「@username ja wirklich!」這類）</li>
+
+    <li><strong>直接選擇翻譯目標語言</strong>：「翻譯成」選單已搬到工具列圖示彈出視窗（自 v1.9.16 起，給跳版升級到本版的使用者再次提醒）。點工具列圖示直接選 8 種語言（繁中 / 簡中 / 英 / 日 / 韓 / 西 / 法 / 德），切了立刻生效，下次翻譯就是新語言。介面語言與翻譯目標仍維持各自獨立設定</li>
+
+    <li><strong>YouTube 字幕翻譯 bug 修復累積</strong>：v1.9.25 之後累積多項 YouTube 字幕修補——批次大小調整節省 token 用量、播放速度加快時字幕翻譯時序修正、自動產生字幕（ASR）的句子切分穩定性提升、按 CC 關閉字幕時「翻譯中⋯」浮層立即消失、影片帳號設了「自動翻譯成中文（簡體）」偏好時自動切回原始口說語版避免雙重翻譯損耗品質</li>
+
+    <li><strong>Gemini 模型清單更新</strong>：原本的 Gemini 3.1 Pro Preview 已退役，改成 Gemini 3.5 Flash（$1.50 / $9.00 per 1M tokens），既有使用 3.1 Pro 的使用者升級後選單會自動換成 3.5 Flash。Gemini 3.1 Flash Lite 價格從 $0.10 / $0.30 調整為 $0.25 / $1.50（Google 公布新價）。價格校準日期更新到 2026-05</li>
+
+    <li><strong>macOS Safari 版正式公開下載</strong>：之前只能透過 GitHub Release 手動找的 macOS Safari `.pkg` 安裝包，這版開始 landing page 也有直接下載按鈕（Developer ID 簽章 + Apple notarize），雙擊 `.pkg` 就能裝。App Store 上架版本仍在審核中，過審後會同步公告</li>
+  </ul>
+
   <h2>v1.9.24 <span class="release-date">2026-05-18 上架</span></h2>
   <p class="release-meta">相對於上一個商店版本 v1.9.8</p>
 
