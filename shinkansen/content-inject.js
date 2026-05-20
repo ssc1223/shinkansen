@@ -359,6 +359,30 @@
     // 導致字面 \n 殘留可見 DOM 字元。在此入口統一處理，覆蓋所有後續路徑。
     if (translation.includes('\\n')) translation = translation.replace(/\\n/g, '\n');
 
+    // §5 單一資料源:祖先已走 nvMutate(整棵子樹 text node 全 mutate 過)時,
+    // 本 unit 重複 inject 會覆蓋已成功 mutate 的子 DOM。典型場景:
+    //   1. translatePage auto:tweetText(React fiber 在)走 framework branch
+    //      nvMutate 成功;SPAN[5] children 也有 fiber 進 framework branch,
+    //      祖先 tweetText 有 attr → framework 內 dedup bail。三 unit 安全。
+    //   2. restorePage 後再 translatePage:tweetText.innerHTML = originalHTML
+    //      重 parse,tweetText 自己 ref 不變(fiber 在)但內部 children 變
+    //      orphan 新節點(沒 fiber)→ isFrameworkManaged(SPAN[5]) = false
+    //      → SPAN[5] 跳過 framework branch 走 standard slots path →
+    //      replaceNodeInPlace 把 tweetText 已 mutate 的 SPAN[5] 內部蓋成
+    //      [text, BR, BR, text] fragment 結構,trailing \n\n 丟失。
+    //
+    // 入口只擋 nvMutated 祖先(整棵 mutate 過)。
+    // 不擋 data-shinkansen-translated(fragment inject 會設,但 outer fragment +
+    // inner element 是 SPEC §15 path 的合法雙段 inject,inner 不該被擋)。
+    // 不擋 data-shinkansen-dual-source(dual 路徑由 injectDual 內部去重)。
+    if (unit && unit.el && unit.el.parentElement) {
+      let anc = unit.el.parentElement;
+      while (anc && anc !== document.body) {
+        if (anc.hasAttribute && anc.hasAttribute('data-shinkansen-nodevalue-mutated')) return;
+        anc = anc.parentElement;
+      }
+    }
+
     // v1.5.0: 雙語對照模式分派——dual 走 SK.injectDual 走另一條路徑。
     // 只 element 走得到 dual（fragment unit 結構特殊，dual 模式直接 fallback 走 single）。
     // 模式由 STATE.translatedMode 決定（translatePage 進入時依 settings.displayMode 設定）。
@@ -997,8 +1021,12 @@
    * 還原。multi-inject 場景(同 el 第二次 inject)保第一次 backup,不覆蓋。
    */
   // Layer A3 helper:遞迴抽 element 內 [text|inline] 序列。
-  // SPAN 純 wrapper(無 class、無 style)被當「透明 container」拆解進子節點;
-  // 帶 class / style 的 SPAN 跟其他 inline tag(A / EM / STRONG ...)被當 inline unit。
+  // inline 判斷直接呼叫 SK.isPreservableInline 跟 serializer 完全對齊(包含
+  // hasSubstantiveContent 檢查)— SPAN 雖有 class 但內容無 alphanum/CJK
+  // (例 SPAN(" ")、SPAN("…")、emoji-only SPAN)serializer 視為透明,
+  // extractA3Seq 必須一致視為透明、遞迴拆進子節點,否則 source seq 帶 inline
+  // 而 target seq(來自 deserialize)是 text,type 不符 alignment fail。
+  // 同 CLAUDE.md §5 單一資料源:preservable 判斷一條 source of truth。
   function extractA3Seq(rootEl) {
     const seq = [];
     for (const child of rootEl.childNodes) {
@@ -1009,18 +1037,11 @@
         continue;
       }
       if (child.nodeType !== Node.ELEMENT_NODE) continue;
-      const tag = child.tagName;
-      // inline 判斷:跟 serializer isPreservableInline 對齊
-      const isInline = SK.PRESERVE_INLINE_TAGS?.has(tag) || (
-        tag === 'SPAN' && (
-          child.hasAttribute('class') ||
-          (child.getAttribute('style') || '').trim().length > 0
-        )
-      );
-      if (isInline) {
-        seq.push({ type: 'inline', node: child, tag });
+      if (SK.isPreservableInline?.(child)) {
+        seq.push({ type: 'inline', node: child, tag: child.tagName });
       } else {
-        // 透明 container(像 unstyled SPAN / DIV)拆解進子節點
+        // 透明 container(unstyled SPAN / DIV / 無實質內容 SPAN / IMG ...)
+        // 拆解進子節點
         const inner = extractA3Seq(child);
         for (const item of inner) seq.push(item);
       }
@@ -1045,21 +1066,100 @@
     return s;
   }
 
+  // 檢查 container 是否含直接 BR 子節點(extractA3Seq 對 BR 不收進 seq,
+  // BR 在邊緣的 case 從 seq.length 看不出來,要看 container 本身)。
+  function targetContainerHasBr(container) {
+    if (!container || !container.childNodes) return false;
+    for (const child of container.childNodes) {
+      if (child.nodeType === Node.ELEMENT_NODE && child.tagName === 'BR') return true;
+    }
+    return false;
+  }
+
   function collectA3Mutations(sourceContainer, targetContainer, mutations) {
     const sourceSeq = extractA3Seq(sourceContainer);
     const targetSeq = extractA3Seq(targetContainer);
     // Special case:source 是單一 text node(內含 \n)+ target 是純 text 序列(deserialize
-    // 把原 LLM \n 拆成 br,extractA3Seq 不收 br → target seq 純 text 但 length > 1)。
-    // 還原 target br 為 \n 接成完整字串設給 source text node。對應 X tweetText 結構:
-    // source SPAN 內 1 text node 含 \n\n vs target SPAN 內 text+br+text 混合。
+    // 把原 LLM \n 拆成 br,extractA3Seq 不收 br)。還原 target br 為 \n 接成完整字串
+    // 設給 source text node。對應 X tweetText 結構:source SPAN 內 1 text node 含
+    // \n\n vs target SPAN 內 br+text+br 混合。
+    //
+    // 兩條 trigger path:
+    //   - targetSeq.length > 1:BR 夾在 text 之間(原 \n 在文字中段),extractA3Seq
+    //     drop BR 後剩多 text item。
+    //   - targetSeq.length === 1 但 container 直接含 BR:BR 在邊緣(原 \n 在文字
+    //     首/尾),drop BR 後僅剩 1 text item,length 看不出 BR 存在 → 加查 container
+    //     本身有沒有 BR。對應 X tweet「\n\nEnjoy : )\n\n」結構,單純走 length > 1
+    //     會漏。
+    //   source 必須真的含 \n(否則保守走 normal flow,避免無中生有添加 \n)。
     if (sourceSeq.length === 1 && sourceSeq[0].type === 'text' &&
-        targetSeq.length > 1 && targetSeq.every(t => t.type === 'text')) {
-      mutations.push({
-        node: sourceSeq[0].node,
-        newValue: targetContainerToText(targetContainer),
-      });
-      return true;
+        targetSeq.every(t => t.type === 'text')) {
+      const sourceHasNewline = /\n/.test(sourceSeq[0].node.nodeValue || '');
+      if (targetSeq.length > 1
+          || (targetSeq.length >= 1 && sourceHasNewline && targetContainerHasBr(targetContainer))) {
+        mutations.push({
+          node: sourceSeq[0].node,
+          newValue: targetContainerToText(targetContainer),
+        });
+        return true;
+      }
     }
+    // 寬容對齊:source 是純 inline 序列(中間沒 text),target 是 inline + 之間穿插
+    // free text node。對應 LLM(尤其 Flash Lite)重組句子時把原 placeholder 內文字
+    // 搬到 placeholder 之間自由 text 區。把 target free text 吸收進「下一個 inline
+    // 的 leading」,合進該 inline mutate 的 newValue。
+    //
+    // 真實案例(@jsnell 2026-05-20 probe + Flash Lite):
+    //   source 結構:[SPAN("Steve Jobs in Exile by "), DIV(@geoffrey_cain), SPAN(" is out today..."), A.url]
+    //   extractA3Seq source → [inline, inline, inline, inline](DIV 透明,recurse 進去抓 SPAN.r-18u37iz)
+    //   target deserialize → [SPAN("由 "), SPAN.r-18u37iz, text(" 撰寫的"), SPAN("《...》..."), A.url]
+    //   extractA3Seq target → [inline, inline, text, inline, inline]
+    //   原本長度不符 4 vs 5 → fallback dual。寬容後把 " 撰寫的" 視為下一個 inline 的
+    //   leading,合進 SPAN.middle 譯文 → mutate 結果「 撰寫的《Steve Jobs in Exile》...」。
+    //
+    // 守門:source 必須是純 inline(全 inline 沒夾 text),否則 source 結構複雜不易判斷
+    // 自由 text 該吸收去哪。
+    const sourceAllInline = sourceSeq.length > 0 && sourceSeq.every(s => s.type === 'inline');
+    if (sourceAllInline && targetSeq.length !== sourceSeq.length) {
+      const tightened = [];
+      let prepend = '';
+      for (const item of targetSeq) {
+        if (item.type === 'text') {
+          prepend += item.node.nodeValue || '';
+        } else {
+          tightened.push({ inline: item, prepend });
+          prepend = '';
+        }
+      }
+      // trailing free text(在最後一個 inline 之後)沒地方放,捨棄(罕見 + 通常是
+      // LLM 譯文尾巴的標點,visually 影響小)。
+      if (tightened.length === sourceSeq.length) {
+        let allTagOk = true;
+        for (let i = 0; i < sourceSeq.length; i++) {
+          if (sourceSeq[i].tag !== tightened[i].inline.tag) { allTagOk = false; break; }
+        }
+        if (allTagOk) {
+          for (let i = 0; i < sourceSeq.length; i++) {
+            const s = sourceSeq[i];
+            const t = tightened[i].inline;
+            const pre = tightened[i].prepend;
+            const innerMutations = [];
+            const innerOk = collectA3Mutations(s.node, t.node, innerMutations);
+            if (innerOk) {
+              if (pre && innerMutations.length > 0) {
+                // 把 free text 合進該 inline 的第一個 text mutation 的 leading
+                innerMutations[0].newValue = pre + innerMutations[0].newValue;
+              }
+              for (const m of innerMutations) mutations.push(m);
+            }
+            // innerOk false:opaque(source 內部保留),free text 就丟掉(沒地方放;
+            // 但這是 placeholder opaque case,通常 inline 內容無譯文意義,可接受)
+          }
+          return true;
+        }
+      }
+    }
+
     if (sourceSeq.length !== targetSeq.length) return false;
     for (let i = 0; i < sourceSeq.length; i++) {
       const s = sourceSeq[i];
@@ -1069,8 +1169,18 @@
         mutations.push({ node: s.node, newValue: t.node.nodeValue });
       } else if (s.type === 'inline') {
         if (s.tag !== t.tag) return false;
-        const innerOk = collectA3Mutations(s.node, t.node, mutations);
-        if (!innerOk) return false;
+        // inline 視為 opaque placeholder:遞迴對齊內部成功 → 套用 inner mutations;
+        // 失敗 → 跳過該 inline 內部不 mutate(source 端原狀保留),不讓整段對齊
+        // 因 inline 子結構不同構而 fail 觸發 dual sibling fallback。對應 X URL <a>
+        // 場景:source <a> 含 <span class>https://</span>...<span>…</span> 三段
+        // inline,deserializer 從 placeholder slot 還原時只剩 text node 子序列,
+        // type 不符。協定本意是「inline placeholder 內部 source 端保持原樣」,
+        // 此鬆綁讓父層 text 仍能照常 mutate,符合 CLAUDE.md §15 single 原地替換。
+        const innerMutations = [];
+        const innerOk = collectA3Mutations(s.node, t.node, innerMutations);
+        if (innerOk) {
+          for (const m of innerMutations) mutations.push(m);
+        }
       }
     }
     return true;
@@ -1097,8 +1207,15 @@
       if (mutations.some(m => !m.node.isConnected)) return false;
       if (!STATE.nodeValueMutateBackup) STATE.nodeValueMutateBackup = new Map();
       if (!STATE.nodeValueMutateBackup.has(el)) {
+        // backup 同時存 originalValue(restorePage 還原用)與 translatedValue(Layer A4
+        // partial-reset detect 用 — framework 把任一 backup text node reset 成新值
+        // 時 nodeValue !== translatedValue 觸發 unmark + 重翻)。
         STATE.nodeValueMutateBackup.set(el,
-          mutations.map(m => ({ node: m.node, originalValue: m.node.nodeValue }))
+          mutations.map(m => ({
+            node: m.node,
+            originalValue: m.node.nodeValue,
+            translatedValue: m.newValue,
+          }))
         );
       }
       for (const m of mutations) m.node.nodeValue = m.newValue;
@@ -1115,7 +1232,7 @@
     if (textNodes.length === 1) {
       const node = textNodes[0];
       if (!STATE.nodeValueMutateBackup.has(el)) {
-        STATE.nodeValueMutateBackup.set(el, [{ node, originalValue: node.nodeValue }]);
+        STATE.nodeValueMutateBackup.set(el, [{ node, originalValue: node.nodeValue, translatedValue: translation }]);
       }
       node.nodeValue = translation;
       return true;
@@ -1127,7 +1244,7 @@
 
     // 都 OK,做 backup + mutate
     if (!STATE.nodeValueMutateBackup.has(el)) {
-      const backup = textNodes.map(node => ({ node, originalValue: node.nodeValue }));
+      const backup = textNodes.map((node, i) => ({ node, originalValue: node.nodeValue, translatedValue: chunks[i] }));
       STATE.nodeValueMutateBackup.set(el, backup);
     }
     for (let i = 0; i < textNodes.length; i++) {

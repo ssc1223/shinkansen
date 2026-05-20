@@ -406,6 +406,46 @@
     return { frag, ok, matched: matchedRef.count };
   };
 
+  // CJK 結尾 + Latin 開頭的邊界自動補空格(台灣排版慣例 + 下游 reader 擷取也需要)。
+  // LLM 重組句子時常把 inline placeholder 周邊的空白吃掉,典型現象:
+  //   原文「...rights ⟦1⟧https://...⟦/1⟧」(有 trailing space)
+  //   LLM 譯成「...轉播權⟦1⟧https://...⟦/1⟧」(無 trailing space)
+  //   deserialize 後 visual = 「轉播權https://...」(無 space)
+  // 修法:append slot element 進 frag 之前,查 frag tail 結尾若 CJK + 此 slot 整段
+  // textContent 開頭是 Latin,給 tail 補一個 space。
+  function _cjkLatinTailEndsCjk(textValue) {
+    return /[㐀-鿿豈-﫿ｦ-ﾟ]$/.test(textValue || '');
+  }
+  function _cjkLatinHeadStartsLatin(textValue) {
+    const t = (textValue || '').replace(/^\s+/, '');
+    return /^[A-Za-z0-9@#\-+/%&]/.test(t);
+  }
+  function _findTrailingTextNode(node) {
+    let cur = node;
+    while (cur && cur.nodeType === Node.ELEMENT_NODE) {
+      if (cur.tagName === 'BR') return null;
+      cur = cur.lastChild;
+    }
+    return cur && cur.nodeType === Node.TEXT_NODE ? cur : null;
+  }
+  function _maybePadCjkLatinSpace(frag, nextElement) {
+    const last = frag.lastChild;
+    if (!last) return;
+    let tailText = '';
+    if (last.nodeType === Node.TEXT_NODE) tailText = last.nodeValue || '';
+    else if (last.nodeType === Node.ELEMENT_NODE) tailText = last.textContent || '';
+    if (!tailText || /\s$/.test(tailText)) return;
+    if (!_cjkLatinTailEndsCjk(tailText)) return;
+    const headText = nextElement.textContent || '';
+    if (!_cjkLatinHeadStartsLatin(headText)) return;
+    if (last.nodeType === Node.TEXT_NODE) {
+      last.nodeValue = tailText + ' ';
+    } else {
+      const trailing = _findTrailingTextNode(last);
+      if (trailing) trailing.nodeValue = (trailing.nodeValue || '') + ' ';
+    }
+  }
+
   function parseSegment(text, slots, matchedRef) {
     const frag = document.createDocumentFragment();
     if (!text) return frag;
@@ -441,7 +481,9 @@
         const idx = Number(m[3]);
         const slot = slots[idx];
         if (slot && slot.atomic && slot.node) {
-          frag.appendChild(slot.node.cloneNode(true));
+          const cloned = slot.node.cloneNode(true);
+          _maybePadCjkLatinSpace(frag, cloned);
+          frag.appendChild(cloned);
           matchedRef.count++;
         }
       } else {
@@ -464,16 +506,20 @@
           while (reuse.firstChild) reuse.removeChild(reuse.firstChild);
           const innerFrag = parseSegment(inner, slots, matchedRef);
           reuse.appendChild(innerFrag);
+          _maybePadCjkLatinSpace(frag, reuse);
           frag.appendChild(reuse);
           matchedRef.count++;
         } else if (slot && slot.nodeType === Node.ELEMENT_NODE) {
           const shell = slot.cloneNode(false);
           const innerFrag = parseSegment(inner, slots, matchedRef);
           shell.appendChild(innerFrag);
+          _maybePadCjkLatinSpace(frag, shell);
           frag.appendChild(shell);
           matchedRef.count++;
         } else if (slot && slot.atomic && slot.node) {
-          frag.appendChild(slot.node.cloneNode(true));
+          const cloned = slot.node.cloneNode(true);
+          _maybePadCjkLatinSpace(frag, cloned);
+          frag.appendChild(cloned);
           matchedRef.count++;
         } else {
           const innerFrag = parseSegment(inner, slots, matchedRef);

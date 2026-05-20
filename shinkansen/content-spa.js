@@ -771,8 +771,14 @@
   // 對應 dual map 的 detectAndUnmarkExpandedDual 同套邏輯,只是換 map:
   // STATE.nodeValueMutateBackup 取代 STATE.translationCache。
   //
-  // 使用者點 X 顯示更多後 X 把 tt text node nodeValue 改成完整原文(textContent
-  // 從中文短譯 134 chars 變英文完整 4663 chars),Shinkansen 需偵測 + unmark + 重翻。
+  // 兩條 unmark 觸發 path:
+  //   (A) Full reset path:textContent 顯著變長 + startsWith origText(framework
+  //       把 tt 整段 reset 回完整原文,典型:X / Threads / Reddit 顯示更多 整段 re-mount)
+  //   (B) Partial reset path(v1.9.30+):任一 backup text node 的 nodeValue 不再
+  //       === 當初 mutate set 的 translatedValue(framework 只 reset 部分 text node,
+  //       中文 prefix 保留 + 後段被改成新英文,典型 X timeline view truncated 推文
+  //       點顯示更多 — X 只 reset 截斷處 text node 為展開後完整英文,前面已翻 SPAN
+  //       不動)。
   function detectAndUnmarkExpandedNodeValueMutate(mutations) {
     if (!STATE.nodeValueMutateBackup || STATE.nodeValueMutateBackup.size === 0) return false;
     if (!STATE.originalText) return false;
@@ -794,9 +800,32 @@
       if (!el.isConnected) continue;
       const origText = STATE.originalText.get(el);
       if (!origText) continue;
+
+      let trigger = null;
+
+      // Path (A): full reset
       const currentText = (el.textContent || '').trim();
-      if (currentText.length <= origText.length * 1.5) continue;
-      if (!currentText.startsWith(origText)) continue;
+      if (currentText.length > origText.length * 1.5 && currentText.startsWith(origText)) {
+        trigger = 'full-reset';
+      }
+
+      // Path (B): partial reset — 任一 backup text node nodeValue 已被 framework
+      // 改寫(不再 === 當初 set 的 translatedValue)。對應 X show more 部分 reset。
+      if (!trigger) {
+        const backup = STATE.nodeValueMutateBackup.get(el);
+        if (backup && backup.length > 0) {
+          for (const entry of backup) {
+            if (!entry || !entry.node || !entry.node.isConnected) continue;
+            if (typeof entry.translatedValue !== 'string') continue;
+            if (entry.node.nodeValue !== entry.translatedValue) {
+              trigger = 'partial-reset';
+              break;
+            }
+          }
+        }
+      }
+
+      if (!trigger) continue;
 
       // unmark + clear STATE,讓 collectParagraphs / Layer A3 inject 重跑
       el.removeAttribute('data-shinkansen-nodevalue-mutated');
@@ -805,6 +834,7 @@
       STATE.originalText.delete(el);
       STATE.originalHTML?.delete?.(el);
       unmarked++;
+      SK.sendLog?.('info', 'spa', `detect-expanded-nv-mutate: unmark via ${trigger}`);
     }
     if (unmarked > 0) {
       SK.sendLog('info', 'spa', `detect-expanded-nv-mutate: ${unmarked} element(s) unmarked for retranslation`);

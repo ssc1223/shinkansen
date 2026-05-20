@@ -129,3 +129,99 @@ test('Layer A4 守門：textContent 變長但 NOT startsWith origText → 不 un
   `);
   expect(String(result), 'NOT startsWith origText 應守門擋住').toBe('false');
 });
+
+// v1.9.30 Layer A4 Path B(partial reset)
+test('Layer A4 partial-reset:framework 把任一 backup text node nodeValue 改寫 → unmark 重翻', async ({
+  context,
+  localServer,
+}) => {
+  const page = await context.newPage();
+  await page.goto(`${localServer.baseUrl}/inject-nodevalue-mutate-a3.html`, { waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('#target', { timeout: 10_000 });
+  const { evaluate } = await getShinkansenEvaluator(page);
+
+  // 模擬:tt 內有 2 個 backed-up text node,各 mutate 成中文 translatedValue。
+  // 然後其中 1 個 text node 被 framework 改寫成新英文(對應 X show more 部分 reset)。
+  // detect 應透過 partial-reset path 觸發 unmark。
+  const result = await evaluate(`
+    (() => {
+      const el = document.createElement('div');
+      el.setAttribute('data-testid', 'tweetText');
+      el.setAttribute('data-shinkansen-nodevalue-mutated', '1');
+      el.setAttribute('data-shinkansen-translated', '1');
+      const span1 = document.createElement('span');
+      const span2 = document.createElement('span');
+      const text1 = document.createTextNode('正如我們今天在');
+      const text2 = document.createTextNode('所展示的');
+      span1.appendChild(text1);
+      span2.appendChild(text2);
+      el.appendChild(span1);
+      el.appendChild(span2);
+      document.body.appendChild(el);
+
+      const SK = window.__SK;
+      SK.STATE.translated = true;
+      SK._testNvMutateStubSetup(el, 'As we showed at today', [
+        { node: text1, originalValue: 'As we showed at', translatedValue: '正如我們今天在' },
+        { node: text2, originalValue: 'today', translatedValue: '所展示的' },
+      ]);
+
+      // 模擬 X show more 部分 reset:text2 被 framework 改寫成新英文
+      text2.nodeValue = 'today, Ask YouTube is a great way to explore more complex search queries';
+
+      const mockMutations = [{ target: text2, type: 'characterData' }];
+      const fired = window.__SK._detectAndUnmarkExpandedNodeValueMutate(mockMutations);
+      return {
+        fired,
+        attr_nodeValueMutated_after: el.hasAttribute('data-shinkansen-nodevalue-mutated'),
+        attr_translated_after: el.hasAttribute('data-shinkansen-translated'),
+        backup_has_el: window.__SK.STATE.nodeValueMutateBackup.has(el),
+      };
+    })()
+  `);
+  const r = typeof result === 'string' ? JSON.parse(result) : result;
+  expect(String(r.fired), 'partial-reset path 應 fire').toBe('true');
+  expect(r.attr_nodeValueMutated_after, 'attribute 應移除').toBe(false);
+  expect(r.attr_translated_after, 'translated attribute 應移除').toBe(false);
+  expect(r.backup_has_el, 'backup 該 el 應 clear').toBe(false);
+
+  await page.close();
+});
+
+test('Layer A4 partial-reset 守門:所有 backup node nodeValue 仍 === translatedValue → 不 unmark', async ({
+  context,
+  localServer,
+}) => {
+  const page = await context.newPage();
+  await page.goto(`${localServer.baseUrl}/inject-nodevalue-mutate-a3.html`, { waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('#target', { timeout: 10_000 });
+  const { evaluate } = await getShinkansenEvaluator(page);
+
+  const result = await evaluate(`
+    (() => {
+      const el = document.createElement('div');
+      el.setAttribute('data-shinkansen-nodevalue-mutated', '1');
+      const span1 = document.createElement('span');
+      const text1 = document.createTextNode('中文譯文');
+      span1.appendChild(text1);
+      el.appendChild(span1);
+      document.body.appendChild(el);
+
+      const SK = window.__SK;
+      SK.STATE.translated = true;
+      SK._testNvMutateStubSetup(el, 'original english text', [
+        { node: text1, originalValue: 'original english', translatedValue: '中文譯文' },
+      ]);
+      // 不動 text1.nodeValue,保持 === translatedValue
+
+      const mockMutations = [{ target: text1, type: 'characterData' }];
+      return {
+        fired: window.__SK._detectAndUnmarkExpandedNodeValueMutate(mockMutations),
+        attr_still: el.hasAttribute('data-shinkansen-nodevalue-mutated'),
+      };
+    })()
+  `);
+  const r = typeof result === 'string' ? JSON.parse(result) : result;
+  expect(String(r.fired), '所有 node 仍 === translatedValue,不該 unmark').toBe('false');
+  expect(r.attr_still, 'attribute 應維持').toBe(true);
+});
