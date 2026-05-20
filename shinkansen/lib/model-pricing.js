@@ -17,14 +17,14 @@
 export const DEFAULT_GEMINI_CACHED_DISCOUNT = 0.90;
 
 export const MODEL_PRICING = {
-  'gemini-3.1-flash-lite': { inputPerMTok: 0.10, outputPerMTok: 0.30, cachedDiscount: DEFAULT_GEMINI_CACHED_DISCOUNT },
+  'gemini-3.1-flash-lite': { inputPerMTok: 0.25, outputPerMTok: 1.50, cachedDiscount: DEFAULT_GEMINI_CACHED_DISCOUNT },
   'gemini-3-flash-preview':        { inputPerMTok: 0.50, outputPerMTok: 3.00, cachedDiscount: DEFAULT_GEMINI_CACHED_DISCOUNT },
-  'gemini-3.1-pro-preview':        { inputPerMTok: 2.00, outputPerMTok: 12.00, cachedDiscount: DEFAULT_GEMINI_CACHED_DISCOUNT },
+  'gemini-3.5-flash':              { inputPerMTok: 1.50, outputPerMTok: 9.00, cachedDiscount: DEFAULT_GEMINI_CACHED_DISCOUNT },
 };
 
 // v1.6.14:內建表校準日期。UI 顯示「(YYYY-MM 校準)」提示使用者可能過時。
 // release 時若 Google 公布新價,把這裡更新 + 同步 MODEL_PRICING 數字。
-export const LAST_CALIBRATED_DATE = '2026-04';
+export const LAST_CALIBRATED_DATE = '2026-05';
 
 /**
  * 查模型計價,各欄位獨立 fallback(v1.9.2 起):

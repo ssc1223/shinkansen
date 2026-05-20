@@ -879,6 +879,7 @@ body.runtime-safari .usage-date-label input[type="date"]::-webkit-datetime-edit 
 }
 .model-pricing-label strong { display: block; font-size: 14px; color: #1d1d1f; }
 .model-pricing-label small { display: block; margin-top: 2px; font-size: 12px; }
+.model-pricing-label small.model-id { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
 .model-pricing-row input[type="number"] {
   height: 32px;
   padding: 4px 8px;

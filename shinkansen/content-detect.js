@@ -441,10 +441,25 @@
   // 不阻擋 walker 訪問子節點)，不擋祖先會把同一段文字重複抽兩次，deserialize 時佔位符 slot
   // 對不上譯文。Case A/B/C 因為 CONTAINER_TAGS 限定 DIV/SECTION 等少嵌套 tag 沒踩到，
   // Case D 把 SPAN 納入後必須補上。
+  //
+  // v1.9.31: 加 block-boundary 邏輯 — 若 inner el 到 extracted ancestor 之間隔了一層
+  // BLOCK tag (LI / P / 等),則 inner el 的內容不可能在 extracted ancestor 的 fragment 內
+  // (extractInlineFragments 在 BLOCK 子孫處 flushRun,inline run 不會跨越 block 邊界)。
+  // 真實 case: IG modal 留言 outer LI 因含 block 子孫 + 文字 >= 300 字走 containsBlockDescendant
+  // 路徑(line 815)被加進 fragmentExtracted,內層 reply LI > 嵌套 DIV > SPAN[dir=auto] 的
+  // Case D 會被原 hasAncestorExtracted 誤擋(outer LI 是祖先),但 UL/LI 已切斷 inline run,
+  // inner SPAN 內容根本不在 outer LI 的 fragment 範圍內,擋住純粹是 over-block。
   function hasAncestorExtracted(el, fragmentExtracted) {
     let cur = el.parentElement;
+    let crossedBlock = false;
     while (cur && cur !== document.body) {
-      if (fragmentExtracted.has(cur)) return true;
+      if (fragmentExtracted.has(cur)) {
+        // 跨越 block 邊界後遇到的 extracted ancestor:其 fragment 用 inline-run 抽,
+        // block 邊界把 inner el 隔在 fragment 外。繼續往上找。
+        if (crossedBlock) { cur = cur.parentElement; continue; }
+        return true;
+      }
+      if (SK.BLOCK_TAGS_SET.has(cur.tagName)) crossedBlock = true;
       cur = cur.parentElement;
     }
     return false;
@@ -519,6 +534,15 @@
     // v1.8.14: 補抓三條（leaf anchor / leaf div span / 等）共用的「BLOCK 祖先」memo。
     // 之前每條補抓路徑各自從葉節點 walk 到 body，大頁面浪費上千次祖先比對。
     const blockAncestorMemo = new Map();
+    // v1.9.31: walker 期間用 interactiveWidget reject 掉的 block element 集合。
+    // hasBlockAncestor 走訪時若祖先在此集合內,視為「不算 block 祖先」,讓 leaf
+    // 補抓 path 可以撈出 widget-reject block 內藏的長文 leaf(典型場景:Instagram
+    // modal photo viewer 留言 — 結構是 UL > DIV[role=button] > LI > 嵌套 DIV >
+    // SPAN[dir=auto] 留言文字,LI 內含 reply / like / more 等真實 button →
+    // walker reject 整顆 LI subtree,但 leaf SPAN 是純 prose 應該翻)。
+    // memo 安全:widgetRejectedBlocks 在 walker 跑完才被讀(補抓 path 都在 walker
+    // 之後),walker 期間不會用到 hasBlockAncestor。
+    const widgetRejectedBlocks = new Set();
     function hasBlockAncestor(el) {
       if (blockAncestorMemo.has(el)) return blockAncestorMemo.get(el);
       const chain = [];
@@ -530,7 +554,7 @@
           break;
         }
         chain.push(cur);
-        if (SK.BLOCK_TAGS_SET.has(cur.tagName)) {
+        if (SK.BLOCK_TAGS_SET.has(cur.tagName) && !widgetRejectedBlocks.has(cur)) {
           result = true;
           break;
         }
@@ -682,7 +706,15 @@
               !hasAncestorExtracted(el, fragmentExtracted) &&
               hasDirectText &&
               hasDirectNonBrElement(el) &&
-              directTextLength(el) >= 20 &&
+              // v1.9.31: 原本只看 directTextLength >= 20,但 IG / Threads / Mastodon 等
+              // 留言常見「<span><a>@mention</a>短直接文字</span>」結構,直接文字 < 20 字
+              // 但加上 @mention anchor 的 textContent 後總長 >= 20 字明顯是 prose。
+              // 改成「直接文字 >= 5 字 AND 整段 textContent >= 20 字」— 第一條防 SPAN
+              // 純包 anchor 沒 prose 的場景(會被 leaf-anchor 補抓正確處理),第二條維持
+              // 20 字 prose 標準。負向對照 short-inline-nav <span>Home <a>·</a> About</span>
+              // 總 12 字 < 20 仍擋。
+              (directTextLength(el) >= 20 ||
+                (directTextLength(el) >= 5 && (el.textContent || '').trim().length >= 20)) &&
               isCandidateText(el)
             ) {
               fragmentExtracted.add(el);
@@ -710,7 +742,10 @@
               hasDirectText &&
               hasBrChild(el) &&
               !hasDirectNonBrElement(el) &&
-              directTextLength(el) >= 20 &&
+              // v1.9.31: 與 Case D 對稱放寬,讓 BR 分段的短直接文字 SPAN(含 mention
+              // 或 inline link 後展開的 br 多段)在總長 >= 20 字時通過。
+              (directTextLength(el) >= 20 ||
+                (directTextLength(el) >= 5 && (el.textContent || '').trim().length >= 20)) &&
               isCandidateText(el)
             ) {
               results.push({ kind: 'element', el });
@@ -727,7 +762,16 @@
         }
         if (!SK.WIDGET_CHECK_EXEMPT_TAGS.has(el.tagName) && isInteractiveWidgetContainer(el)) {
           if (stats) stats.interactiveWidget = (stats.interactiveWidget || 0) + 1;
-          return NodeFilter.FILTER_REJECT;
+          // v1.9.31: 記住此 block,後續 leaf 補抓的 hasBlockAncestor 視為非 block 祖先。
+          // FILTER_SKIP(非 FILTER_REJECT):本 block 自己不當 unit(避免整顆送 LLM 壓扁
+          // 版面,保留 v0.39 widget rejection 原意),但讓 walker 下去找內部 Case A-E
+          // 能對到的 mixed-inline SPAN / 長文 P / heading 等真實 prose unit。
+          // 真實 case:IG modal「查看回覆」展開的 reply SPAN 結構為
+          //   <span dir="auto"><a>@mention</a>werden sie auch nie machen...</span>
+          // SPAN 有 anchor 子(非 leaf,leaf 補抓接不到),只有 walker Case D 能抽 fragment。
+          // 原 FILTER_REJECT 不下去 → reply 永遠翻不到。
+          if (SK.BLOCK_TAGS_SET.has(el.tagName)) widgetRejectedBlocks.add(el);
+          return NodeFilter.FILTER_SKIP;
         }
         if (!SK.isVisible(el)) {
           if (stats) stats.invisible = (stats.invisible || 0) + 1;

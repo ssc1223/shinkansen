@@ -114,9 +114,9 @@ async function load() {
   fillOverride('override-flash-input', 'gemini-3-flash-preview', 'inputPerMTok');
   fillOverride('override-flash-output','gemini-3-flash-preview', 'outputPerMTok');
   fillOverrideDiscount('override-flash-discount', 'gemini-3-flash-preview');
-  fillOverride('override-pro-input',   'gemini-3.1-pro-preview', 'inputPerMTok');
-  fillOverride('override-pro-output',  'gemini-3.1-pro-preview', 'outputPerMTok');
-  fillOverrideDiscount('override-pro-discount', 'gemini-3.1-pro-preview');
+  fillOverride('override-pro-input',   'gemini-3.5-flash', 'inputPerMTok');
+  fillOverride('override-pro-output',  'gemini-3.5-flash', 'outputPerMTok');
+  fillOverrideDiscount('override-pro-discount', 'gemini-3.5-flash');
   $('whitelist').value = (s.domainRules.whitelist || []).join('\n');
   $('debugLog').checked = s.debugLog;
 
@@ -932,7 +932,7 @@ async function _saveImpl() {
       const rows = [
         collect('gemini-3.1-flash-lite', 'override-lite-input',  'override-lite-output',  'override-lite-discount'),
         collect('gemini-3-flash-preview',         'override-flash-input', 'override-flash-output', 'override-flash-discount'),
-        collect('gemini-3.1-pro-preview',         'override-pro-input',   'override-pro-output',   'override-pro-discount'),
+        collect('gemini-3.5-flash',         'override-pro-input',   'override-pro-output',   'override-pro-discount'),
       ].filter(Boolean);
       const out = {};
       for (const r of rows) {

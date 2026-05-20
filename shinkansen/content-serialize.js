@@ -61,6 +61,8 @@
         if (child.nodeType !== Node.ELEMENT_NODE) continue;
         if (SK.HARD_EXCLUDE_TAGS.has(child.tagName)) continue;
         if (SK.isAtomicPreserve(child)) continue;
+        // v1.9.31: 含 element child 的 A 在 serialize 走 atomic,不算 paired。
+        if (child.tagName === 'A' && hasElementChild(child)) continue;
         if (SK.GT_INLINE_TAGS.has(child.tagName)) {
           count++;
           if (count > GT_MAX_PAIRED_SLOTS) return;
@@ -71,6 +73,15 @@
     }
     walk(topLevelNodes);
     return count;
+  }
+
+  // v1.9.31: 判斷 element 是否含 element child(用於 Google MT 對 anchor atomic 判斷)。
+  function hasElementChild(el) {
+    if (!el || !el.childNodes) return false;
+    for (const c of el.childNodes) {
+      if (c.nodeType === Node.ELEMENT_NODE) return true;
+    }
+    return false;
   }
 
   function serializeNodeIterableForGoogle(topLevelNodes, opts) {
@@ -122,6 +133,43 @@
           if (child.tagName === 'BR') { out += '\u0001'; continue; }
           // Atomic 元素（footnote sup 等）→ 單一標記，不翻內容
           if (SK.isAtomicPreserve(child)) {
+            const idx = slots.length;
+            slots.push({ atomic: true, node: child.cloneNode(true) });
+            out += '【*' + idx + '】';
+            continue;
+          }
+          // v1.9.31: 含 element child 的 anchor 走 atomic deep clone path。
+          // Why:Google MT 對含 nested SPAN 結構的 anchor(典型 X 推文 URL anchor:
+          // <a><span>https://</span>text<span>main</span><span>…</span></a>、X @mention
+          // anchor、framework site 的 link card)若走 paired marker shallow clone,
+          // deserialize 時 anchor 內部結構全丟(只剩 Google MT 翻譯後純 text),
+          // source/target 結構不對等 → Layer A3 collectA3Mutations 對齊失敗 →
+          // framework-managed 段落 fallback dual sibling wrapper(違反 §15 single
+          // 原地替換)。改 atomic 後 anchor 整段 deep clone 不送 Google API,
+          // deserialize 直接塞回 source 原樣 → A3 對齊成功 → nodeValue mutate single。
+          //
+          // Trade-off:含 element child 的 markdown link `<a>some <b>bold</b> text</a>`
+          // anchor inner text 也不翻。但這在 prose 文章較少見,且即使不翻 link text 也
+          // 不會 break 文章主體翻譯。純 text 內 anchor `<a>科學家</a>` 維持 paired
+          // marker 可翻(維基百科 / 一般 inline link 不受影響)。
+          //
+          // 不動 LLM serializeNodeIterable:Gemini path 對 anchor 內 SPAN 翻譯品質較好,
+          // 且 LLM Layer A3 fallback 路徑跟 Google MT 不同(LLM 有更寬鬆的 free text
+          // 吸收邏輯),不需此改動。
+          if (!degrade && child.tagName === 'A' && hasElementChild(child)) {
+            const idx = slots.length;
+            slots.push({ atomic: true, node: child.cloneNode(true) });
+            out += '【*' + idx + '】';
+            continue;
+          }
+          // v1.9.31: IMG 走 atomic deep clone(Twitter / X 用 IMG render emoji)。
+          // 原本 IMG 走 walk(childNodes) 透明展開,IMG 沒 children 等於從 source text
+          // 流消失,Google MT API 收不到 emoji 位置,deserialize 後 tgt 也沒 IMG → src
+          // 端 IMG 位置(sibling text 之間)失去對應 tgt token 跟結構,segment 對齊
+          // 把 tgt 全集塞給第一個 ss,emoji 視覺跑到段尾。改 atomic 後 IMG 在 source
+          // text 出現為【*N】marker,Google MT 看到不翻直接保留,deserialize 後 tgt
+          // 還原 IMG 位置 → src/tgt 兩端 IMG 邊界對齊。
+          if (!degrade && child.tagName === 'IMG') {
             const idx = slots.length;
             slots.push({ atomic: true, node: child.cloneNode(true) });
             out += '【*' + idx + '】';

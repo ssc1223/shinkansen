@@ -1282,7 +1282,7 @@ async function handleTranslate(payload, sender, geminiOverrides = {}, pricingOve
     geminiConfig: { ...settings.geminiConfig, ...geminiOverrides, systemInstruction: baseSI },
   };
   // v1.4.12: preset 帶 modelOverride 時，從內建表查對應 model 的 pricing，
-  // 確保 toast / usage log 的費用與 model 一致（Flash Lite $0.10/$0.30、Flash $0.50/$3.00）。
+  // 確保 toast / usage log 的費用與 model 一致（Flash Lite $0.25/$1.50、Flash $0.50/$3.00）。
   // 優先順序：pricingOverride（字幕獨立計價） > modelOverride 查表 > settings.pricing
   let effectivePricing = pricingOverride;
   if (!effectivePricing && geminiOverrides.model) {

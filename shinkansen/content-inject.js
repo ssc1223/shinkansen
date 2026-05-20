@@ -1027,7 +1027,7 @@
   // extractA3Seq 必須一致視為透明、遞迴拆進子節點,否則 source seq 帶 inline
   // 而 target seq(來自 deserialize)是 text,type 不符 alignment fail。
   // 同 CLAUDE.md §5 單一資料源:preservable 判斷一條 source of truth。
-  function extractA3Seq(rootEl) {
+  function extractA3Seq(rootEl, imgIsInline = false) {
     const seq = [];
     for (const child of rootEl.childNodes) {
       if (child.nodeType === Node.TEXT_NODE) {
@@ -1037,12 +1037,74 @@
         continue;
       }
       if (child.nodeType !== Node.ELEMENT_NODE) continue;
+      // v1.9.31: IMG 視為 inline atomic 只在 tgt 端含 IMG 時啟用(Google MT IMG
+      // atomic path 才會,LLM Gemini path 對 IMG 透明,tgt 沒 IMG → src 也須透明
+      // 避免 src/tgt seq 長度錯位)。
+      if (imgIsInline && child.tagName === 'IMG') {
+        seq.push({ type: 'inline', node: child, tag: 'IMG' });
+        continue;
+      }
       if (SK.isPreservableInline?.(child)) {
         seq.push({ type: 'inline', node: child, tag: child.tagName });
       } else {
         // 透明 container(unstyled SPAN / DIV / 無實質內容 SPAN / IMG ...)
         // 拆解進子節點
-        const inner = extractA3Seq(child);
+        const inner = extractA3Seq(child, imgIsInline);
+        for (const item of inner) seq.push(item);
+      }
+    }
+    return seq;
+  }
+
+  // v1.9.31: Layer A3 對 SPAN 完全透明的變體 — 任何 SPAN(無論 class、無論 inner 內容)
+  // 一律透明展開,A / B / I / STRONG 等 semantic inline 維持 opaque。
+  //
+  // Why:Google MT serializer 對 SPAN 一律透明展開(content-serialize.js
+  // serializeNodeIterableForGoogle line 144 註解:「SPAN 是最常見的爆炸來源」),
+  // deserialize 後 target frag 內 SPAN.class wrapper 不存在(只剩 inner)。但
+  // extractA3Seq 對 source 端 preservable SPAN 仍視為 inline,造成 src.inline(SPAN)
+  // vs tgt.text 型別不符 alignment fail → framework-managed 段落走 dual sibling
+  // wrapper(違反 §15 single 原地替換)。
+  //
+  // 對應真實 X 推文(2026-05-20 Chrome for Claude 驗證):
+  //   source: <div><span class="...">主文 prose</span><a>URL</a><span> </span><div><span><a>@mention</a></span></div></div>
+  //   Google MT serializer:主文 prose 純文字 + 【*0】(A.url atomic) + ' ' + 【1】@mention【/1】
+  //   Google MT 翻完 deserialize:[text("中文主文"), A.url(deep clone), text(' '), A.mention]
+  //   strict extractA3Seq src:[inline(SPAN.main), inline(A.url), inline(SPAN.mention-wrap)]
+  //     vs tgt:[text, inline(A.url), inline(A.mention)] → src[0] inline vs tgt[0] text → fail。
+  //
+  // SPAN-unwrap src:[text(主文), inline(A.url), inline(A.mention)](SPAN.main 展開為 text、
+  // DIV/SPAN.mention-wrap 展開為 A.mention)。
+  // SPAN-unwrap tgt:[text, inline(A.url), inline(A.mention)] = 3 items。
+  // 對齊成功 → nodeValue mutate single。
+  //
+  // 只在 strict fail 後當 fallback 用,不取代 extractA3Seq(避免影響 Gemini LLM
+  // path 的既有 spec 假設,LLM SPAN 走 paired marker,target 端保留 SPAN wrapper,
+  // strict 就過,不會走到此 fallback)。
+  function extractA3SeqSpanUnwrapped(rootEl, imgIsInline = false) {
+    const seq = [];
+    for (const child of rootEl.childNodes) {
+      if (child.nodeType === Node.TEXT_NODE) {
+        if (child.nodeValue && child.nodeValue.trim()) {
+          seq.push({ type: 'text', node: child });
+        }
+        continue;
+      }
+      if (child.nodeType !== Node.ELEMENT_NODE) continue;
+      // v1.9.31: IMG 視為 inline atomic 同 extractA3Seq(動態)
+      if (imgIsInline && child.tagName === 'IMG') {
+        seq.push({ type: 'inline', node: child, tag: 'IMG' });
+        continue;
+      }
+      // SPAN 一律透明展開(無論有無 class、無論 inner 是 text 還是 element)
+      if (child.tagName === 'SPAN') {
+        const inner = extractA3SeqSpanUnwrapped(child, imgIsInline);
+        for (const item of inner) seq.push(item);
+      } else if (SK.isPreservableInline?.(child)) {
+        // A / B / I / STRONG / EM / SUB / SUP / ... 維持 opaque inline
+        seq.push({ type: 'inline', node: child, tag: child.tagName });
+      } else {
+        const inner = extractA3SeqSpanUnwrapped(child, imgIsInline);
         for (const item of inner) seq.push(item);
       }
     }
@@ -1076,9 +1138,26 @@
     return false;
   }
 
+  // v1.9.31:1-to-1 text mutate 的 leading/trailing whitespace preserve helper。
+  // 對應 X 推文「✨ Spatial...」emoji 後空格、「\n\n」段落空行等 — Google MT / LLM
+  // 翻譯後常去掉原 leading space 跟 trailing \n,mutate src text 為純翻譯結果會丟失
+  // 視覺結構。helper 規則:tgt 自帶 ws 優先用 tgt 的,否則 fallback 用 src ws(preserve)。
+  function preserveWsTextMutate(srcVal, tgtVal) {
+    const srcLead = (srcVal.match(/^\s+/) || [''])[0];
+    const srcTrail = (srcVal.match(/\s+$/) || [''])[0];
+    const tgtLead = ((tgtVal || '').match(/^\s+/) || [''])[0];
+    const tgtTrail = ((tgtVal || '').match(/\s+$/) || [''])[0];
+    const tgtStripped = (tgtVal || '').replace(/^\s+|\s+$/g, '');
+    return (tgtLead || srcLead) + tgtStripped + (tgtTrail || srcTrail);
+  }
+
   function collectA3Mutations(sourceContainer, targetContainer, mutations) {
-    const sourceSeq = extractA3Seq(sourceContainer);
-    const targetSeq = extractA3Seq(targetContainer);
+    // v1.9.31:tgt 含 IMG → Google MT IMG atomic path → src 端也視 IMG 為 inline;
+    // tgt 無 IMG → LLM Gemini path 對 IMG 透明,src 端也須透明(否則 src 多 IMG inline
+    // 比 tgt 多,長度不符 fallback dual,破壞 LLM path 原本 work 的對齊)。
+    const imgIsInline = !!targetContainer.querySelector?.('img');
+    const sourceSeq = extractA3Seq(sourceContainer, imgIsInline);
+    const targetSeq = extractA3Seq(targetContainer, imgIsInline);
     // Special case:source 是單一 text node(內含 \n)+ target 是純 text 序列(deserialize
     // 把原 LLM \n 拆成 br,extractA3Seq 不收 br)。還原 target br 為 \n 接成完整字串
     // 設給 source text node。對應 X tweetText 結構:source SPAN 內 1 text node 含
@@ -1160,30 +1239,165 @@
       }
     }
 
-    if (sourceSeq.length !== targetSeq.length) return false;
-    for (let i = 0; i < sourceSeq.length; i++) {
-      const s = sourceSeq[i];
-      const t = targetSeq[i];
-      if (s.type !== t.type) return false;
-      if (s.type === 'text') {
-        mutations.push({ node: s.node, newValue: t.node.nodeValue });
-      } else if (s.type === 'inline') {
-        if (s.tag !== t.tag) return false;
-        // inline 視為 opaque placeholder:遞迴對齊內部成功 → 套用 inner mutations;
-        // 失敗 → 跳過該 inline 內部不 mutate(source 端原狀保留),不讓整段對齊
-        // 因 inline 子結構不同構而 fail 觸發 dual sibling fallback。對應 X URL <a>
-        // 場景:source <a> 含 <span class>https://</span>...<span>…</span> 三段
-        // inline,deserializer 從 placeholder slot 還原時只剩 text node 子序列,
-        // type 不符。協定本意是「inline placeholder 內部 source 端保持原樣」,
-        // 此鬆綁讓父層 text 仍能照常 mutate,符合 CLAUDE.md §15 single 原地替換。
-        const innerMutations = [];
-        const innerOk = collectA3Mutations(s.node, t.node, innerMutations);
-        if (innerOk) {
-          for (const m of innerMutations) mutations.push(m);
+    if (sourceSeq.length === targetSeq.length) {
+      let strictOk = true;
+      const strictMutations = [];
+      for (let i = 0; i < sourceSeq.length; i++) {
+        const s = sourceSeq[i];
+        const t = targetSeq[i];
+        if (s.type !== t.type) { strictOk = false; break; }
+        if (s.type === 'text') {
+          strictMutations.push({
+            node: s.node,
+            newValue: preserveWsTextMutate(s.node.nodeValue || '', t.node.nodeValue || ''),
+          });
+        } else if (s.type === 'inline') {
+          if (s.tag !== t.tag) { strictOk = false; break; }
+          // inline 視為 opaque placeholder:遞迴對齊內部成功 → 套用 inner mutations;
+          // 失敗 → 跳過該 inline 內部不 mutate(source 端原狀保留),不讓整段對齊
+          // 因 inline 子結構不同構而 fail 觸發 dual sibling fallback。對應 X URL <a>
+          // 場景:source <a> 含 <span class>https://</span>...<span>…</span> 三段
+          // inline,deserializer 從 placeholder slot 還原時只剩 text node 子序列,
+          // type 不符。協定本意是「inline placeholder 內部 source 端保持原樣」,
+          // 此鬆綁讓父層 text 仍能照常 mutate,符合 CLAUDE.md §15 single 原地替換。
+          const innerMutations = [];
+          const innerOk = collectA3Mutations(s.node, t.node, innerMutations);
+          if (innerOk) {
+            for (const m of innerMutations) strictMutations.push(m);
+          }
         }
       }
+      if (strictOk) {
+        for (const m of strictMutations) mutations.push(m);
+        return true;
+      }
     }
-    return true;
+
+    const srcSpanU = extractA3SeqSpanUnwrapped(sourceContainer, imgIsInline);
+    const tgtSpanU = extractA3SeqSpanUnwrapped(targetContainer, imgIsInline);
+    if (srcSpanU.length === tgtSpanU.length && srcSpanU.length > 0) {
+      const unwrapMutations = [];
+      let unwrapOk = true;
+      for (let i = 0; i < srcSpanU.length; i++) {
+        const s = srcSpanU[i];
+        const t = tgtSpanU[i];
+        if (s.type !== t.type) { unwrapOk = false; break; }
+        if (s.type === 'text') {
+          unwrapMutations.push({ node: s.node, newValue: t.node.nodeValue });
+        } else {
+          // inline:tag 必符
+          if (s.tag !== t.tag) { unwrapOk = false; break; }
+          const innerMutations = [];
+          const innerOk = collectA3Mutations(s.node, t.node, innerMutations);
+          if (innerOk) {
+            for (const m of innerMutations) unwrapMutations.push(m);
+          }
+        }
+      }
+      if (unwrapOk) {
+        for (const m of unwrapMutations) mutations.push(m);
+        return true;
+      }
+    }
+
+    // v1.9.31 \n-aware segment fallback:SPAN-unwrap 等長對齊也失敗時,以 inline 為
+    // 錨點把 srcSpanU / tgtSpanU 分段(inline 跟相鄰 text 區塊),inline-to-inline
+    // tag 對齊 + 區段內多 text 用 \n join 起來 mutate。
+    //
+    // Why:X 推文使用者打 Enter 換行時 source 端 SPAN 內 text node 含 `\n` char
+    // (white-space: pre-wrap render 出換行視覺),Google MT serializer 對 SPAN
+    // 透明 + preserveNewlines=true 把 \n 送進 Google API,Google 翻完保留 \n,
+    // deserialize 時 \n 拆成 BR + text node。target seq SPAN-unwrap 後比 src 多
+    // 出 BR-split 的 text node,strict / SPAN-unwrap 等長都對不上。
+    //
+    // 對應 @asymco Mont Blanc / Exotica tweet(2026-05-20 Chrome for Claude probe):
+    //   source structure:[SPAN.main(含 \n + Mont Blanc), A.url1, SPAN("\nExotica "), A.url2, ...hashtags]
+    //   target structure(BR + text 拆 \n):[text(中文主文), BR, text(萬寶龍), A.url1, BR, text(奇特), A.url2, ...]
+    //   src SpanU 6 vs tgt SpanU 7(BR-skip 後 tgt 主文段多 1 個 text)→ SPAN-unwrap fail。
+    //   segment 後 inline 數量對等(4=4)→ 區段內 1 text vs N text 用 \n join mutate。
+    function segment(seq) {
+      const segs = [];
+      let cur = [];
+      for (const item of seq) {
+        if (item.type === 'text') cur.push(item);
+        else { segs.push(cur); segs.push(item); cur = []; }
+      }
+      segs.push(cur);
+      return segs;
+    }
+    const srcSegs = segment(srcSpanU);
+    const tgtSegs = segment(tgtSpanU);
+    if (srcSegs.length === tgtSegs.length && srcSegs.length > 1) {
+      const segMutations = [];
+      let segOk = true;
+      for (let i = 0; i < srcSegs.length; i++) {
+        const ss = srcSegs[i];
+        const ts = tgtSegs[i];
+        if (i % 2 === 1) {
+          // inline 位置
+          if (ss.tag !== ts.tag) { segOk = false; break; }
+          const inner = [];
+          const innerOk = collectA3Mutations(ss.node, ts.node, inner);
+          if (innerOk) for (const m of inner) segMutations.push(m);
+          continue;
+        }
+        // text segment(可空)
+        if (ss.length === 0 && ts.length === 0) continue;
+        if (ss.length === 0 && ts.length > 0) { segOk = false; break; }
+        // v1.9.31:Google MT 把短 metadata 連接詞(" by " / " - " / " via " /
+        // " at "等)跟前段主文一起翻譯,deserialize 後該 text segment 在 tgt 消失。
+        // src 端的 text 失去對應 tgt → mutate 為 "" 接受視覺上失去該連接詞(中文翻譯
+        // 通常會把連接詞合進前後 text)。守門:只在 src 全部 text 加總 ≤ 12 字時容忍
+        // (避免把實質 prose 丟掉)。
+        if (ts.length === 0 && ss.length > 0) {
+          const totalLen = ss.reduce((acc, item) => acc + (item.node.nodeValue || '').length, 0);
+          if (totalLen <= 12) {
+            for (const item of ss) {
+              segMutations.push({ node: item.node, newValue: '' });
+            }
+            continue;
+          }
+          segOk = false; break;
+        }
+        if (ss.length === ts.length) {
+          // 1-to-1 mutate:用 helper preserve src 原 leading/trailing whitespace
+          // (含 \n 跟 leading space — Google MT 翻譯「 Spatial...\n」變「空間運算...」,
+          // 失去前空格跟 trailing \n,視覺結構就破)
+          for (let j = 0; j < ss.length; j++) {
+            segMutations.push({
+              node: ss[j].node,
+              newValue: preserveWsTextMutate(ss[j].node.nodeValue || '', ts[j].node.nodeValue || ''),
+            });
+          }
+        } else {
+          // src N vs tgt M(N != M)— Google MT 對含 \n / IMG emoji / 多段 prose 的
+          // 推文翻譯後 text 切分跟 src 不對等(IMG 透明不送 API、\n 拆 BR 後 skip
+          // 不同數量)。catch-all:把 tgt 全部 text join 塞給 ss[0],ss[1..N] mutate
+          // 為 ""。視覺結果:src 端集中 nodeValue 在 ss[0],含完整中文 + 分段。
+          //
+          // separator 看 src 全部 text 是否含 \n\n:含 → join('\n\n') 保留段落空行;
+          // 否則 join('\n')。leading/trailing whitespace 從 src ss 整段抽含 space
+          // 跟 \n(preserveWsTextMutate 同邏輯)。
+          const ssJoined = ss.map(s => s.node.nodeValue || '').join('');
+          const srcLead = (ssJoined.match(/^\s+/) || [''])[0];
+          const srcTrail = (ssJoined.match(/\s+$/) || [''])[0];
+          const sep = /\n\n/.test(ssJoined) ? '\n\n' : '\n';
+          const tgtJoined = ts
+            .map(t => (t.node.nodeValue || '').replace(/^\s+|\s+$/g, ''))
+            .join(sep);
+          segMutations.push({ node: ss[0].node, newValue: srcLead + tgtJoined + srcTrail });
+          for (let j = 1; j < ss.length; j++) {
+            segMutations.push({ node: ss[j].node, newValue: '' });
+          }
+        }
+      }
+      if (segOk) {
+        for (const m of segMutations) mutations.push(m);
+        return true;
+      }
+    }
+
+    return false;
   }
 
   SK.tryInjectNodeValueMutate = function tryInjectNodeValueMutate(el, translation, slots) {

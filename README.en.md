@@ -101,7 +101,7 @@ Shinkansen offers three customizable translation presets, each bound to a shortc
 
 | Shortcut | Default engine | Default model | Best for |
 |----------|----------------|---------------|----------|
-| `Alt+A` / `Option+A` | Gemini | Flash Lite ($0.10 / $0.30) | Casual translation, max savings |
+| `Alt+A` / `Option+A` | Gemini | Flash Lite ($0.25 / $1.50) | Casual translation, max savings |
 | `Alt+S` / `Option+S` | Gemini | Flash ($0.50 / $3.00) | Daily reading, best quality / value |
 | `Alt+D` / `Option+D` | Google Translate | — | No API key needed, fast, free |
 
@@ -274,27 +274,21 @@ Off by default. Recommended only for articles where precision matters (e.g., lon
 
 | Model | RPM | TPM | RPD |
 |-------|-----|-----|-----|
-| Gemini 2.5 Flash Lite | 4K | 4M | unlimited |
-| Gemini 2.5 Flash | 1K | 1M | 10K |
 | Gemini 3.1 Flash Lite | 4K | 4M | 150K |
 | Gemini 3 Flash | 1K | 2M | 10K |
-| Gemini 2.5 Pro | 150 | 2M | 1K |
-| Gemini 3.1 Pro | 225 | 2M | 250 |
+| Gemini 3.5 Flash | 225 | 2M | 250 |
 
 ### Tier 2
 
 | Model | RPM | TPM | RPD |
 |-------|-----|-----|-----|
-| Gemini 2.5 Flash Lite | 20K | 10M | unlimited |
-| Gemini 2.5 Flash | 2K | 3M | 100K |
 | Gemini 3.1 Flash Lite | 10K | 10M | 350K |
 | Gemini 3 Flash | 2K | 3M | 100K |
-| Gemini 2.5 Pro | 1K | 5M | 50K |
-| Gemini 3.1 Pro | 1K | 5M | 50K |
+| Gemini 3.5 Flash | 1K | 5M | 50K |
 
 ## Current version
 
-v1.9.28 — full feature list and specs in [SPEC.md](SPEC.md) (Traditional Chinese only).
+v1.10.0 — full feature list and specs in [SPEC.md](SPEC.md) (Traditional Chinese only).
 
 ## License
 
