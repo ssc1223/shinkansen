@@ -5,6 +5,8 @@ import SwiftUI
 
 @main
 struct ShinkansenApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+
     var body: some Scene {
         WindowGroup {
             ContentView()
@@ -14,5 +16,12 @@ struct ShinkansenApp: App {
         .commands {
             CommandGroup(replacing: .newItem) { }
         }
+    }
+}
+
+// 單視窗 App:關閉主視窗即結束 App,符合 Apple Guideline 4 (Design) 對單視窗 App 的指引
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        true
     }
 }

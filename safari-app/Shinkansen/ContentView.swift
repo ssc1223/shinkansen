@@ -6,8 +6,6 @@ import SafariServices
 
 private let extensionBundleIdentifier = "app.shinkansen.macos.Extension"
 
-private let apiKeyGuideURL = URL(string: "https://github.com/jimmysu0309/shinkansen/blob/main/docs/API-KEY-SETUP.md")!
-
 struct ContentView: View {
     @Environment(\.locale) private var locale
 
@@ -17,6 +15,12 @@ struct ContentView: View {
 
     private var isZhHant: Bool {
         locale.language.languageCode?.identifier == "zh"
+    }
+
+    // API-KEY-SETUP.md 是 docs/ 內中英分檔,per-locale 切檔名
+    private var apiKeyGuideURL: URL {
+        let file = isZhHant ? "API-KEY-SETUP.md" : "API-KEY-SETUP.en.md"
+        return URL(string: "https://github.com/jimmysu0309/shinkansen/blob/main/docs/\(file)")!
     }
 
     // privacy-policy / release-notes 是 docs/ 內中英分檔,直接 per-locale 切檔名

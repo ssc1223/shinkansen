@@ -15,6 +15,7 @@
 		9E1032662FB3050300706F81 /* content.css in Resources */ = {isa = PBXBuildFile; fileRef = 9E10324E2FB3050300706F81 /* content.css */; };
 		9E1032672FB3050300706F81 /* LICENSE in Resources */ = {isa = PBXBuildFile; fileRef = 9E10324F2FB3050300706F81 /* LICENSE */; };
 		9E1032682FB3050300706F81 /* content-youtube-main.js in Resources */ = {isa = PBXBuildFile; fileRef = 9E1032502FB3050300706F81 /* content-youtube-main.js */; };
+		9EFFFF002FB3050300706F81 /* content-fw-detect-main.js in Resources */ = {isa = PBXBuildFile; fileRef = 9EFFFF012FB3050300706F81 /* content-fw-detect-main.js */; };
 		9E1032692FB3050300706F81 /* privacy-policy.html in Resources */ = {isa = PBXBuildFile; fileRef = 9E1032512FB3050300706F81 /* privacy-policy.html */; };
 		9E10326A2FB3050300706F81 /* THIRD-PARTY-NOTICES.md in Resources */ = {isa = PBXBuildFile; fileRef = 9E1032522FB3050300706F81 /* THIRD-PARTY-NOTICES.md */; };
 		9E10326B2FB3050300706F81 /* background.js in Resources */ = {isa = PBXBuildFile; fileRef = 9E1032532FB3050300706F81 /* background.js */; };
@@ -75,6 +76,7 @@
 		9E10324E2FB3050300706F81 /* content.css */ = {isa = PBXFileReference; lastKnownFileType = text.css; name = content.css; path = Resources/content.css; sourceTree = "<group>"; };
 		9E10324F2FB3050300706F81 /* LICENSE */ = {isa = PBXFileReference; lastKnownFileType = text; name = LICENSE; path = Resources/LICENSE; sourceTree = "<group>"; };
 		9E1032502FB3050300706F81 /* content-youtube-main.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; name = "content-youtube-main.js"; path = "Resources/content-youtube-main.js"; sourceTree = "<group>"; };
+		9EFFFF012FB3050300706F81 /* content-fw-detect-main.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; name = "content-fw-detect-main.js"; path = "Resources/content-fw-detect-main.js"; sourceTree = "<group>"; };
 		9E1032512FB3050300706F81 /* privacy-policy.html */ = {isa = PBXFileReference; lastKnownFileType = text.html; name = "privacy-policy.html"; path = "Resources/privacy-policy.html"; sourceTree = "<group>"; };
 		9E1032522FB3050300706F81 /* THIRD-PARTY-NOTICES.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; name = "THIRD-PARTY-NOTICES.md"; path = "Resources/THIRD-PARTY-NOTICES.md"; sourceTree = "<group>"; };
 		9E1032532FB3050300706F81 /* background.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; name = background.js; path = Resources/background.js; sourceTree = "<group>"; };
@@ -173,6 +175,7 @@
 				9E10324E2FB3050300706F81 /* content.css */,
 				9E10324F2FB3050300706F81 /* LICENSE */,
 				9E1032502FB3050300706F81 /* content-youtube-main.js */,
+				9EFFFF012FB3050300706F81 /* content-fw-detect-main.js */,
 				9E1032512FB3050300706F81 /* privacy-policy.html */,
 				9E1032522FB3050300706F81 /* THIRD-PARTY-NOTICES.md */,
 				9E1032532FB3050300706F81 /* background.js */,
@@ -299,6 +302,7 @@
 				9E1032712FB3050300706F81 /* content-detect.js in Resources */,
 				9E1032732FB3050300706F81 /* content-youtube.js in Resources */,
 				9E1032682FB3050300706F81 /* content-youtube-main.js in Resources */,
+				9EFFFF002FB3050300706F81 /* content-fw-detect-main.js in Resources */,
 				9E10327A2FB3050300706F81 /* content-serialize.js in Resources */,
 				9E1032722FB3050300706F81 /* icons in Resources */,
 				9E1032692FB3050300706F81 /* privacy-policy.html in Resources */,
