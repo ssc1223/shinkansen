@@ -52,7 +52,6 @@ test('translate-ignore-partial-mode-runs-all-batches: ignorePartialMode=true 下
         maxCharsPerBatch: 100000,
         maxTranslateUnits: 1000,
         partialMode: { enabled: true, maxUnits: 2 },
-        skipTraditionalChinesePage: false,
       };
     };
     chrome.storage.local.get = async function() { return {}; };

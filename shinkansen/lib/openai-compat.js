@@ -19,7 +19,7 @@
 // 黑名單與固定術語表是「跨 provider 共用」（Jimmy 設計決定 #3）。
 
 import { debugLog } from './logger.js';
-import { DELIMITER, MARKER_COMPACT, MARKER_STRONG, packChunks, buildEffectiveSystemInstruction } from './system-instruction.js';
+import { DELIMITER, SEP_RE, MARKER_COMPACT, MARKER_STRONG, packChunks, buildEffectiveSystemInstruction } from './system-instruction.js';
 // v1.6.18: thinking 控制 mapping（各家 provider 的 thinking schema 不同，統一成
 // thinkingLevel 'auto/off/low/medium/high' + extraBodyJson 進階透傳）
 import { buildThinkingPayload } from './openai-compat-thinking.js';
@@ -35,24 +35,36 @@ function sleep(ms) {
  * 與 lib/gemini.js 的 fetchWithRetry 邏輯對齊（除了 quota dimension 提取，
  * OpenAI-compatible provider 的 429 body 結構不一致，這裡只做純退避）。
  */
+// 主翻譯 fetch 層級 timeout。15s = Flash 系列慢 case 的 2x margin。跟 gemini.js
+// fetchWithRetry 對齊;OpenAI 相容 provider(OpenRouter / DeepSeek / 本機 llama.cpp 等)
+// 同樣可能 hang,timeout 後 AbortError 走網路錯誤 retry path。
+const FETCH_TIMEOUT_MS = 15_000;
+
 async function fetchWithRetry(url, headers, body, { maxRetries = 3 } = {}) {
   let attempt = 0;
   // eslint-disable-next-line no-constant-condition
   while (true) {
     let resp;
+    const controller = new AbortController();
+    const abortTimer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
     try {
       resp = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...headers },
         body: JSON.stringify(body),
+        signal: controller.signal,
       });
     } catch (err) {
-      await debugLog('error', 'api', 'openai-compat fetch network error', { error: err.message, attempt });
-      if (attempt >= maxRetries) throw new Error('網路錯誤：' + err.message);
+      clearTimeout(abortTimer);
+      const isTimeout = err.name === 'AbortError';
+      const errMsg = isTimeout ? `逾時(${FETCH_TIMEOUT_MS}ms)` : err.message;
+      await debugLog('error', 'api', isTimeout ? 'openai-compat fetch timeout' : 'openai-compat fetch network error', { error: err.message, attempt, timeoutMs: isTimeout ? FETCH_TIMEOUT_MS : undefined });
+      if (attempt >= maxRetries) throw new Error('網路錯誤：' + errMsg);
       await sleep(Math.min(MAX_BACKOFF_MS, 500 * Math.pow(2, attempt)));
       attempt += 1;
       continue;
     }
+    clearTimeout(abortTimer);
 
     // 5xx → 退避重試
     if (resp.status >= 500 && resp.status < 600) {
@@ -254,7 +266,7 @@ async function translateChunk(texts, settings, glossary, fixedGlossary, forbidde
   });
 
   // 拆分對齊（與 Gemini 同邏輯：split by DELIMITER + 移除序號標記;用本批選的 marker.re）
-  const parts = text.split(DELIMITER).map(s => s.trim().replace(marker.re, ''));
+  const parts = text.split(SEP_RE).map(s => s.trim().replace(marker.re, ''));
   if (parts.length !== texts.length) {
     await debugLog('warn', 'api', 'openai-compat segment count mismatch — fallback to per-segment', {
       expected: texts.length, got: parts.length, elapsed: ms,
@@ -286,7 +298,7 @@ async function translateChunk(texts, settings, glossary, fixedGlossary, forbidde
  * 黑名單),術語抽取不需要。
  *
  * model:沿用 customProvider.model;為空(llama.cpp / Ollama 預設)時不送 model 欄位。
- * fetch timeout 用 settings.glossary.fetchTimeoutMs(預設 55s,跟 Gemini 對齊)。
+ * fetch timeout 用 settings.glossary.fetchTimeoutMs(預設 15s,跟 Gemini 對齊)。
  *
  * 回傳格式跟 lib/gemini.js extractGlossary 完全一致,讓 background.js handler
  * 不必 if-else 兩條結構。
@@ -305,7 +317,7 @@ export async function extractGlossary(compressedText, settings) {
   const glossaryPrompt = gc.prompt || '';
   const temperature = gc.temperature ?? 0.1;
   const maxTerms = gc.maxTerms ?? 200;
-  const fetchTimeoutMs = gc.fetchTimeoutMs ?? 55_000;
+  const fetchTimeoutMs = gc.fetchTimeoutMs ?? 15_000;
 
   const body = {
     messages: [

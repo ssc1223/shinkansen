@@ -17,6 +17,14 @@ const DEBUG_RENDER_SCALE = 1.5;
 
 const $ = (id) => document.getElementById(id);
 
+// i18n shortcut。lib/i18n.js 由 index.html `<script src>` 載入,attach 到
+// window.__SK.i18n。fallback:i18n 還沒載入時回傳 fallback 字串(避免 init race)。
+const t = (key, params, fallback) => {
+  const i18n = window.__SK?.i18n;
+  if (i18n && typeof i18n.t === 'function') return i18n.t(key, params);
+  return fallback != null ? fallback : key;
+};
+
 const stages = {
   upload: $('stage-upload'),
   parsing: $('stage-parsing'),
@@ -35,6 +43,7 @@ let currentPdfDoc = null;    // PDF.js PDFDocumentProxy（記得 destroy）
 let currentDebugPage = 0;
 let currentReaderHandle = null;
 let currentModelOverride = null;
+let currentEngine = 'gemini';
 let currentOriginalArrayBuffer = null; // W6：留 PDF 原 ArrayBuffer 給 pdf-lib 重組譯文 PDF 用
 let lastTranslateSummary = null;       // 翻譯紀錄 modal 顯示用
 // 翻譯設定：選定 preset slot(1 / 2 / 3)，從 storage.local.translateDocPresetSlot 讀，
@@ -76,6 +85,22 @@ function clearError() {
   el.hidden = true;
 }
 
+// v1.9.6: stage-result 用 inline banner（不踢回 upload stage，讓使用者保留已解析的
+// 文件，改 preset / 設定後再點翻譯）
+function showResultError(msg) {
+  const el = $('result-error');
+  if (!el) return;
+  el.textContent = msg;
+  el.hidden = false;
+}
+
+function clearResultError() {
+  const el = $('result-error');
+  if (!el) return;
+  el.textContent = '';
+  el.hidden = true;
+}
+
 function setParsingDetail(text) {
   $('parsing-detail').textContent = text;
 }
@@ -92,6 +117,7 @@ function releaseCurrentDoc() {
   currentDoc = null;
   currentDebugPage = 0;
   currentModelOverride = null;
+  currentEngine = 'gemini';
   currentOriginalArrayBuffer = null;
   lastTranslateSummary = null;
   currentArticleGlossary = null;
@@ -100,6 +126,7 @@ function releaseCurrentDoc() {
 
 async function handleFile(file) {
   clearError();
+  clearResultError();
 
   const pre = preflightFile(file);
   if (pre.level === 'error') {
@@ -113,7 +140,7 @@ async function handleFile(file) {
   releaseCurrentDoc();
 
   showStage('parsing');
-  setParsingDetail('讀取檔案內容…');
+  setParsingDetail(t('doc.parsing.detail.fileContent'));
 
   try {
     // W6：讀一次 file.arrayBuffer() cache 起來，給後續 pdf-renderer 重組譯文 PDF 用
@@ -122,20 +149,20 @@ async function handleFile(file) {
     const rawDoc = await parsePdf(file, (progress) => {
       switch (progress.stage) {
         case 'reading':
-          setParsingDetail('讀取檔案內容…');
+          setParsingDetail(t('doc.parsing.detail.fileContent'));
           break;
         case 'opening':
-          setParsingDetail('開啟文件…');
+          setParsingDetail(t('doc.parsing.detail.openDoc'));
           break;
         case 'page':
-          setParsingDetail(`抽取第 ${progress.current} / ${progress.total} 頁的文字…`);
+          setParsingDetail(t('doc.parsing.detail.extractPage', { current: progress.current, total: progress.total }));
           break;
         default:
           break;
       }
     });
 
-    setParsingDetail('版面分析中…');
+    setParsingDetail(t('doc.parsing.detail.layout'));
     const doc = analyzeLayout(rawDoc);
     currentDoc = doc;
     currentPdfDoc = rawDoc.pdfDoc;
@@ -674,13 +701,13 @@ async function handleFile(file) {
 
     // UI 摘要(W7:工程術語 text run 總數 / 切出 block 數對 user 無意義已移除,
     // 只保留檔名 / 頁數 / 文件字數三項)
-    $('result-filename').textContent = doc.meta.filename || '（未命名）';
-    $('result-pages').textContent = `${doc.meta.pageCount} 頁`;
+    $('result-filename').textContent = doc.meta.filename || t('doc.result.unnamed');
+    $('result-pages').textContent = t('doc.result.pageCount', { n: doc.meta.pageCount });
     $('result-chars').textContent = doc.stats.totalChars.toLocaleString('en-US');
 
     if (doc.warnings.length > 0) {
       const warnEl = $('upload-error');
-      warnEl.textContent = doc.warnings.map((w) => `提醒：${w.message}`).join(' / ');
+      warnEl.textContent = doc.warnings.map((w) => t('doc.parsing.warn', { message: w.message })).join(' / ');
       warnEl.hidden = false;
     }
 
@@ -690,7 +717,7 @@ async function handleFile(file) {
       showError(err.message);
     } else {
       console.error('[Shinkansen] PDF 解析失敗', err);
-      showError(`解析失敗：${(err && err.message) || String(err)}`);
+      showError(t('doc.parsing.fail', { error: (err && err.message) || String(err) }));
     }
     releaseCurrentDoc();
   }
@@ -756,7 +783,7 @@ function setBlockDetail(block) {
   const el = $('debug-detail');
   el.innerHTML = '';
   if (!block) {
-    el.innerHTML = '<span class="debug-detail-empty">把游標移到 bbox 上看該 block 的 plainText</span>';
+    el.innerHTML = `<span class="debug-detail-empty">${t('doc.debug.detail.empty')}</span>`;
     return;
   }
   const idSpan = document.createElement('span');
@@ -765,19 +792,19 @@ function setBlockDetail(block) {
   idSpan.textContent = `#${block.readingOrder} ${block.blockId} · ${block.type}${statusSuffix}`;
   const metaSpan = document.createElement('span');
   metaSpan.className = 'debug-detail-meta';
-  metaSpan.textContent = `column ${block.column} · ${block.lineCount} 行 · ${block.fontSize.toFixed(1)}pt`;
+  metaSpan.textContent = t('doc.debug.metadata', { col: block.column, lines: block.lineCount, size: block.fontSize.toFixed(1) });
 
   el.appendChild(idSpan);
   el.appendChild(metaSpan);
   el.appendChild(document.createElement('br'));
 
   const previewText = (txt) =>
-    !txt ? '（空）' : (txt.length > 280 ? txt.slice(0, 280) + '…' : txt);
+    !txt ? t('doc.debug.empty') : (txt.length > 280 ? txt.slice(0, 280) + '…' : txt);
 
   // 原文
   const origLabel = document.createElement('span');
   origLabel.style.color = 'var(--text-faint)';
-  origLabel.textContent = '原文：';
+  origLabel.textContent = t('doc.debug.original');
   el.appendChild(origLabel);
   const origText = document.createElement('span');
   origText.textContent = ' ' + previewText(block.plainText);
@@ -788,7 +815,7 @@ function setBlockDetail(block) {
     el.appendChild(document.createElement('br'));
     const trLabel = document.createElement('span');
     trLabel.style.color = 'var(--primary)';
-    trLabel.textContent = '譯文：';
+    trLabel.textContent = t('doc.debug.translation');
     el.appendChild(trLabel);
     const trText = document.createElement('span');
     trText.textContent = ' ' + previewText(block.translation);
@@ -797,7 +824,7 @@ function setBlockDetail(block) {
     el.appendChild(document.createElement('br'));
     const errLabel = document.createElement('span');
     errLabel.style.color = 'var(--error-text)';
-    errLabel.textContent = `翻譯失敗： ${block.translationError}`;
+    errLabel.textContent = t('doc.debug.translateFail', { error: block.translationError });
     el.appendChild(errLabel);
   }
 }
@@ -809,13 +836,13 @@ async function renderDebugPage() {
   if (!layoutPage) return;
 
   const total = currentDoc.pages.length;
-  $('debug-page-indicator').textContent = `第 ${pageIndex + 1} / ${total} 頁`;
+  $('debug-page-indicator').textContent = t('doc.debug.pageIndicator', { current: pageIndex + 1, total });
   $('debug-prev').disabled = pageIndex === 0;
   $('debug-next').disabled = pageIndex >= total - 1;
   const bodyFs = layoutPage.bodyFontSize ? `${layoutPage.bodyFontSize.toFixed(1)}pt` : 'N/A';
   $('debug-page-stats').textContent =
-    `block 數 ${layoutPage.blocks.length} · column 數 ${layoutPage.columnCount} · ` +
-    `medianLineHeight ${layoutPage.medianLineHeight.toFixed(1)}pt · body fontSize ${bodyFs}`;
+    t('doc.debug.pageStats', { blocks: layoutPage.blocks.length, cols: layoutPage.columnCount }) +
+    ` · medianLineHeight ${layoutPage.medianLineHeight.toFixed(1)}pt · body fontSize ${bodyFs}`;
   renderTypeLegend(layoutPage.blocks);
 
   const canvas = $('debug-canvas');
@@ -1112,15 +1139,17 @@ async function sha1(text) {
   return Array.from(new Uint8Array(hash)).map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
-// 翻譯設定：讀使用者選定 slot，取對應 preset 的 model 當 modelOverride。
-// 不存在 / Google MT(model 為 null)時 modelOverride = undefined，讓 background
-// 走全域 geminiConfig.model 預設
-async function resolveModelOverride() {
+// 翻譯設定：讀使用者選定 slot，解析 engine + modelOverride。
+// engine='gemini' 時 modelOverride = preset.model（若有）；
+// 其他 engine（google / openai-compat）不走 Gemini model override。
+async function resolvePreset() {
   const presets = await loadPresets();
   const idx = (currentPresetSlot || 1) - 1;
   const p = presets[idx];
-  if (p && p.engine === 'gemini' && p.model) return p.model;
-  return undefined;
+  if (!p) return { engine: 'gemini', modelOverride: undefined };
+  const engine = p.engine || 'gemini';
+  const modelOverride = (engine === 'gemini' && p.model) ? p.model : undefined;
+  return { engine, modelOverride };
 }
 
 async function loadPresets() {
@@ -1151,10 +1180,11 @@ async function loadCurrentPresetSlot() {
 //   slot 1 = 預設 2  (⌥A / Alt+A)
 //   slot 3 = 預設 3  (⌥D / Alt+D)
 const IS_MAC = typeof navigator !== 'undefined' && /Mac/i.test(navigator.platform || '');
+// name 在 openSettingsDialog 走 t() 取(必須在 i18n 載入後 lazy 取),這裡只記 slot 順序與快速鍵
 const PRESET_DISPLAY = [
-  { slot: 2, name: '主要預設', shortcut: IS_MAC ? '⌥S' : 'Alt+S' },
-  { slot: 1, name: '預設 2',   shortcut: IS_MAC ? '⌥A' : 'Alt+A' },
-  { slot: 3, name: '預設 3',   shortcut: IS_MAC ? '⌥D' : 'Alt+D' },
+  { slot: 2, nameKey: 'doc.settings.preset.main', shortcut: IS_MAC ? '⌥S' : 'Alt+S' },
+  { slot: 1, nameKey: 'doc.settings.preset.alt',  nameParams: { n: 2 }, shortcut: IS_MAC ? '⌥A' : 'Alt+A' },
+  { slot: 3, nameKey: 'doc.settings.preset.alt',  nameParams: { n: 3 }, shortcut: IS_MAC ? '⌥D' : 'Alt+D' },
 ];
 
 async function openSettingsDialog() {
@@ -1162,16 +1192,21 @@ async function openSettingsDialog() {
   const dlg = $('translate-settings-dialog');
   const list = $('settings-preset-list');
   list.innerHTML = '';
-  for (const { slot, name, shortcut } of PRESET_DISPLAY) {
+  for (const { slot, nameKey, nameParams, shortcut } of PRESET_DISPLAY) {
     const p = presets.find((x) => x && x.slot === slot) || { engine: 'gemini', model: null, label: '' };
     const row = document.createElement('label');
     row.className = 'settings-preset-row' + (slot === currentPresetSlot ? ' is-selected' : '');
     const engineLabel = p.engine === 'gemini' ? (p.model || 'gemini')
       : p.engine === 'google' ? 'Google MT'
       : p.engine;
+    const presetLabel = t('doc.settings.preset.label', {
+      name: t(nameKey, nameParams),
+      shortcut,
+      presetLabel: p.label || t('doc.settings.preset.unnamed'),
+    });
     row.innerHTML = `
       <input type="radio" name="preset-slot" value="${slot}" ${slot === currentPresetSlot ? 'checked' : ''}>
-      <span class="preset-label">${name}（${shortcut}）· ${p.label || '(未命名)'}</span>
+      <span class="preset-label">${presetLabel}</span>
       <span class="preset-engine">${engineLabel}</span>
     `;
     row.addEventListener('click', () => {
@@ -1194,6 +1229,8 @@ function bindSettingsDialogUI() {
     try {
       await chrome.storage.local.set({ translateDocPresetSlot: slot });
     } catch (_) { /* ignore */ }
+    // v1.9.6: 改 preset 後清掉「Google MT 不支援」banner（讓使用者切到 Gemini / 自訂後不留殘影）
+    clearResultError();
     dlg.close();
   });
   $('settings-clear-doc-cache-btn').addEventListener('click', async () => {
@@ -1201,18 +1238,18 @@ function bindSettingsDialogUI() {
     const status = $('settings-clear-doc-cache-status');
     if (btn.disabled) return;
     if (!currentDoc) {
-      status.textContent = '尚未載入文件';
+      status.textContent = t('doc.settings.cache.notLoaded');
       setTimeout(() => { status.textContent = ''; }, 3000);
       return;
     }
     btn.disabled = true;
-    status.textContent = '清除中…';
+    status.textContent = t('doc.settings.cache.clearing');
     try {
       const r = await clearCurrentDocCache();
-      status.textContent = `已清 ${r.removedKeyCount} 條 / ${r.translatableSegmentCount} 段`;
+      status.textContent = t('doc.settings.cache.cleared', { removed: r.removedKeyCount, total: r.translatableSegmentCount });
     } catch (err) {
       console.error('[Shinkansen] 清除本篇 cache 失敗', err);
-      status.textContent = `失敗:${(err && err.message) || '未知錯誤'}`;
+      status.textContent = t('doc.settings.cache.failed', { error: (err && err.message) || t('doc.settings.unknownErr') });
     }
     setTimeout(() => {
       btn.disabled = false;
@@ -1300,13 +1337,13 @@ function bindSummaryDialogUI() {
     const btn = $('summary-retry-btn');
     btn.disabled = true;
     const orig = btn.textContent;
-    btn.textContent = '重試中…';
+    btn.textContent = t('doc.summary.retrying');
     try {
       const r = await currentReaderHandle.retryAllFailed();
-      btn.textContent = `${r.success}/${r.total} 成功`;
+      btn.textContent = t('doc.summary.retried', { success: r.success, total: r.total });
     } catch (err) {
       console.error('[Shinkansen] retryAll 失敗', err);
-      btn.textContent = '重試失敗';
+      btn.textContent = t('doc.summary.retryFailed');
     }
     setTimeout(() => {
       btn.textContent = orig;
@@ -1324,7 +1361,7 @@ function bindSummaryDialogUI() {
 // + 同步刷新 reader toolbar 上的「翻譯紀錄」按鈕視覺提示
 function refreshSummaryFailedDisplay() {
   const failed = countCurrentFailedBlocks();
-  $('translated-failed').textContent = failed > 0 ? `${failed} 段` : '0';
+  $('translated-failed').textContent = failed > 0 ? t('doc.summary.failedSegments', { n: failed }) : '0';
   const btn = $('summary-retry-btn');
   btn.hidden = failed === 0;
   btn.disabled = false;
@@ -1344,10 +1381,10 @@ function bindReaderUI() {
     const orig = btn.textContent;
     try {
       await navigator.clipboard.writeText(txt);
-      btn.textContent = `已複製 ${(txt.length / 1024).toFixed(1)} KB`;
+      btn.textContent = t('doc.reader.copy.copied', { size: (txt.length / 1024).toFixed(1) });
     } catch (err) {
       console.error('clipboard 失敗', err);
-      btn.textContent = '複製失敗';
+      btn.textContent = t('doc.reader.copy.failed');
     }
     setTimeout(() => { btn.textContent = orig; }, 2500);
   });
@@ -1378,29 +1415,29 @@ function bindReaderUI() {
         : null;
       let result;
       if (cachedBytes) {
-        btn.textContent = '寫檔中…';
+        btn.textContent = t('doc.reader.download.writing');
         result = await downloadBilingualPdf(currentOriginalArrayBuffer, currentDoc, {
           prebuiltBytes: cachedBytes,
         });
       } else {
-        btn.textContent = '產生譯文中…';
+        btn.textContent = t('doc.reader.download.generating');
         result = await downloadBilingualPdf(currentOriginalArrayBuffer, currentDoc, {
           onProgress: (p) => {
             if (p.stage === 'page') {
-              btn.textContent = `處理第 ${p.current} / ${p.total} 頁…`;
+              btn.textContent = t('doc.reader.download.processingPage', { current: p.current, total: p.total });
             } else if (p.stage === 'saving') {
-              btn.textContent = '寫檔中…';
+              btn.textContent = t('doc.reader.download.writing');
             } else if (p.stage === 'font') {
-              btn.textContent = '載入字型…';
+              btn.textContent = t('doc.reader.download.loadingFont');
             }
           },
         });
       }
       const sizeMB = (result.byteLength / 1024 / 1024).toFixed(1);
-      btn.textContent = `已下載 ${sizeMB} MB`;
+      btn.textContent = t('doc.reader.download.done', { size: sizeMB });
     } catch (err) {
       console.error('[Shinkansen] 下載譯文 PDF 失敗', err);
-      btn.textContent = `失敗：${(err && err.message) || '未知錯誤'}`;
+      btn.textContent = t('doc.reader.download.failed', { error: (err && err.message) || t('doc.settings.unknownErr') });
     }
     setTimeout(() => {
       btn.textContent = orig;
@@ -1426,8 +1463,8 @@ async function openReader() {
     $('reader-col-translated'),
     {
       modelOverride: currentModelOverride,
-      // v1.8.49 起「重試失敗」按鈕搬進「翻譯紀錄」modal,reader toolbar 不再顯示
-      // 失敗段數;onFailedCountChange 用 reader.js 的 default no-op
+      engine: currentEngine,
+      glossary: currentArticleGlossary,
     },
   );
   // 套用 sync toggle + 重設 zoom 顯示
@@ -1459,8 +1496,8 @@ function refreshSummaryButtonAlert() {
   const failed = countCurrentFailedBlocks();
   btn.classList.toggle('has-failed-alert', failed > 0);
   btn.title = failed > 0
-    ? `有 ${failed} 段翻譯失敗，點開查看詳情並重試`
-    : '查看翻譯紀錄（已翻段數 / 失敗 / 快取命中 / token / 費用）+ 開啟版面 overlay';
+    ? t('doc.reader.btn.summary.title.failed', { n: failed })
+    : t('doc.reader.btn.summary.title');
 }
 
 function stepZoom(delta) {
@@ -1508,11 +1545,11 @@ function bindDebugUI() {
     const orig = btn.textContent;
     try {
       await navigator.clipboard.writeText(json);
-      btn.textContent = `已複製 ${(json.length / 1024).toFixed(1)}KB`;
+      btn.textContent = t('doc.debug.copy.copied', { size: (json.length / 1024).toFixed(1) });
     } catch (err) {
       console.error('clipboard 失敗', err);
       console.log('[Shinkansen] dump JSON:', json);
-      btn.textContent = '失敗，看 console';
+      btn.textContent = t('doc.debug.copy.failed');
     }
     setTimeout(() => { btn.textContent = orig; }, 2500);
   });
@@ -1538,7 +1575,8 @@ function bindDebugUI() {
   });
 }
 
-function init() {
+async function init() {
+  await initI18n();
   setVersionFooter();
   bindUploadUI();
   bindResultUI();
@@ -1552,6 +1590,35 @@ function init() {
   // 啟動讀使用者選定的 preset slot
   loadCurrentPresetSlot();
   showStage('upload');
+}
+
+// 把 lib/i18n.js 的 dict 套到 [data-i18n*] 元素上,並訂閱 uiLanguage 變動 reapply。
+// 跟 popup / options 同套機制,差別:translate-doc 沒有獨立 UI 語言 picker,直接讀
+// settings.uiLanguage(預設 'auto' → navigator.language 推導)。
+async function initI18n() {
+  const I18N = window.__SK?.i18n;
+  if (!I18N) return; // i18n.js 未載入(legacy fallback)
+  let uiLang = 'auto';
+  try {
+    const stored = await chrome.storage.sync.get(['uiLanguage']);
+    if (typeof stored.uiLanguage === 'string') uiLang = stored.uiLanguage;
+  } catch (_) { /* 沒權限 / API 失敗時走 auto */ }
+  const dictLang = I18N.getUiLanguage(uiLang);
+  // 把 dictLang 寫進 window.__SK.STATE.uiLanguage,讓 i18n.t() 在沒帶 target 參數時
+  // 能透過 _readCurrentTarget() 讀到正確語言(否則 fallback 'zh-TW')。translate-doc
+  // 不是 content script,window.__SK.STATE 預設不存在,需手動建立。reader.js / index.js
+  // 內的 t() 動態字串(preset 名稱 / progress 文字 / glossary state 等)都依賴此值。
+  window.__SK = window.__SK || {};
+  window.__SK.STATE = window.__SK.STATE || {};
+  window.__SK.STATE.uiLanguage = dictLang;
+  I18N.applyI18n(document, dictLang);
+  // 訂閱 uiLanguage 變動 → 同步更新 STATE + reapply。translate-doc 開著時若使用者
+  // 在 options 切 UI 語言,此 callback 會把所有 [data-i18n] 元素 + 後續 t() 動態
+  // 呼叫都重指向新語言。
+  I18N.subscribeUiLanguageChange((newUi) => {
+    window.__SK.STATE.uiLanguage = newUi;
+    I18N.applyI18n(document, newUi);
+  });
 }
 
 // ---------- 譯文編輯（v1.8.49）----------
@@ -1569,7 +1636,7 @@ function openEditor() {
   for (const page of currentDoc.pages) {
     const header = document.createElement('div');
     header.className = 'edit-page-header';
-    header.textContent = `第 ${page.pageIndex + 1} 頁`;
+    header.textContent = t('doc.edit.pageHeader', { n: page.pageIndex + 1 });
     list.appendChild(header);
 
     let translatableInPage = 0;
@@ -1610,7 +1677,7 @@ function openEditor() {
       textarea.rows = Math.max(3, Math.min(30, Math.ceil((initialMd.length || 1) / 25)));
       textarea.value = initialMd;
       if (block.translationStatus === 'failed') {
-        textarea.placeholder = '（原翻譯失敗，請手動填寫譯文，或留空保留原文）';
+        textarea.placeholder = t('doc.edit.placeholder.failed');
       }
       // 同步 overlay scroll(scrollbar 由 textarea 顯示;overlay overflow:hidden)
       textarea.addEventListener('scroll', () => {
@@ -1634,7 +1701,7 @@ function openEditor() {
     if (translatableInPage === 0) {
       const empty = document.createElement('div');
       empty.className = 'edit-empty';
-      empty.textContent = '（本頁無可翻譯段落）';
+      empty.textContent = t('doc.edit.empty');
       list.appendChild(empty);
     }
   }
@@ -1700,12 +1767,12 @@ function bindEditUI() {
     const btn = $('edit-save-btn');
     const orig = btn.textContent;
     btn.disabled = true;
-    btn.textContent = '產生中…';
+    btn.textContent = t('doc.edit.btn.generating');
     try {
       await saveEdits();
     } catch (err) {
       console.error('[Shinkansen] saveEdits 失敗', err);
-      btn.textContent = '失敗，看 console';
+      btn.textContent = t('doc.edit.btn.failed');
       setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 2500);
       return;
     }
@@ -1904,7 +1971,7 @@ function replaceAll() {
     }
   }
   // counter 暫時顯示取代結果,2 秒後重算
-  $('edit-find-count').textContent = `已取代 ${total} 處`;
+  $('edit-find-count').textContent = t('doc.edit.find.replaceCount', { n: total });
   clearMatchHighlight();
   setTimeout(() => recomputeFindMatches(), 2000);
 }
@@ -1957,9 +2024,19 @@ function bindFindReplaceUI() {
 async function startTranslate() {
   if (!currentDoc) return;
 
-  // 從翻譯設定選定的 preset slot 拿 modelOverride
-  const modelOverride = await resolveModelOverride();
+  const { engine, modelOverride } = await resolvePreset();
+
+  // v1.9.6: Google MT 沒文件翻譯 handler（沒 batch-aware marker / glossary 注入機制），
+  // 早期擋 + 顯示 banner，讓使用者改 preset 再試；不踢回 upload stage（保留已解析文件）
+  if (engine === 'google') {
+    showResultError(t('doc.error.googleNotSupportedInDoc'));
+    showStage('result');
+    return;
+  }
+
+  clearResultError();
   currentModelOverride = modelOverride;
+  currentEngine = engine;
 
   showStage('translating');
   setProgress({
@@ -1986,6 +2063,7 @@ async function startTranslate() {
   try {
     summary = await translateDocument(currentDoc, {
       modelOverride,
+      engine,
       glossary,
       signal: translateAbortController.signal,
       onProgress: setProgress,
@@ -2036,7 +2114,7 @@ async function openGlossaryEditor(fromStage = 'result') {
   // 若還沒建術語表(null)→ 顯 loading + 自動跑 EXTRACT_GLOSSARY 拿初始值。
   // 若已有(包含空 [])→ 直接 show table 讓使用者編輯
   if (currentArticleGlossary === null) {
-    setGlossaryState('抽取中…（1-3 秒）', 'is-loading');
+    setGlossaryState(t('doc.glossary.state.loading'), 'is-loading');
     try {
       const extracted = await extractGlossaryForDoc(currentDoc);
       currentArticleGlossary = Array.isArray(extracted) ? extracted : [];
@@ -2055,7 +2133,7 @@ function setGlossaryState(text, modifier = 'is-empty') {
   div.className = `glossary-state ${modifier}`;
   div.textContent = text;
   $('glossary-grid').appendChild(div);
-  $('glossary-count').textContent = '0 條';
+  $('glossary-count').textContent = t('doc.glossary.countZero');
 }
 
 function clearGlossaryEntries() {
@@ -2069,7 +2147,7 @@ function clearGlossaryEntries() {
 function buildGlossaryTable(entries) {
   clearGlossaryEntries();
   if (!entries || entries.length === 0) {
-    setGlossaryState('沒有術語。可手動加列、匯入 JSON、或點「重新抽取」', 'is-empty');
+    setGlossaryState(t('doc.glossary.state.empty'), 'is-empty');
     return;
   }
   for (const e of entries) appendGlossaryRow(e, { skipUpdateCount: true });
@@ -2085,19 +2163,19 @@ function appendGlossaryRow(entry = { source: '', target: '' }, { skipUpdateCount
   const sourceInput = document.createElement('input');
   sourceInput.type = 'text';
   sourceInput.className = 'g-source';
-  sourceInput.placeholder = '原文（如 Trump）';
+  sourceInput.placeholder = t('doc.glossary.placeholder.source');
   sourceInput.value = entry.source || '';
 
   const targetInput = document.createElement('input');
   targetInput.type = 'text';
   targetInput.className = 'g-target';
-  targetInput.placeholder = '譯文（如 川普）';
+  targetInput.placeholder = t('doc.glossary.placeholder.target');
   targetInput.value = entry.target || '';
 
   const delBtn = document.createElement('button');
   delBtn.type = 'button';
   delBtn.className = 'glossary-row-delete';
-  delBtn.textContent = '刪除';
+  delBtn.textContent = t('doc.glossary.btn.delete');
 
   // 三個元素為一組 entry,delete 時一起拔
   delBtn.addEventListener('click', () => {
@@ -2105,7 +2183,7 @@ function appendGlossaryRow(entry = { source: '', target: '' }, { skipUpdateCount
     targetInput.remove();
     delBtn.remove();
     // 若清空到沒任何 entry,顯示 empty state
-    if (!grid.querySelector('.g-source')) setGlossaryState('沒有術語。可手動加列、匯入 JSON、或點「重新抽取」', 'is-empty');
+    if (!grid.querySelector('.g-source')) setGlossaryState(t('doc.glossary.state.empty'), 'is-empty');
     else updateGlossaryCount();
   });
   sourceInput.addEventListener('input', updateGlossaryCount);
@@ -2131,13 +2209,13 @@ function readGlossaryTable() {
 }
 
 function updateGlossaryCount() {
-  $('glossary-count').textContent = `${readGlossaryTable().length} 條`;
+  $('glossary-count').textContent = t('doc.glossary.count', { n: readGlossaryTable().length });
 }
 
 function exportGlossaryJSON() {
   const entries = readGlossaryTable();
   if (entries.length === 0) {
-    alert('術語表為空，沒東西可匯出');
+    alert(t('doc.glossary.alert.empty'));
     return;
   }
   const blob = new Blob([JSON.stringify(entries, null, 2)], { type: 'application/json' });
@@ -2156,38 +2234,38 @@ async function handleGlossaryFileImport(file) {
   try {
     const text = await file.text();
     const data = JSON.parse(text);
-    if (!Array.isArray(data)) throw new Error('JSON 必須是 array');
+    if (!Array.isArray(data)) throw new Error(t('doc.glossary.alert.invalidJson'));
     const valid = data
       .filter((e) => e && typeof e.source === 'string' && typeof e.target === 'string')
       .map((e) => ({ source: e.source, target: e.target })); // 舊版 JSON 帶的 note 欄忽略
-    if (valid.length === 0) throw new Error('沒讀到任何 {source, target} 條目');
+    if (valid.length === 0) throw new Error(t('doc.glossary.alert.noEntries'));
     const existing = readGlossaryTable();
     if (existing.length > 0) {
-      if (!confirm(`現有術語表（${existing.length} 條）將被覆蓋成匯入版本（${valid.length} 條），確定？`)) return;
+      if (!confirm(t('doc.glossary.confirm.import', { existing: existing.length, new: valid.length }))) return;
     }
     buildGlossaryTable(valid);
   } catch (err) {
-    alert(`匯入失敗：${err.message || err}`);
+    alert(t('doc.glossary.alert.importFail', { error: err.message || err }));
   }
 }
 
 async function reextractGlossary() {
   const existing = readGlossaryTable();
   if (existing.length > 0) {
-    if (!confirm(`將重新請 AI 抽取，覆蓋現有 ${existing.length} 條，確定？`)) return;
+    if (!confirm(t('doc.glossary.confirm.reextract', { n: existing.length }))) return;
   }
   const btn = $('glossary-reextract-btn');
   btn.disabled = true;
   const orig = btn.textContent;
-  btn.textContent = '抽取中…';
-  setGlossaryState('抽取中…（1-3 秒）', 'is-loading');
+  btn.textContent = t('doc.glossary.btn.extracting');
+  setGlossaryState(t('doc.glossary.state.loading'), 'is-loading');
   try {
     const extracted = await extractGlossaryForDoc(currentDoc);
     if (Array.isArray(extracted) && extracted.length > 0) {
       buildGlossaryTable(extracted);
     } else {
       buildGlossaryTable([]);
-      alert('沒抽到任何術語（文字太短或失敗）');
+      alert(t('doc.glossary.alert.noExtract'));
     }
   } finally {
     btn.textContent = orig;
@@ -2220,9 +2298,9 @@ function bindGlossaryUI() {
     currentArticleGlossary = readGlossaryTable();
     // 從 result 第一次翻譯不需要 confirm;從 edit / reader 進來都是「已翻過要重翻」要警告
     if (glossaryEntryStage === 'edit') {
-      if (!confirm('將以新術語表重新呼叫 AI 翻譯整份文件，您在編輯譯文頁面尚未儲存的修改會被覆蓋，會產生費用，確定？')) return;
+      if (!confirm(t('doc.glossary.confirm.translateUnsaved'))) return;
     } else if (currentReaderHandle) {
-      if (!confirm('將以新術語表重新呼叫 AI 翻譯整份文件，會產生費用，確定？')) return;
+      if (!confirm(t('doc.glossary.confirm.translate'))) return;
     }
     await startTranslate();
   });
@@ -2230,7 +2308,7 @@ function bindGlossaryUI() {
 
 async function fillSummaryDialog(summary) {
   if (!summary) return;
-  const filename = (currentDoc && currentDoc.meta && currentDoc.meta.filename) || '(未命名)';
+  const filename = (currentDoc && currentDoc.meta && currentDoc.meta.filename) || t('doc.settings.preset.unnamed');
   $('translated-filename').textContent = filename;
   $('translated-count').textContent = `${summary.translatedBlocks - summary.failedBlocks} / ${summary.totalBlocks}`;
   // 翻譯失敗用「當前 doc 的實際失敗段數」(使用者可能已在編輯頁手動修過,
@@ -2238,7 +2316,7 @@ async function fillSummaryDialog(summary) {
   refreshSummaryFailedDisplay();
   const cacheHits = summary.cacheHits || 0;
   $('translated-cache-hits').textContent = cacheHits > 0 && summary.totalBlocks > 0
-    ? `${cacheHits} 段(${((cacheHits / summary.totalBlocks) * 100).toFixed(0)}%)`
+    ? t('doc.summary.cacheHitRate', { n: cacheHits, percent: ((cacheHits / summary.totalBlocks) * 100).toFixed(0) })
     : '0';
   $('translated-input-tokens').textContent = summary.cumulativeInputTokens.toLocaleString('en-US');
   $('translated-output-tokens').textContent = summary.cumulativeOutputTokens.toLocaleString('en-US');
@@ -2261,15 +2339,15 @@ async function formatCostStr(usd) {
 function setProgress(p) {
   const ratio = p.totalBlocks > 0 ? (p.translatedBlocks / p.totalBlocks) : 0;
   $('translate-progress-fill').style.width = `${(ratio * 100).toFixed(1)}%`;
-  $('translate-progress-count').textContent = `${p.translatedBlocks} / ${p.totalBlocks} 段`;
+  $('translate-progress-count').textContent = t('doc.translating.progress.count', { translated: p.translatedBlocks, total: p.totalBlocks });
   $('translate-progress-eta').textContent = p.estimatedRemainingSec > 0
-    ? `預估剩餘 ${formatSec(p.estimatedRemainingSec)}`
+    ? t('doc.translating.progress.eta', { time: formatSec(p.estimatedRemainingSec) })
     : '';
   $('translate-progress-cost').textContent = p.cumulativeCostUSD > 0
-    ? `累計 $${p.cumulativeCostUSD.toFixed(4)}`
+    ? t('doc.translating.progress.cost', { cost: p.cumulativeCostUSD.toFixed(4) })
     : '';
   if (p.failedBlocks > 0) {
-    $('translate-progress-failed').textContent = `${p.failedBlocks} 段失敗(完成後可在 overlay 看每段錯誤)`;
+    $('translate-progress-failed').textContent = t('doc.translating.progress.failed', { n: p.failedBlocks });
     $('translate-progress-failed').hidden = false;
   } else {
     $('translate-progress-failed').hidden = true;
@@ -2277,10 +2355,10 @@ function setProgress(p) {
 }
 
 function formatSec(sec) {
-  if (sec < 60) return `${sec} 秒`;
+  if (sec < 60) return t('doc.translating.timeSec', { n: sec });
   const m = Math.floor(sec / 60);
   const s = sec % 60;
-  return `${m} 分 ${s} 秒`;
+  return t('doc.translating.timeMinSec', { m, s });
 }
 
 if (document.readyState === 'loading') {

@@ -1,7 +1,7 @@
 // tier-limits.js — Gemini API 各層級 rate limit 對照表
 //
 // 資料來源：ai.google.dev/gemini-api/docs/rate-limits 與 2026 年 Q1 業界整理
-// 快照時間：2026-04（v0.35 當下）
+// 快照時間：2026-05（v0.35 當下）
 //
 // Rate limit 三維度：
 //   rpm  = Requests Per Minute
@@ -18,23 +18,23 @@
 //
 // 此對照表為靜態快照,Gemini 規格變動時需 bump extension 版本並更新此表。
 
-// v0.96：依 2026-04 AI Studio 實際數值全面更新。
+// v0.96：依 2026-05 AI Studio 實際數值全面更新。
 // Unlimited RPD 以 Infinity 表示，rate limiter 的比較邏輯可正確處理。
 export const TIER_LIMITS = {
   free: {
     'gemini-3-flash-preview':        { rpm: 10,   tpm: 250_000,   rpd: 250 },
-    'gemini-3.1-flash-lite-preview': { rpm: 15,   tpm: 250_000,   rpd: 1_000 },
-    'gemini-3.1-pro-preview':        { rpm: 5,    tpm: 250_000,   rpd: 100 },
+    'gemini-3.1-flash-lite': { rpm: 15,   tpm: 250_000,   rpd: 1_000 },
+    'gemini-3.5-flash':{ rpm: 5,    tpm: 250_000,   rpd: 100 },
   },
   tier1: {
     'gemini-3-flash-preview':        { rpm: 1000, tpm: 2_000_000, rpd: 10_000 },
-    'gemini-3.1-flash-lite-preview': { rpm: 4000, tpm: 4_000_000, rpd: 150_000 },
-    'gemini-3.1-pro-preview':        { rpm: 225,  tpm: 2_000_000, rpd: 250 },
+    'gemini-3.1-flash-lite': { rpm: 4000, tpm: 4_000_000, rpd: 150_000 },
+    'gemini-3.5-flash':{ rpm: 225,  tpm: 2_000_000, rpd: 250 },
   },
   tier2: {
     'gemini-3-flash-preview':        { rpm: 2000,  tpm: 3_000_000,  rpd: 100_000 },
-    'gemini-3.1-flash-lite-preview': { rpm: 10000, tpm: 10_000_000, rpd: 350_000 },
-    'gemini-3.1-pro-preview':        { rpm: 1000,  tpm: 5_000_000,  rpd: 50_000 },
+    'gemini-3.1-flash-lite': { rpm: 10000, tpm: 10_000_000, rpd: 350_000 },
+    'gemini-3.5-flash':{ rpm: 1000,  tpm: 5_000_000,  rpd: 50_000 },
   },
 };
 

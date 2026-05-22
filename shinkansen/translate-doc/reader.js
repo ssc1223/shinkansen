@@ -41,7 +41,7 @@ const SCROLL_SYNC_RESET_MS = 250;
  * @returns {Promise<ReaderHandle>}
  */
 export async function renderReader(doc, originalPdfDoc, originalArrayBuffer, originalCol, translatedCol, opts = {}) {
-  const { modelOverride, onFailedCountChange = () => {} } = opts;
+  const { modelOverride, engine, glossary, onFailedCountChange = () => {} } = opts;
   let currentZoom = opts.initialZoom || 1.0;
   let syncEnabled = opts.initialSyncEnabled !== false;
 
@@ -49,8 +49,9 @@ export async function renderReader(doc, originalPdfDoc, originalArrayBuffer, ori
   translatedCol.innerHTML = '';
 
   if (!doc || !originalPdfDoc || !originalArrayBuffer) {
-    originalCol.innerHTML = '<div class="reader-empty">尚未上傳文件</div>';
-    translatedCol.innerHTML = '<div class="reader-empty">尚未翻譯</div>';
+    const _t = (k) => window.__SK?.i18n?.t?.(k) ?? k;
+    originalCol.innerHTML = `<div class="reader-empty">${_t('doc.reader.empty.notUploaded')}</div>`;
+    translatedCol.innerHTML = `<div class="reader-empty">${_t('doc.reader.empty.notTranslated')}</div>`;
     return null;
   }
 
@@ -110,7 +111,8 @@ export async function renderReader(doc, originalPdfDoc, originalArrayBuffer, ori
       applyZoomToPage(rightPage, currentZoom);
     } catch (err) {
       console.error('[Shinkansen] reader render page failed', i, err);
-      leftPage.innerHTML = `<div class="reader-empty">第 ${i + 1} 頁 render 失敗</div>`;
+      const _t = (k, p) => window.__SK?.i18n?.t?.(k, p) ?? k;
+      leftPage.innerHTML = `<div class="reader-empty">${_t('doc.reader.empty.renderFail', { n: i + 1 })}</div>`;
     }
   }
 
@@ -177,7 +179,7 @@ export async function renderReader(doc, originalPdfDoc, originalArrayBuffer, ori
       }
       let success = 0;
       for (const block of failed) {
-        const r = await translateSingleBlock(block, { modelOverride });
+        const r = await translateSingleBlock(block, { modelOverride, engine, glossary });
         if (r.ok) success++;
       }
       // 至少有 1 個重翻成功 → 重建譯文 PDF + 重 render 右欄
@@ -304,7 +306,8 @@ export function buildPlainTextDump(doc) {
   const lines = [];
   for (let i = 0; i < doc.pages.length; i++) {
     const page = doc.pages[i];
-    lines.push(`=== 第 ${i + 1} 頁 ===`);
+    const _t = (k, p) => window.__SK?.i18n?.t?.(k, p) ?? k;
+    lines.push(_t('doc.reader.dump.pageHeader', { n: i + 1 }));
     for (const block of page.blocks) {
       const t = block.translation || block.plainText;
       if (!t) continue;

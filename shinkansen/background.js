@@ -14,6 +14,7 @@ import * as usageDB from './lib/usage-db.js'; // v0.86: 用量紀錄 IndexedDB
 import { getPricingForModel } from './lib/model-pricing.js';  // v1.4.12: preset 依 model 查定價
 import { detectForbiddenTermLeaks } from './lib/forbidden-terms.js'; // v1.5.6
 import { checkForUpdate, markUpdateNoticeShown, localTodayKey } from './lib/update-check.js'; // v1.6.1
+import { shouldLogInit as _shouldLogRateLimitInit } from './lib/rate-limit-init-log-dedup.js'; // v1.8.60
 import { maybeWriteWelcomeNotice } from './lib/welcome-notice.js'; // v1.6.5
 import { refreshExchangeRate, getCachedRate, isCacheFresh } from './lib/exchange-rate.js'; // v1.8.41
 
@@ -34,14 +35,23 @@ async function initLimiter() {
   const settings = await getSettings();
   const limits = getLimitsForSettings(settings);
   limiter = new RateLimiter(limits);
-  debugLog('info', 'rate-limit', 'rate limiter initialized', {
+  // v1.8.60: SW idle-die 每 5-25 分鐘 cold start → 此 log 在 Debug 分頁視覺上很雜。
+  // 加 24h 去重:同 limits 設定 24h 內只 log 一次;limits 變化(tier / override / model)
+  // 仍即時 log,值得記。dedup 邏輯抽到 lib/rate-limit-init-log-dedup.js 方便 unit test。
+  const payload = {
     tier: settings.tier,
     model: settings.geminiConfig.model,
     rpm: limits.rpm,
     tpm: limits.tpm,
     rpd: limits.rpd,
     safetyMargin: limits.safetyMargin,
-  });
+  };
+  try {
+    const { _rateLimitInitLog: prev } = await browser.storage.local.get('_rateLimitInitLog');
+    if (!_shouldLogRateLimitInit(prev, Date.now(), payload)) return;
+    await browser.storage.local.set({ _rateLimitInitLog: { payload, timestamp: Date.now() } });
+  } catch { /* storage 失敗就 fall through 寫 log,不阻 SW 啟動 */ }
+  debugLog('info', 'rate-limit', 'rate limiter initialized', payload);
 }
 initLimiter();
 
@@ -125,54 +135,8 @@ browser.alarms?.onAlarm.addListener((alarm) => {
   refreshExchangeRate().catch(err => debugLog('warn', 'exchange-rate', 'alarm fetch failed', { error: err.message }));
 });
 
-// ─── 使用量累計（browser.storage.local) ────────────────────
-// 結構：
-//   usageStats: {
-//     totalInputTokens: number,
-//     totalOutputTokens: number,
-//     totalCostUSD: number,
-//     since: ISO timestamp  // 最後一次重置時間
-//   }
-const USAGE_KEY = 'usageStats';
-
-async function getUsageStats() {
-  const { [USAGE_KEY]: s } = await browser.storage.local.get(USAGE_KEY);
-  return s || {
-    totalInputTokens: 0,
-    totalOutputTokens: 0,
-    totalCostUSD: 0,
-    since: new Date().toISOString(),
-  };
-}
-
-// v1.8.20: 序列化 addUsage 寫入。原版 read-modify-write 沒鎖，跨 tab 並行翻譯時兩個
-// await getUsageStats() 各拿舊值 → 後寫覆蓋前寫 → 累計用量永久遺失一筆。
-// 改 promise chain 排隊：每次 addUsage 接在 _usageWriteQueue 之後跑，保證序列化。
-let _usageWriteQueue = Promise.resolve();
-async function addUsage(inputTokens, outputTokens, costUSD) {
-  const next = _usageWriteQueue.then(async () => {
-    const s = await getUsageStats();
-    s.totalInputTokens += inputTokens;
-    s.totalOutputTokens += outputTokens;
-    s.totalCostUSD += costUSD;
-    await browser.storage.local.set({ [USAGE_KEY]: s });
-    return s;
-  });
-  // 防止單次 reject 卡住整條 queue:catch 後 swallow，但仍把 result/error return 給 caller
-  _usageWriteQueue = next.catch(() => {});
-  return next;
-}
-
-async function resetUsageStats() {
-  const fresh = {
-    totalInputTokens: 0,
-    totalOutputTokens: 0,
-    totalCostUSD: 0,
-    since: new Date().toISOString(),
-  };
-  await browser.storage.local.set({ [USAGE_KEY]: fresh });
-  return fresh;
-}
+// 累計用量（grand total）由 IndexedDB usage-db.js 透過 QUERY_USAGE_STATS 提供。
+// 不再額外維護 storage.local 累計欄位，避免與明細紀錄 drift。
 
 function computeCostUSD(inputTokens, outputTokens, pricing) {
   const inRate = Number(pricing?.inputPerMTok) || 0;
@@ -183,29 +147,42 @@ function computeCostUSD(inputTokens, outputTokens, pricing) {
 /**
  * v0.48: 計算套用 implicit / explicit context cache 折扣後的實付費用。
  * v1.8.20: 改成可注入折扣比例（cachedRate = cache 命中部分相對全價的比例）。
- * 各家公告：
- *   - Gemini implicit cache: 命中收 25% （省 75%)
- *   - OpenAI prompt cache:    命中收 50% （省 50%)
- *   - Anthropic Claude read:  命中收 10% （省 90%);write 是 +25% 的另一條，本擴充功能
- *                             不主動建 cache，只看 read，所以僅處理命中折扣。
- *   - 不確定的 provider:      預設用 0.5 的中間值，低估比高估保守。
+ * v1.9.2: 預設 fallback rate 從 0.25 改 0.10——Gemini 2.5+ 起 implicit cache 是 90% off
+ *         (命中部分付 10%),不再是 2.0 時代的 75% off;且新 caller 一律從 settings 帶
+ *         明確 cachedDiscount,fallback 只給「沒帶值」的舊 caller 用,給 Gemini 現實值
+ *         比 OpenAI 舊 50% 中間值更實用。
  *
  * 公式：effectiveInput = (inputTokens - cachedTokens) + cachedTokens × cachedRate
  */
 function computeBilledCostUSD(inputTokens, cachedTokens, outputTokens, pricing, cachedRate) {
   const rate = (typeof cachedRate === 'number' && cachedRate >= 0 && cachedRate <= 1)
     ? cachedRate
-    : 0.25; // 預設 Gemini 75% 折扣（向下相容既有 caller)
+    : 0.10; // 預設 Gemini 2.5+ 90% off
   const uncached = Math.max(0, inputTokens - cachedTokens);
   const effectiveInput = uncached + cachedTokens * rate;
   return computeCostUSD(effectiveInput, outputTokens, pricing);
 }
 
 /**
- * v1.8.20: 依自訂 Provider baseUrl 推斷 cache 命中折扣比例。
- * 真值比例不應該硬編碼成 0.25 套到所有 provider —— OpenAI cache 折扣 50%、
- * Claude 高達 90%，套 0.25 對 OpenAI 會低估費用約 50%、對 Claude 會高估 70%。
- * 由 baseUrl 簡單字串判斷，使用者用 OpenRouter 等 aggregator 時走預設 0.5 中間值。
+ * v1.9.2: 從 pricing 物件取出 cache 命中部分相對全價的比例。
+ * pricing.cachedDiscount(0-1,命中省下的比例)→ rate = 1 - discount。
+ * 沒填 / 不合法 → 回 null,呼叫端決定 fallback。
+ *
+ * @param {object|null} pricing
+ * @returns {number|null}
+ */
+function pricingToCachedRate(pricing) {
+  const d = Number(pricing?.cachedDiscount);
+  if (!Number.isFinite(d) || d < 0 || d > 1) return null;
+  return 1 - d;
+}
+
+/**
+ * v1.8.20: 依自訂 Provider baseUrl 推斷 cache 命中折扣比例,作為 customProvider.cachedDiscount
+ *         沒填時的二級 fallback。
+ * v1.9.2: 數值對齊 2026-05 各家現況——OpenAI 新世代(GPT-5+)up to 90% off、
+ *         DeepSeek 約 98% off、xAI 75-90%、Claude 90%。
+ * 由 baseUrl 簡單字串判斷,使用者用 OpenRouter 等 aggregator 時走預設 0.5 中間值。
  *
  * @param {string} baseUrl
  * @returns {number} cache 命中部分相對全價的比例（0-1)
@@ -213,9 +190,56 @@ function computeBilledCostUSD(inputTokens, cachedTokens, outputTokens, pricing, 
 function getCustomCacheHitRate(baseUrl) {
   const url = String(baseUrl || '').toLowerCase();
   if (url.includes('anthropic.com')) return 0.10;        // Claude read 90% off
-  if (url.includes('openai.com')) return 0.50;            // OpenAI prompt cache 50% off
-  if (url.includes('deepseek.com')) return 0.10;          // DeepSeek context cache hit 90% off
+  if (url.includes('openai.com')) return 0.10;            // OpenAI 新世代(GPT-5+) up to 90% off
+  if (url.includes('deepseek.com')) return 0.02;          // DeepSeek context cache hit ~98% off
+  if (url.includes('x.ai')) return 0.20;                  // xAI Grok ~80% off(因 model 而異)
   return 0.50;                                            // 未知 provider 中間值
+}
+
+/**
+ * v1.9.2: customProvider 路徑 cache 命中比例查找順序:
+ *   1. customProvider.cachedDiscount 合法 → 用使用者設定
+ *   2. fallback baseUrl 自動推導(getCustomCacheHitRate)
+ *
+ * @param {object} cp customProvider 設定物件
+ * @returns {number} cache 命中部分相對全價的比例（0-1)
+ */
+function resolveCustomProviderCachedRate(cp) {
+  const fromSettings = pricingToCachedRate(cp);
+  if (fromSettings !== null) return fromSettings;
+  return getCustomCacheHitRate(cp?.baseUrl);
+}
+
+function buildFixedGlossaryEntries(fixedGlossary, sender) {
+  if (!fixedGlossary) return null;
+  const globalEntries = Array.isArray(fixedGlossary.global)
+    ? fixedGlossary.global.filter((e) => e.source && e.target)
+    : [];
+  let domainEntries = [];
+  if (fixedGlossary.byDomain && sender?.tab?.url) {
+    try {
+      const hostname = new URL(sender.tab.url).hostname;
+      domainEntries = Array.isArray(fixedGlossary.byDomain[hostname])
+        ? fixedGlossary.byDomain[hostname].filter((e) => e.source && e.target)
+        : [];
+    } catch { /* invalid URL */ }
+  }
+  if (globalEntries.length === 0 && domainEntries.length === 0) return null;
+  const merged = new Map();
+  for (const entry of globalEntries) merged.set(entry.source, entry.target);
+  for (const entry of domainEntries) merged.set(entry.source, entry.target);
+  return [...merged.entries()].map(([source, target]) => ({ source, target }));
+}
+
+function preferArticleGlossaryEntries(fixedGlossaryEntries, articleGlossary, enabled) {
+  if (!enabled
+      || !Array.isArray(articleGlossary) || articleGlossary.length === 0
+      || !Array.isArray(fixedGlossaryEntries) || fixedGlossaryEntries.length === 0) {
+    return fixedGlossaryEntries;
+  }
+  const articleSources = new Set(articleGlossary.map((entry) => entry.source));
+  const filtered = fixedGlossaryEntries.filter((entry) => !articleSources.has(entry.source));
+  return filtered.length > 0 ? filtered : null;
 }
 
 // ─── Extension icon badge（已翻譯紅點提示） ─────────────────
@@ -401,7 +425,7 @@ async function _handleAsrSubtitleBatch(payload, sender, cacheTag, namespace) {
   const geminiOverrides = {
     // ASR 模式不沿用使用者自訂的 ytSubtitle.systemPrompt（那是逐條翻譯版本，規則不適用 ASR JSON 模式）
     // P1: 依 target 切 universal/zh-TW prompt(zh-TW 走原 DEFAULT,其他走 UNIVERSAL 注入後)
-    systemInstruction: getEffectiveAsrSubtitleSystemPrompt(s.targetLanguage),
+    systemInstruction: getEffectiveAsrSubtitleSystemPrompt(s.targetLanguage, payload?.sourceLanguage || 'en'),
     // ASR 合句需要一點推理，但翻譯仍應穩定；沿用 ytSubtitle.temperature
     temperature: yt.temperature ?? 0.1,
   };
@@ -640,6 +664,21 @@ const messageHandlers = {
       return handleTranslate(payload, sender, overrides, null, '_doc', applyFixedGlossary);
     },
   },
+  TRANSLATE_DOC_BATCH_CUSTOM: {
+    async: true,
+    handler: async (payload, sender) => {
+      const s = await getSettings();
+      const td = s.translateDoc || {};
+      const userPrompt = getEffectiveDocSystemPrompt(s.targetLanguage, td.systemPrompt);
+      const effectivePrompt = userPrompt + DOC_INLINE_MARKER_INSTRUCTION;
+      const overrides = { systemPrompt: effectivePrompt };
+      if (typeof td.temperature === 'number' && Number.isFinite(td.temperature)) {
+        overrides.temperature = td.temperature;
+      }
+      const applyFixedGlossary = td.applyFixedGlossary !== false;
+      return handleTranslateCustom(payload, sender, '_oc_doc', overrides, applyFixedGlossary);
+    },
+  },
   // commit 5b:Drive 影片字幕走 Google Translate 路徑（獨立 cache key '_gt_drive' 避免跟
   // 一般網頁 GT 翻譯（'_gt'）互打）。input texts = raw segments 的 text array，逐段翻。
   TRANSLATE_DRIVE_BATCH_GOOGLE: {
@@ -682,10 +721,25 @@ const messageHandlers = {
       const yt = s.ytSubtitle || {};
       const overrides = {
         // P1: 自訂 Provider ASR 路徑同 Gemini ASR,依 target 切 universal/zh-TW prompt
-        systemPrompt: getEffectiveAsrSubtitleSystemPrompt(s.targetLanguage),
+        systemPrompt: getEffectiveAsrSubtitleSystemPrompt(s.targetLanguage, payload?.sourceLanguage || 'en'),
         temperature: yt.temperature ?? 0.1,
       };
       return handleTranslateCustom(payload, sender, '_oc_yt_asr', overrides, false, false);
+    },
+  },
+  // Drive 影片 ASR 字幕走自訂 Provider 時的入口。跟 TRANSLATE_ASR_SUBTITLE_BATCH_CUSTOM
+  // 結構對齊(共用 ASR JSON timestamp prompt + parseAsrResponse),只差 cache key '_oc_drive_yt_asr'
+  // 避免跟 YouTube('_oc_yt_asr')及 Gemini Drive ASR('_drive_yt_asr')互相污染。
+  TRANSLATE_DRIVE_ASR_SUBTITLE_BATCH_CUSTOM: {
+    async: true,
+    handler: async (payload, sender) => {
+      const s = await getSettings();
+      const yt = s.ytSubtitle || {};
+      const overrides = {
+        systemPrompt: getEffectiveAsrSubtitleSystemPrompt(s.targetLanguage, payload?.sourceLanguage || 'en'),
+        temperature: yt.temperature ?? 0.1,
+      };
+      return handleTranslateCustom(payload, sender, '_oc_drive_yt_asr', overrides, false, false);
     },
   },
   // v1.6.1: 使用者點 toast 內「下載」連結或「×」時，標記今日已顯示更新提示（每日節流）
@@ -764,14 +818,6 @@ const messageHandlers = {
   CACHE_STATS: {
     async: true,
     handler: () => cache.stats(),
-  },
-  USAGE_STATS: {
-    async: true,
-    handler: () => getUsageStats(),
-  },
-  RESET_USAGE: {
-    async: true,
-    handler: () => resetUsageStats(),
   },
   SET_BADGE_TRANSLATED: {
     async: true,
@@ -966,21 +1012,6 @@ const messageHandlers = {
   // YouTube 字幕資料由 content-youtube-main.js 的 XHR monkey-patch 攔截取得，
   // 不再透過 background 主動 fetch（YouTube timedtext URL 即使 same-origin 也因 exp=xpv 需要 POT）。
 
-  // YouTube 無邊模式：content side 計算目標視窗高度後請 SW 呼 chrome.windows.update。
-  // 失敗（install-as-app PWA 限制 / windowId 不在 / 權限缺失）沉默吞掉，
-  // CSS 仍套上，影片以 object-fit:contain 顯示（會有黑邊但功能堪用）。
-  RESIZE_OWN_WINDOW: {
-    async: false,
-    handler: (payload, sender) => {
-      const wid = sender?.tab?.windowId;
-      const height = payload?.height;
-      if (typeof wid !== 'number' || typeof height !== 'number') return { ok: false };
-      try {
-        browser.windows.update(wid, { height }).catch(() => {});
-      } catch (_) {}
-      return { ok: true };
-    },
-  },
   // v1.8.41:USD → TWD 匯率（讀 cache;cache 不存在回 fallback 31.6)
   EXCHANGE_RATE_GET: {
     async: true,
@@ -1232,17 +1263,20 @@ async function handleTranslateStream(payload, sender, streamId, tabId, opts = {}
     }
 
     // 計費（跟 handleTranslate 一致）
+    // v1.9.2: cache 命中折扣從 effectivePricing.cachedDiscount 讀取(預設 Gemini 90% off)
+    const cachedRate = pricingToCachedRate(effectivePricing) ?? 0.10;
+    const cachedSavedRatio = 1 - cachedRate;
     const billedInputTokens = Math.max(
       0,
-      Math.round(result.usage.inputTokens - (result.usage.cachedTokens || 0) * 0.75),
+      Math.round(result.usage.inputTokens - (result.usage.cachedTokens || 0) * cachedSavedRatio),
     );
     const billedCostUSD = computeBilledCostUSD(
       result.usage.inputTokens,
       result.usage.cachedTokens || 0,
       result.usage.outputTokens,
       effectivePricing,
+      cachedRate,
     );
-    await addUsage(billedInputTokens, result.usage.outputTokens, billedCostUSD);
 
     browser.tabs.sendMessage(tabId, {
       type: 'STREAMING_DONE',
@@ -1298,7 +1332,7 @@ async function handleTranslate(payload, sender, geminiOverrides = {}, pricingOve
     geminiConfig: { ...settings.geminiConfig, ...geminiOverrides, systemInstruction: baseSI },
   };
   // v1.4.12: preset 帶 modelOverride 時，從內建表查對應 model 的 pricing，
-  // 確保 toast / usage log 的費用與 model 一致（Flash Lite $0.10/$0.30、Flash $0.50/$3.00）。
+  // 確保 toast / usage log 的費用與 model 一致（Flash Lite $0.25/$1.50、Flash $0.50/$3.00）。
   // 優先順序：pricingOverride（字幕獨立計價） > modelOverride 查表 > settings.pricing
   let effectivePricing = pricingOverride;
   if (!effectivePricing && geminiOverrides.model) {
@@ -1312,37 +1346,19 @@ async function handleTranslate(payload, sender, geminiOverrides = {}, pricingOve
 
   // v1.0.29: 讀取固定術語表（全域 + 當前網域），合併後傳給 translateBatch
   // v1.5.8: 字幕路徑（applyFixedGlossary=false）跳過讀取，省 prompt token
-  let fixedGlossaryEntries = null;
-  const fg = applyFixedGlossary ? settings.fixedGlossary : null;
-  if (fg) {
-    const globalEntries = Array.isArray(fg.global) ? fg.global.filter(e => e.source && e.target) : [];
-    let domainEntries = [];
-    if (fg.byDomain && sender?.tab?.url) {
-      try {
-        const hostname = new URL(sender.tab.url).hostname;
-        domainEntries = Array.isArray(fg.byDomain[hostname]) ? fg.byDomain[hostname].filter(e => e.source && e.target) : [];
-      } catch { /* 無效 URL，略過 */ }
-    }
-    // 合併：全域先、網域後（網域覆蓋全域同名術語——用 Map 去重，後出現的覆蓋前面的）
-    if (globalEntries.length > 0 || domainEntries.length > 0) {
-      const merged = new Map();
-      for (const e of globalEntries) merged.set(e.source, e.target);
-      for (const e of domainEntries) merged.set(e.source, e.target); // 網域覆蓋全域
-      fixedGlossaryEntries = [...merged.entries()].map(([source, target]) => ({ source, target }));
-    }
-  }
+  let fixedGlossaryEntries = buildFixedGlossaryEntries(
+    applyFixedGlossary ? settings.fixedGlossary : null,
+    sender,
+  );
 
   // v1.8.49: preferArticleGlossary 時（文件翻譯 path 帶來)，把跟文章術語表同 source 的
   // fixed entry 從 fixedGlossary 移除，讓 article 完全 override fixed(不靠 LLM 判斷
   // 優先級，直接從 prompt 拿掉避免衝突)
-  const payloadGlossary = payload?.glossary;
-  if (payload?.preferArticleGlossary
-      && Array.isArray(payloadGlossary) && payloadGlossary.length > 0
-      && fixedGlossaryEntries && fixedGlossaryEntries.length > 0) {
-    const articleSources = new Set(payloadGlossary.map((e) => e.source));
-    fixedGlossaryEntries = fixedGlossaryEntries.filter((e) => !articleSources.has(e.source));
-    if (fixedGlossaryEntries.length === 0) fixedGlossaryEntries = null;
-  }
+  fixedGlossaryEntries = preferArticleGlossaryEntries(
+    fixedGlossaryEntries,
+    payload?.glossary,
+    payload?.preferArticleGlossary,
+  );
 
   // v1.5.6: 中國用語黑名單。從 settings 讀清單後一路傳到 translateBatch（注入到 systemInstruction），
   // 同時計算 hash 加進 cache key 後綴，讓使用者修改清單後既有快取自動失效。
@@ -1460,19 +1476,21 @@ async function handleTranslate(payload, sender, geminiOverrides = {}, pricingOve
     // 3.5 累計到全域使用量統計
     // v0.48: 改為累計「實付」值（套用 implicit cache 折扣後的等效 input tokens
     // 與實付費用），讓 popup 累計顯示的 token / 費用等於 Gemini 帳單實際扣款。
-    // billedInputTokens = inputTokens - cachedTokens × 0.75
-    //   （未命中的 token 全價 + 命中的 token 25% 折扣 → 等效 token 數）
+    // v1.9.2: cache 命中折扣從 effectivePricing.cachedDiscount 讀(預設 Gemini 90% off);
+    //         舊硬編 0.75 是 Gemini 2.0 時代值,2.5+ 起應為 0.90。
+    const cachedRate = pricingToCachedRate(effectivePricing) ?? 0.10;
+    const cachedSavedRatio = 1 - cachedRate;
     billedInputTokens = Math.max(
       0,
-      Math.round(batchUsage.inputTokens - (batchUsage.cachedTokens || 0) * 0.75),
+      Math.round(batchUsage.inputTokens - (batchUsage.cachedTokens || 0) * cachedSavedRatio),
     );
     billedCostUSD = computeBilledCostUSD(
       batchUsage.inputTokens,
       batchUsage.cachedTokens || 0,
       batchUsage.outputTokens,
       effectivePricing,
+      cachedRate,
     );
-    await addUsage(billedInputTokens, batchUsage.outputTokens, billedCostUSD);
   }
 
   // 4. 合併結果（快取 + 新翻譯）按原順序回傳
@@ -1609,24 +1627,17 @@ async function handleTranslateCustom(payload, sender, cacheTag = '_oc', cpOverri
 
   // 重用 handleTranslate 內的 fixedGlossary 合併邏輯
   // v1.5.8: 字幕路徑（applyFixedGlossary=false）跳過
-  let fixedGlossaryEntries = null;
-  const fg = applyFixedGlossary ? settings.fixedGlossary : null;
-  if (fg) {
-    const globalEntries = Array.isArray(fg.global) ? fg.global.filter(e => e.source && e.target) : [];
-    let domainEntries = [];
-    if (fg.byDomain && sender?.tab?.url) {
-      try {
-        const hostname = new URL(sender.tab.url).hostname;
-        domainEntries = Array.isArray(fg.byDomain[hostname]) ? fg.byDomain[hostname].filter(e => e.source && e.target) : [];
-      } catch { /* 無效 URL，略過 */ }
-    }
-    if (globalEntries.length > 0 || domainEntries.length > 0) {
-      const merged = new Map();
-      for (const e of globalEntries) merged.set(e.source, e.target);
-      for (const e of domainEntries) merged.set(e.source, e.target);
-      fixedGlossaryEntries = [...merged.entries()].map(([source, target]) => ({ source, target }));
-    }
-  }
+  let fixedGlossaryEntries = buildFixedGlossaryEntries(
+    applyFixedGlossary ? settings.fixedGlossary : null,
+    sender,
+  );
+
+  // preferArticleGlossary dedup: article glossary overrides fixed entries with same source
+  fixedGlossaryEntries = preferArticleGlossaryEntries(
+    fixedGlossaryEntries,
+    payload?.glossary,
+    payload?.preferArticleGlossary,
+  );
 
   // v1.5.8: 字幕路徑（applyForbiddenTerms=false）跳過
   const forbiddenTermsList = (applyForbiddenTerms && Array.isArray(settings.forbiddenTerms))
@@ -1654,6 +1665,9 @@ async function handleTranslateCustom(payload, sender, cacheTag = '_oc', cpOverri
   const tl = settings.targetLanguage;
   if (tl && tl !== 'zh-TW') {
     suffix += '_lang' + tl.replace(/[^a-z0-9]/gi, '');
+  }
+  if (cacheTag === '_oc_doc' && typeof cp.temperature === 'number' && Number.isFinite(cp.temperature)) {
+    suffix += '_t' + cp.temperature.toFixed(2);
   }
 
   // 1. 撈快取
@@ -1711,30 +1725,14 @@ async function handleTranslateCustom(payload, sender, cacheTag = '_oc', cpOverri
 
     // 4. 寫回快取
     await cache.setBatch(missingTexts, fresh, suffix);
-
-    // 5. 累計用量
-    // v1.8.20: 折扣比例依 provider 推斷——OpenAI/Claude/DeepSeek 各家 cache 命中折扣率不同，
-    // 原本硬編碼 0.25 套所有 provider 對 OpenAI 系統性低估 50% 成本。
-    const cachedRate = getCustomCacheHitRate(cp.baseUrl);
-    const cachedSavedRatio = 1 - cachedRate;
-    const billedInput = Math.max(
-      0, Math.round(batchUsage.inputTokens - (batchUsage.cachedTokens || 0) * cachedSavedRatio),
-    );
-    const billedCost = computeBilledCostUSD(
-      batchUsage.inputTokens,
-      batchUsage.cachedTokens || 0,
-      batchUsage.outputTokens,
-      { inputPerMTok: cp.inputPerMTok || 0, outputPerMTok: cp.outputPerMTok || 0 },
-      cachedRate,
-    );
-    await addUsage(billedInput, batchUsage.outputTokens, billedCost);
   }
 
   // 6. 合併結果
   const result = cached.slice();
   missingIdxs.forEach((idx, k) => { result[idx] = fresh[k]; });
 
-  const cachedRate = getCustomCacheHitRate(cp.baseUrl);
+  // v1.9.2: cache 命中折扣優先讀 cp.cachedDiscount,沒填 fallback baseUrl 自動推導
+  const cachedRate = resolveCustomProviderCachedRate(cp);
   const cachedSavedRatio = 1 - cachedRate;
   return {
     result,
@@ -1763,14 +1761,22 @@ async function handleTranslateCustom(payload, sender, cacheTag = '_oc', cpOverri
 // ─── v1.4.0: Google Translate 批次處理 ────────────────────────
 // 與 handleTranslate 不同：不走 rate limiter、不走術語表、費用 $0。
 // cacheSuffix：網頁翻譯用 '_gt'，字幕翻譯用 '_gt_yt'，確保快取與 Gemini 分開存放。
+// v1.8.61: targetLanguage 透傳給 translateGoogleBatch + 進 cache key,
+// zh-TW 不加 lang suffix(向下相容,既有 _gt cache 仍 hit),其他 target 加 _lang<x>。
 async function handleTranslateGoogle(payload, sender, cacheSuffix) {
   const texts = payload?.texts;
   if (!Array.isArray(texts) || texts.length === 0) {
     return { result: [], usage: { engine: 'google', chars: 0 } };
   }
 
+  const settings = await getSettings();
+  const tl = settings.targetLanguage || 'zh-TW';
+  const effectiveCacheSuffix = (tl && tl !== 'zh-TW')
+    ? cacheSuffix + '_lang' + tl.replace(/[^a-z0-9]/gi, '')
+    : cacheSuffix;
+
   // 1. 先查快取（與 Gemini 快取共用 cache module，但 key suffix 不同）
-  const cached = await cache.getBatch(texts, cacheSuffix);
+  const cached = await cache.getBatch(texts, effectiveCacheSuffix);
   const missingIdxs = [];
   const missingTexts = [];
   cached.forEach((tr, i) => {
@@ -1782,7 +1788,7 @@ async function handleTranslateGoogle(payload, sender, cacheSuffix) {
 
   const cacheHits = texts.length - missingTexts.length;
   debugLog('info', 'cache', 'google batch cache lookup', {
-    total: texts.length, hits: cacheHits, misses: missingTexts.length,
+    total: texts.length, hits: cacheHits, misses: missingTexts.length, tl,
   });
 
   // 2. 缺失的部分呼叫 Google Translate
@@ -1790,18 +1796,19 @@ async function handleTranslateGoogle(payload, sender, cacheSuffix) {
   let totalChars = 0;
   if (missingTexts.length > 0) {
     const t0 = Date.now();
-    debugLog('info', 'api', 'google translateBatch start', { count: missingTexts.length });
-    const res = await translateGoogleBatch(missingTexts);
+    debugLog('info', 'api', 'google translateBatch start', { count: missingTexts.length, tl });
+    const res = await translateGoogleBatch(missingTexts, tl);
     fresh = res.translations;
     totalChars = res.chars;
     debugLog('info', 'api', 'google translateBatch done', {
       count: missingTexts.length,
       chars: totalChars,
       elapsed: Date.now() - t0,
+      tl,
     });
 
     // 3. 寫回快取
-    await cache.setBatch(missingTexts, fresh, cacheSuffix);
+    await cache.setBatch(missingTexts, fresh, effectiveCacheSuffix);
 
     // 4. 記錄用量（費用 $0，以字元計）
     // v1.5.7: 走 upsertGoogleUsage 合併同一篇 URL 一小時內的批次到單一紀錄，
@@ -1876,23 +1883,40 @@ async function handleExtractGlossary(payload, sender) {
     await cache.setGlossary(inputHash, glossary, glossarySuffix);
   }
 
-  // 5. 累計使用量統計
-  // v1.7.2: glossary 用獨立 model（預設 Flash Lite）時，pricing 也要對應該 model,
-  // 不能再用 settings.pricing（那是主翻譯 model 的 pricing)。
+  // 5. 記錄用量到 IndexedDB（source='glossary' 區分，跟主翻譯紀錄分流）
   if (usage.inputTokens > 0 || usage.outputTokens > 0) {
-    const billedInput = Math.max(
-      0,
-      Math.round(usage.inputTokens - (usage.cachedTokens || 0) * 0.75),
-    );
-    const glossaryModel = (settings.glossary?.model || '').trim() || settings.geminiConfig?.model;
+    const glossaryModel = (settings.glossary?.model || '').trim() || settings.geminiConfig?.model || 'unknown';
     const glossaryPricing = getPricingForModel(glossaryModel, settings) || settings.pricing;
-    const billedCost = computeBilledCostUSD(
+    // v1.9.2: cache 命中折扣從 glossaryPricing.cachedDiscount 讀(預設 Gemini 90% off)
+    const cachedRate = pricingToCachedRate(glossaryPricing) ?? 0.10;
+    const cachedSavedRatio = 1 - cachedRate;
+    const billedInputTokens = Math.max(
+      0,
+      Math.round(usage.inputTokens - (usage.cachedTokens || 0) * cachedSavedRatio),
+    );
+    const billedCostUSD = computeBilledCostUSD(
       usage.inputTokens,
       usage.cachedTokens || 0,
       usage.outputTokens,
       glossaryPricing,
+      cachedRate,
     );
-    await addUsage(billedInput, usage.outputTokens, billedCost);
+    await usageDB.logTranslation({
+      url: sender?.tab?.url || '',
+      title: sender?.tab?.title || '',
+      engine: 'gemini',
+      model: glossaryModel,
+      inputTokens: usage.inputTokens || 0,
+      outputTokens: usage.outputTokens || 0,
+      cachedTokens: usage.cachedTokens || 0,
+      billedInputTokens,
+      billedCostUSD,
+      segments: 0,
+      cacheHits: 0,
+      durationMs: 0,
+      timestamp: Date.now(),
+      source: 'glossary',
+    });
   }
 
   debugLog('info', 'glossary', 'glossary extraction complete', {
@@ -1948,16 +1972,41 @@ async function handleExtractGlossaryCustomProvider(payload, sender) {
     await cache.setGlossary(inputHash, glossary, glossarySuffix);
   }
 
-  // 4. 累計用量（自訂 Provider 用 customProvider.inputPerMTok / outputPerMTok 計價)
+  // 4. 記錄用量到 IndexedDB（source='glossary' 區分，跟主翻譯紀錄分流）
   if (usage.inputTokens > 0 || usage.outputTokens > 0) {
-    const billedInput = Math.max(0, Math.round(usage.inputTokens - (usage.cachedTokens || 0) * 0.75));
+    // v1.9.2: cache 命中折扣優先讀 cp.cachedDiscount,沒填 fallback baseUrl 自動推導
+    const cachedRate = resolveCustomProviderCachedRate(cp);
+    const cachedSavedRatio = 1 - cachedRate;
+    const billedInputTokens = Math.max(
+      0,
+      Math.round(usage.inputTokens - (usage.cachedTokens || 0) * cachedSavedRatio),
+    );
     const cpPricing = (cp.inputPerMTok || cp.outputPerMTok)
       ? { inputPerMTok: cp.inputPerMTok || 0, outputPerMTok: cp.outputPerMTok || 0 }
       : null;
-    const billedCost = computeBilledCostUSD(
-      usage.inputTokens, usage.cachedTokens || 0, usage.outputTokens, cpPricing,
+    const billedCostUSD = computeBilledCostUSD(
+      usage.inputTokens,
+      usage.cachedTokens || 0,
+      usage.outputTokens,
+      cpPricing,
+      cachedRate,
     );
-    await addUsage(billedInput, usage.outputTokens, billedCost);
+    await usageDB.logTranslation({
+      url: sender?.tab?.url || '',
+      title: sender?.tab?.title || '',
+      engine: 'openai-compat',
+      model: cp.model || '<server-default>',
+      inputTokens: usage.inputTokens || 0,
+      outputTokens: usage.outputTokens || 0,
+      cachedTokens: usage.cachedTokens || 0,
+      billedInputTokens,
+      billedCostUSD,
+      segments: 0,
+      cacheHits: 0,
+      durationMs: 0,
+      timestamp: Date.now(),
+      source: 'glossary',
+    });
   }
 
   debugLog('info', 'glossary', 'openai-compat glossary extraction complete', {
@@ -1975,13 +2024,6 @@ async function handleExtractGlossaryCustomProvider(payload, sender) {
 //   storage 內仍維持 slot 1/2/3 編號，故 command id 0 → slot 2 mapping 寫死。
 const COMMAND_ID_TO_SLOT = { 0: 2, 1: 1, 3: 3 };
 browser.commands.onCommand.addListener(async (command) => {
-  // YouTube 無邊模式 toggle（隱藏功能，使用者於 chrome://extensions/shortcuts 自行綁定）
-  if (command === 'youtube-borderless') {
-    const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
-    if (!tab?.id) return;
-    browser.tabs.sendMessage(tab.id, { type: 'TOGGLE_YT_BORDERLESS' }).catch(() => {});
-    return;
-  }
   const match = command.match(/^translate-preset-(\d+)$/);
   if (!match) return;
   const cmdNum = Number(match[1]);
@@ -2016,6 +2058,27 @@ async function runW7CacheMigration(triggerLabel) {
 browser.runtime.onStartup?.addListener(() => { runW7CacheMigration('onStartup'); });
 runW7CacheMigration('sw-init'); // SW 冷啟動也跑一次（防 onStartup 沒觸發的 case，如更新 install)
 
+// v1.9.8 一次性 migration:Google MT 混批 garbage cache 清除。
+// Bug:v1.9.8 之前 Google MT 對中英混排頁面的混批會把英文段攪成 garbage 寫進 cache;
+// 新版分群避免後續 fetch 被攪,但既有 cache entry 不修法本身解不掉,SPA rescan 撈 hit
+// 仍會吐 garbage。掃掉 tc_*_gt[_drive|_yt|...] entry,Gemini / openai-compat cache 不動。
+const V198_GOOGLE_MT_CACHE_FLAG = '__shinkansen_v198_google_mt_cache_cleared';
+async function runV198GoogleMtCacheClear(triggerLabel) {
+  try {
+    const r = await cache.migrateClearGoogleMtCacheOnce(V198_GOOGLE_MT_CACHE_FLAG);
+    if (r.ranMigration) {
+      debugLog('info', 'cache', `v1.9.8 Google MT cache cleared (${triggerLabel})`, { cleared: r.cleared });
+    }
+  } catch (err) {
+    debugLog('warn', 'cache', 'v1.9.8 Google MT cache clear failed', { error: err && err.message, trigger: triggerLabel });
+  }
+}
+browser.runtime.onStartup?.addListener(() => { runV198GoogleMtCacheClear('onStartup'); });
+runV198GoogleMtCacheClear('sw-init');
+
+// 累計用量 path 合一（IndexedDB 為單一資料源）後，storage.local['usageStats'] 殘餘清掉
+browser.storage.local.remove('usageStats').catch(() => {});
+
 browser.runtime.onInstalled.addListener(async ({ reason, previousVersion }) => {
   debugLog('info', 'system', `extension ${reason}`, {
     version: browser.runtime.getManifest().version,
@@ -2025,6 +2088,7 @@ browser.runtime.onInstalled.addListener(async ({ reason, previousVersion }) => {
   const currentVersion = browser.runtime.getManifest().version;
   await cache.checkVersionAndClear(currentVersion);
   await runW7CacheMigration('onInstalled');
+  await runV198GoogleMtCacheClear('onInstalled');
 
   // v1.6.5: CWS 自動更新到 major / minor 新版時，寫 welcomeNotice 讓使用者下次
   // 開 popup 或翻譯成功 toast 時看到「🎉 已升級至 vX.Y」+ 重大更新清單。

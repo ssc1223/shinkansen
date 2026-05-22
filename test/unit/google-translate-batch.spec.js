@@ -94,7 +94,217 @@ test('translateGoogleBatch: 索引保留正確（多批次 result 依 idx 寫回
   expect(translations[3].startsWith('[ZH] D')).toBe(true);
 });
 
+// v1.8.61: targetLanguage 必須帶進 URL 的 tl= 參數（之前寫死 zh-TW,
+// 導致 zh-CN / en / ja 等其他 target 都翻成繁中)。
+test('translateGoogleBatch: 預設不帶 target → URL tl=zh-TW', async () => {
+  await translateGoogleBatch(['Hello']);
+  expect(fetchCalls.length).toBe(1);
+  const tlMatch = String(fetchCalls[0]).match(/[?&]tl=([^&]*)/);
+  expect(tlMatch).not.toBeNull();
+  expect(decodeURIComponent(tlMatch[1])).toBe('zh-TW');
+});
+
+test('translateGoogleBatch: target=ja → URL tl=ja', async () => {
+  await translateGoogleBatch(['Hello'], 'ja');
+  expect(fetchCalls.length).toBe(1);
+  const tlMatch = String(fetchCalls[0]).match(/[?&]tl=([^&]*)/);
+  expect(decodeURIComponent(tlMatch[1])).toBe('ja');
+});
+
+test('translateGoogleBatch: target=zh-CN → URL tl=zh-CN', async () => {
+  await translateGoogleBatch(['Hello'], 'zh-CN');
+  expect(fetchCalls.length).toBe(1);
+  const tlMatch = String(fetchCalls[0]).match(/[?&]tl=([^&]*)/);
+  expect(decodeURIComponent(tlMatch[1])).toBe('zh-CN');
+});
+
+test('translateGoogleBatch: 不認得的 target → fallback tl=zh-TW', async () => {
+  await translateGoogleBatch(['Hello'], 'xx-YY');
+  expect(fetchCalls.length).toBe(1);
+  const tlMatch = String(fetchCalls[0]).match(/[?&]tl=([^&]*)/);
+  expect(decodeURIComponent(tlMatch[1])).toBe('zh-TW');
+});
+
+// v1.9.5: per-unit retry on echo —— Google MT 對某些 batch 會把 unit 原樣回傳,
+// 整批跑完後逐筆 retry 補救。下面 3 條測試覆蓋此邏輯。
+//
+// fetch mock 策略:用 callCount 區分「initial batch」(callCount=1) vs「retry singleton」
+// (callCount=2+),initial 對指定 unit 回傳 source 不變(echo),retry 走真翻譯。
+// 透過 try/finally 還原 globalThis.fetch 避免污染後續測試。
+
+test('translateGoogleBatch: 批次內某 unit 被 echo 原文 → 觸發 per-unit retry → 救回譯文', async () => {
+  const originalFetch = globalThis.fetch;
+  let callCount = 0;
+  globalThis.fetch = async (url) => {
+    fetchCalls.push(url);
+    callCount++;
+    const match = String(url).match(/[?&]q=([^&]*)/);
+    const q = match ? decodeURIComponent(match[1]) : '';
+    const sourceParts = q.split(SEP);
+
+    if (callCount === 1) {
+      // initial batch:"Echo me" 原文 echo,其他段正常翻
+      const translatedParts = sourceParts.map(s =>
+        s === 'Echo me' ? s : `[ZH] ${s}`
+      );
+      const joined = translatedParts.join(SEP);
+      return { ok: true, json: async () => [[[joined, q]]] };
+    }
+    // retry:單筆送進來真翻
+    return { ok: true, json: async () => [[[`[ZH] ${q}`, q]]] };
+  };
+
+  try {
+    const inputs = ['Hello', 'Echo me', 'World'];
+    const { translations } = await translateGoogleBatch(inputs);
+
+    // 1 initial + 1 retry(只有 "Echo me" 需 retry)
+    expect(fetchCalls.length).toBe(2);
+    expect(translations[0]).toBe('[ZH] Hello');
+    expect(translations[1]).toBe('[ZH] Echo me'); // 救回
+    expect(translations[2]).toBe('[ZH] World');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('translateGoogleBatch: 整批全 echo → 全部逐筆 retry', async () => {
+  const originalFetch = globalThis.fetch;
+  let callCount = 0;
+  globalThis.fetch = async (url) => {
+    fetchCalls.push(url);
+    callCount++;
+    const match = String(url).match(/[?&]q=([^&]*)/);
+    const q = match ? decodeURIComponent(match[1]) : '';
+
+    if (callCount === 1) {
+      // initial:整批 echo
+      return { ok: true, json: async () => [[[q, q]]] };
+    }
+    return { ok: true, json: async () => [[[`[ZH] ${q}`, q]]] };
+  };
+
+  try {
+    const inputs = ['A', 'B', 'C'];
+    const { translations } = await translateGoogleBatch(inputs);
+
+    // 1 initial + 3 retry(每段都需 retry)
+    expect(fetchCalls.length).toBe(4);
+    expect(translations).toEqual(['[ZH] A', '[ZH] B', '[ZH] C']);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('translateGoogleBatch: retry 仍 echo(genuinely already in target)→ 維持 echo 值,不阻擋整批', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    fetchCalls.push(url);
+    const match = String(url).match(/[?&]q=([^&]*)/);
+    const q = match ? decodeURIComponent(match[1]) : '';
+    const sourceParts = q.split(SEP);
+    // initial AND retry 都 echo(任何 fetch 都回 source 不變)
+    const translated = sourceParts.map(s => s).join(SEP);
+    return { ok: true, json: async () => [[[translated, q]]] };
+  };
+
+  try {
+    const inputs = ['已是繁中一', '已是繁中二'];
+    const { translations } = await translateGoogleBatch(inputs);
+
+    // initial(1)+ retry 2 筆(2)= 3
+    expect(fetchCalls.length).toBe(3);
+    // retry 仍 echo → 結果維持原 echo 值,不 throw、不阻擋整批
+    expect(translations).toEqual(['已是繁中一', '已是繁中二']);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+// v1.9.8: dominant-script 分群避免混批 garbage —— Google MT 對混批時 sl=auto
+// 偵測整批多數派 lang,夾在裡面的少數派 lang 段會被當「異種變體」字碼級轉換,
+// 譯文出現英文殘骸 + 漢字殘渣 garbage(echo retry 抓不到這類部分腐壞)。
+// 解法:texts 預先按 CJK / Latin 主導語言分群,各群獨立打 fetch。
+
+test('translateGoogleBatch: CJK + Latin 混批 → 分 2 次 fetch(各群獨立)', async () => {
+  const inputs = [
+    '這是一段繁體中文,字數足以判定 CJK 主導',  // CJK
+    'This is an English paragraph long enough to be Latin-dominant',  // Latin
+    '另一段繁體中文段落',  // CJK
+    'Another English line here',  // Latin
+  ];
+  const { translations } = await translateGoogleBatch(inputs);
+
+  expect(fetchCalls.length).toBe(2);
+  const decodedQs = fetchCalls.map(url => {
+    const m = String(url).match(/[?&]q=([^&]*)/);
+    return decodeURIComponent(m[1]);
+  });
+  // CJK fetch 不含 English 段;Latin fetch 不含 CJK 段
+  const cjkFetch = decodedQs.find(q => q.includes('繁體中文'));
+  const latinFetch = decodedQs.find(q => q.includes('English'));
+  expect(cjkFetch).toBeDefined();
+  expect(latinFetch).toBeDefined();
+  expect(cjkFetch).not.toContain('English');
+  expect(latinFetch).not.toContain('繁體中文');
+
+  // 譯文仍按原 idx 順序回 4 段
+  expect(translations.length).toBe(4);
+  expect(translations[0]).toBe('[ZH] ' + inputs[0]);
+  expect(translations[1]).toBe('[ZH] ' + inputs[1]);
+  expect(translations[2]).toBe('[ZH] ' + inputs[2]);
+  expect(translations[3]).toBe('[ZH] ' + inputs[3]);
+});
+
+test('translateGoogleBatch: 全 CJK 批次 → 仍 1 次 fetch(同 script 不分群)', async () => {
+  const inputs = ['中文段一', '另一段中文', '第三段'];
+  const { translations } = await translateGoogleBatch(inputs);
+  expect(fetchCalls.length).toBe(1);
+  expect(translations.length).toBe(3);
+});
+
+test('translateGoogleBatch: 全 Latin 批次 → 仍 1 次 fetch', async () => {
+  const inputs = ['Hello world here', 'Another sentence done', 'Third one ok'];
+  const { translations } = await translateGoogleBatch(inputs);
+  expect(fetchCalls.length).toBe(1);
+  expect(translations.length).toBe(3);
+});
+
+test('translateGoogleBatch: 段內混雜以主導字數判定群組(整段算同一邊)', async () => {
+  // 每段內部都有少量另一語言字元,但主導仍然清楚
+  const inputs = [
+    'Damn，Redis 創辦人用一個 C 文件,乾翻了大廠燒幾十億 GPU',  // CJK 主導
+    'The 1M context on 128GB MacBook Pro is the real story',     // Latin 主導
+  ];
+  const { translations } = await translateGoogleBatch(inputs);
+  expect(fetchCalls.length).toBe(2);
+  expect(translations.length).toBe(2);
+  expect(translations[0]).toBe('[ZH] ' + inputs[0]);
+  expect(translations[1]).toBe('[ZH] ' + inputs[1]);
+});
+
 // SANITY check（手動驗證紀錄，已在 Claude Code 端跑過）：
 //   把 google-translate.js line 33 的條件 `cur.length > 0 && curEncodedLen + eLen > MAX_URL_ENCODED_CHARS`
 //   改為 `false`（永不切批），第三條測試 fetchCalls.length 會降為 1，斷言 fail。
 //   還原後 pass。已驗證。
+//
+// v1.8.61 SANITY check：
+//   把 google-translate.js 的 `tl=${encodeURIComponent(tl)}` 改回 `tl=zh-TW` 寫死,
+//   "target=ja" / "target=zh-CN" / "fallback" 三條測試會 fail(實際 tl 都是 zh-TW)。
+//   還原後 4 條 target language 測試全 pass。已驗證。
+//
+// v1.9.8 SANITY check(dominant-script 分群):
+//   把 google-translate.js translateGoogleBatch 內 byScript 兩群初始化改成
+//   `const byScript = { cjk: [], latin: [] };` 之後緊接的 push 改成
+//   `byScript.cjk.push({ idx: i, text: t });`(全部塞同一群)→
+//   「CJK + Latin 混批」測試 fetchCalls 從 2 降到 1,「段內混雜」測試同樣降到 1,fail。
+//   還原為 dominantScript 分群後 3 條全 pass(全 CJK / 全 Latin 兩條一直都是 1 次 fetch)。
+//   已驗證。
+
+// v1.9.5 SANITY check(per-unit retry):
+//   把 google-translate.js translateGoogleBatch 內整段 `if (needsRetry.length > 0) { ... }`
+//   區塊註解掉(讓 echo 直接寫回 result 不 retry)→
+//   「批次內某 unit 被 echo 原文」測試 fetchCalls 從 2 降到 1、translations[1] 變成 'Echo me'(沒救回),
+//   「整批全 echo」測試 fetchCalls 從 4 降到 1、translations 全為原文,
+//   「retry 仍 echo」測試 fetchCalls 從 3 降到 1。
+//   還原後 3 條全 pass。已驗證。

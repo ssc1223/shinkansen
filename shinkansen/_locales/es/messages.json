@@ -1,0 +1,9 @@
+{
+  "extName": {
+    "message": "Shinkansen",
+    "description": "Nombre de la extensión"
+  },
+  "extDescription": {
+    "message": "Extensión de traducción rápida y fluida para páginas web y subtítulos de YouTube. 8 idiomas de destino y múltiples motores de IA. Tus datos no salen de tu navegador."
+  }
+}

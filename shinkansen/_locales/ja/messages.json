@@ -1,0 +1,9 @@
+{
+  "extName": {
+    "message": "Shinkansen",
+    "description": "拡張機能名"
+  },
+  "extDescription": {
+    "message": "ウェブページ・YouTube 字幕に対応した高速・スムーズな翻訳拡張機能。8 言語のターゲットと複数の AI エンジンに対応。データはブラウザから出ません。"
+  }
+}

@@ -21,11 +21,17 @@ const { JSDOM } = require('jsdom');
 const fs = require('fs');
 const path = require('path');
 
-// v1.1.9: content script 拆分為 7 個檔案，按 manifest.json 的 js 陣列順序依序載入。
+// v1.1.9: content script 拆分為多個檔案，按 manifest.json 的 js 陣列順序依序載入。
 // 所有檔案共用同一個 window（jsdom），透過 window.__SK 命名空間互動。
+// v1.9.25: 新增 lib/distribution-cs.js(MAS distribution flag)。
+// v1.9.26: 新增 lib/i18n.js(content.js translatePage 用 SK.t,從 i18n.js 來)。
+//   原本 v1.1.6 sampling test 早退到 SK.t 之前所以沒事;移除整頁 skip 後翻譯 pipeline
+//   會走到 SK.t,helper 必須提供 i18n.js 否則 SK.t is not a function。
 const SHINKANSEN_DIR = path.resolve(__dirname, '../../../shinkansen');
 const CONTENT_SCRIPT_FILES = [
   'content-ns.js',
+  'lib/distribution-cs.js',
+  'lib/i18n.js',
   'content-toast.js',
   'content-detect.js',
   'content-serialize.js',

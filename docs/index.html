@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Shinkansen｜極速、私密、高品質的網頁翻譯體驗</title>
-  <meta name="description" content="使用 Google Gemini 將外語網頁翻譯成台灣繁體中文，原地替換文字，保留頁面原始排版你的瀏覽資料不經過第三方伺服器">
+  <meta name="description" content="快速、私密的網頁、YouTube 字幕翻譯擴充功能，支援 8 種目標語言與多種 AI 引擎，原地替換文字保留排版，瀏覽資料不經過第三方伺服器。">
 
   <!-- Open Graph / Social Preview -->
   <meta property="og:type" content="website">
@@ -139,13 +139,17 @@
       margin: 0 auto 32px;
     }
     .btn-row {
-      display: flex;
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
       gap: 12px;
-      justify-content: center;
-      flex-wrap: wrap;
+      max-width: 600px;
+      margin: 0 auto;
     }
     .btn-download {
-      display: inline-block;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
       background: #2563eb;
       color: #fff;
       font-size: 1.05rem;
@@ -154,9 +158,9 @@
       border-radius: 10px;
       text-decoration: none;
       transition: background 0.2s;
-      min-width: 280px;
       text-align: center;
       box-sizing: border-box;
+      min-height: 74px;
     }
     .btn-download:hover { background: #1d4ed8; }
     .btn-download.secondary {
@@ -175,9 +179,9 @@
       margin-top: 3px;
     }
     @media (max-width: 600px) {
-      .btn-download {
-        width: 100%;
-        min-width: 0;
+      .btn-row {
+        grid-template-columns: 1fr;
+        max-width: none;
       }
     }
     .hero-sub {
@@ -377,18 +381,22 @@
       <div class="btn-row">
         <a href="https://chromewebstore.google.com/detail/shinkansen/pnhmlecoofeoofajcjenndnimhbodhlg" class="btn-download">
           <span data-i18n="btn.cws.text">從 Chrome Web Store 安裝</span>
-          <span class="btn-version">v<!-- cws-version-start -->1.4.22<!-- cws-version-end --> · <span data-i18n="btn.cws.status">已上架</span></span>
+          <span class="btn-version">v<!-- cws-version-start -->1.9.24<!-- cws-version-end --> · <span data-i18n="btn.cws.status">已上架</span></span>
         </a>
         <a href="https://addons.mozilla.org/firefox/addon/shinkansen/" class="btn-download">
           <span data-i18n="btn.amo.text">從 Firefox Add-ons 安裝</span>
-          <span class="btn-version">v<!-- amo-version-start -->1.8.55<!-- amo-version-end --> · <span data-i18n="btn.amo.status">已上架</span></span>
+          <span class="btn-version">v<!-- amo-version-start -->1.10.0<!-- amo-version-end --> · <span data-i18n="btn.amo.status">已上架</span></span>
         </a>
-        <a href="https://github.com/jimmysu0309/shinkansen/releases/download/v1.8.59/shinkansen-v1.8.59.zip" class="btn-download secondary">
+        <a href="https://github.com/jimmysu0309/shinkansen/releases/download/v1.10.0/shinkansen-macos-v1.10.0.pkg" class="btn-download">
+          <span data-i18n="btn.safari.text">Safari 手動安裝</span>
+          <span class="btn-version">v1.10.0 · macOS</span>
+        </a>
+        <a href="https://github.com/jimmysu0309/shinkansen/releases/download/v1.10.0/shinkansen-v1.10.0.zip" class="btn-download secondary">
           <span data-i18n="btn.github.text">GitHub 下載 beta 版手動安裝</span>
-          <span class="btn-version">v1.8.59 · beta</span>
+          <span class="btn-version">v1.10.0 · beta</span>
         </a>
       </div>
-      <p class="hero-sub" data-i18n="hero.sub">開放原始碼 · <a href="https://github.com/jimmysu0309/shinkansen#readme">使用說明</a> · <a href="https://github.com/jimmysu0309/shinkansen">GitHub</a></p>
+      <p class="hero-sub" data-i18n="hero.sub">開放原始碼 · <a href="https://github.com/jimmysu0309/shinkansen#readme">使用說明</a> · <a href="release-notes.html">更新紀錄</a> · <a href="https://github.com/jimmysu0309/shinkansen">GitHub</a></p>
     </div>
   </div>
 
@@ -397,13 +405,13 @@
     <div class="container">
       <h2 data-i18n="recent.heading">近期重大更新</h2>
       <ul class="recent-updates">
-        <li data-i18n="recent.0">新增<strong>三語翻譯目標</strong>（v1.8.59），可選翻譯成繁體中文（台灣）/ 簡體中文（中國）/ 英文，預設依瀏覽器語言推導</li>
+        <li data-i18n="recent.0">新增<strong>多語翻譯 + 多語介面</strong>：繁體中文 / 簡體中文 / 英文 / 日文 / 韓文 / 西班牙文 / 法文 / 德文</li>
         <li data-i18n="recent.1">新增<strong>極速秒翻</strong>，按下翻譯 1 秒看到頁面開始變中文（限 Gemini）</li>
         <li data-i18n="recent.2">新增<strong>雙語對照模式</strong>，原文 + 譯文並列顯示</li>
-        <li data-i18n="recent.3">新增<strong>自訂 AI 模型</strong>，可接 OpenRouter / Claude / DeepSeek / Ollama 本機等所有模型</li>
-        <li data-i18n="recent.4">新增<strong>AI 分句</strong>,YouTube 自動產生字幕經 AI 重新分句，中文字幕更自然好讀</li>
+        <li data-i18n="recent.3">新增<strong>自訂 AI 模型</strong>，可接 OpenRouter / Claude / Ollama 本機等所有模型</li>
+        <li data-i18n="recent.4">新增<strong>AI 分句</strong>，YouTube 自動產生字幕經 AI 重新分句，中文字幕更自然好讀</li>
         <li data-i18n="recent.5">新增<strong>禁用詞清單</strong>，明確要求 LLM 不要使用視頻 / 軟件 / 數據等不希望出現在譯文中的詞</li>
-        <li data-i18n="recent.6">新增<strong>只翻文章開頭</strong>選項，先翻前 N 段預覽，大幅節省 token</li>
+        <li data-i18n="recent.6">新增<strong>只翻文章開頭</strong>選項，先翻前幾段預覽，大幅節省 token</li>
       </ul>
     </div>
   </section>
@@ -492,7 +500,7 @@
         </div>
         <div class="feature">
           <h3 data-i18n="feature.engines.title">三翻譯引擎</h3>
-          <p data-i18n="feature.engines.body">Gemini + Google Translate + <strong>自訂模型</strong>（OpenAI 相容端點，可接 OpenRouter / Together / DeepSeek / Ollama 本機等百種模型）並存，依場景自由切換</p>
+          <p data-i18n="feature.engines.body">Gemini + Google Translate + <strong>自訂模型</strong>（OpenAI 相容端點，可接 OpenRouter / Together / Ollama 本機等百種模型）並存，依場景自由切換</p>
         </div>
         <div class="feature">
           <h3 data-i18n="feature.shortcuts.title">自訂快速鍵</h3>
@@ -525,7 +533,7 @@
           <div class="step-num">3</div>
           <div class="step-body">
             <h3 data-i18n="install.step3.title">設定 API Key</h3>
-            <p data-i18n="install.step3.body">點工具列的 Shinkansen 圖示 → 設定 → 貼上你的 <a href="https://github.com/jimmysu0309/shinkansen/blob/main/API-KEY-SETUP.md" style="color:#2563eb;">Gemini API Key</a>完成！按 <code>Alt+S</code> 用 Gemini 翻譯，或按 <code>Alt+D</code> 用免費的 Google Translate（不需 API Key）</p>
+            <p data-i18n="install.step3.body">點工具列的 Shinkansen 圖示 → 設定 → 貼上你的 <a href="https://github.com/jimmysu0309/shinkansen/blob/main/docs/API-KEY-SETUP.md" style="color:#2563eb;">Gemini API Key</a>完成！按 <code>Alt+S</code> 用 Gemini 翻譯，或按 <code>Alt+D</code> 用免費的 Google Translate（不需 API Key）</p>
           </div>
         </div>
       </div>
@@ -535,7 +543,7 @@
   <!-- Footer -->
   <footer>
     <div class="container">
-      <p data-i18n="footer.license">Shinkansen 採用 <a href="https://github.com/jimmysu0309/shinkansen/blob/main/LICENSE">Elastic License 2.0</a> 授權 · <a href="privacy-policy.html">隱私權政策</a> · <a href="https://github.com/jimmysu0309/shinkansen">原始碼</a></p>
+      <p data-i18n="footer.license">Shinkansen 採用 <a href="https://github.com/jimmysu0309/shinkansen/blob/main/LICENSE">Elastic License 2.0</a> 授權 · <a href="privacy-policy.html">隱私權政策</a> · <a href="release-notes.html">更新紀錄</a> · <a href="https://github.com/jimmysu0309/shinkansen">原始碼</a></p>
       <p style="margin-top:8px; font-style:italic;">No coding skills were harmed in the making of this shit.</p>
     </div>
   </footer>
@@ -545,7 +553,7 @@
       var I18N = {
         'zh-TW': {
           'meta.title': 'Shinkansen｜極速、私密、高品質的網頁翻譯體驗',
-          'meta.description': '使用 Google Gemini 將外語網頁翻譯成台灣繁體中文，原地替換文字，保留頁面原始排版你的瀏覽資料不經過第三方伺服器',
+          'meta.description': '快速、私密的網頁、YouTube 字幕翻譯擴充功能，支援 8 種目標語言與多種 AI 引擎，原地替換文字保留排版，瀏覽資料不經過第三方伺服器。',
           'og.title': 'Shinkansen — Chrome 網頁翻譯擴充功能',
           'og.description': '使用 Google Gemini 翻譯網頁，保留原始排版，瀏覽資料不經過第三方伺服器',
 
@@ -555,17 +563,18 @@
           'btn.cws.status': '已上架',
           'btn.amo.text': '從 Firefox Add-ons 安裝',
           'btn.amo.status': '已上架',
+          'btn.safari.text': 'Safari 手動安裝',
           'btn.github.text': 'GitHub 下載 beta 版手動安裝',
-          'hero.sub': '開放原始碼 · <a href="https://github.com/jimmysu0309/shinkansen#readme">使用說明</a> · <a href="https://github.com/jimmysu0309/shinkansen">GitHub</a>',
+          'hero.sub': '開放原始碼 · <a href="https://github.com/jimmysu0309/shinkansen#readme">使用說明</a> · <a href="release-notes.html">更新紀錄</a> · <a href="https://github.com/jimmysu0309/shinkansen">GitHub</a>',
 
           'recent.heading': '近期重大更新',
-          'recent.0': '新增<strong>三語翻譯目標</strong>（v1.8.59），可選翻譯成繁體中文（台灣）/ 簡體中文（中國）/ 英文，預設依瀏覽器語言推導',
+          'recent.0': '新增<strong>多語翻譯 + 多語介面</strong>：繁體中文 / 簡體中文 / 英文 / 日文 / 韓文 / 西班牙文 / 法文 / 德文',
           'recent.1': '新增<strong>極速秒翻</strong>，按下翻譯 1 秒看到頁面開始變中文（限 Gemini）',
           'recent.2': '新增<strong>雙語對照模式</strong>，原文 + 譯文並列顯示',
-          'recent.3': '新增<strong>自訂 AI 模型</strong>，可接 OpenRouter / Claude / DeepSeek / Ollama 本機等所有模型',
-          'recent.4': '新增<strong>AI 分句</strong>,YouTube 自動產生字幕經 AI 重新分句，中文字幕更自然好讀',
+          'recent.3': '新增<strong>自訂 AI 模型</strong>，可接 OpenRouter / Claude / Ollama 本機等所有模型',
+          'recent.4': '新增<strong>AI 分句</strong>，YouTube 自動產生字幕經 AI 重新分句，中文字幕更自然好讀',
           'recent.5': '新增<strong>禁用詞清單</strong>，明確要求 LLM 不要使用視頻 / 軟件 / 數據等不希望出現在譯文中的詞',
-          'recent.6': '新增<strong>只翻文章開頭</strong>選項，先翻前 N 段預覽，大幅節省 token',
+          'recent.6': '新增<strong>只翻文章開頭</strong>選項，先翻前幾段預覽，大幅節省 token',
 
           'privacy.heading': '為什麼做 Shinkansen?',
           'privacy.intro1': '既有的沈浸式網頁翻譯工具會把你瀏覽的每一頁內容傳到第三方伺服器——無論你讀了什麼文章、看了什麼信件，全部都可能被看光',
@@ -602,7 +611,7 @@
           'feature.cost.title': '費用透明',
           'feature.cost.body': '每次翻譯即時顯示花費多少錢，設定頁可回查過去每一筆翻譯紀錄的 token 用量與費用，支援圖表與 CSV 匯出',
           'feature.engines.title': '三翻譯引擎',
-          'feature.engines.body': 'Gemini + Google Translate + <strong>自訂模型</strong>（OpenAI 相容端點，可接 OpenRouter / Together / DeepSeek / Ollama 本機等百種模型）並存，依場景自由切換',
+          'feature.engines.body': 'Gemini + Google Translate + <strong>自訂模型</strong>（OpenAI 相容端點，可接 OpenRouter / Together / Ollama 本機等百種模型）並存，依場景自由切換',
           'feature.shortcuts.title': '自訂快速鍵',
           'feature.shortcuts.body': '三組可自訂快速鍵（<code>Alt+A</code> / <code>Alt+S</code> / <code>Alt+D</code>），一鍵切換翻譯引擎與模型',
 
@@ -612,13 +621,13 @@
           'install.step2.title': '載入擴充功能',
           'install.step2.body': '開啟 Chrome，前往 <code>chrome://extensions/</code>，打開右上角「開發人員模式」，點「載入未封裝項目」，選擇解壓縮後的 <code>shinkansen</code> 資料夾',
           'install.step3.title': '設定 API Key',
-          'install.step3.body': '點工具列的 Shinkansen 圖示 → 設定 → 貼上你的 <a href="https://github.com/jimmysu0309/shinkansen/blob/main/API-KEY-SETUP.md" style="color:#2563eb;">Gemini API Key</a>完成！按 <code>Alt+S</code> 用 Gemini 翻譯，或按 <code>Alt+D</code> 用免費的 Google Translate（不需 API Key）',
+          'install.step3.body': '點工具列的 Shinkansen 圖示 → 設定 → 貼上你的 <a href="https://github.com/jimmysu0309/shinkansen/blob/main/docs/API-KEY-SETUP.md" style="color:#2563eb;">Gemini API Key</a>完成！按 <code>Alt+S</code> 用 Gemini 翻譯，或按 <code>Alt+D</code> 用免費的 Google Translate（不需 API Key）',
 
-          'footer.license': 'Shinkansen 採用 <a href="https://github.com/jimmysu0309/shinkansen/blob/main/LICENSE">Elastic License 2.0</a> 授權 · <a href="privacy-policy.html">隱私權政策</a> · <a href="https://github.com/jimmysu0309/shinkansen">原始碼</a>'
+          'footer.license': 'Shinkansen 採用 <a href="https://github.com/jimmysu0309/shinkansen/blob/main/LICENSE">Elastic License 2.0</a> 授權 · <a href="privacy-policy.html">隱私權政策</a> · <a href="release-notes.html">更新紀錄</a> · <a href="https://github.com/jimmysu0309/shinkansen">原始碼</a>'
         },
         'en': {
           'meta.title': 'Shinkansen | Fast, private, high-quality web translation',
-          'meta.description': 'Translate foreign-language web pages into Traditional Chinese (Taiwan) with Google Gemini. In-place text replacement preserves the original layout. Your browsing never touches a third-party server.',
+          'meta.description': 'A fast, privacy-first translation extension for web pages and YouTube subtitles. 8 target languages, multiple AI engines. In-place text replacement preserves the original layout; your browsing never touches a third-party server.',
           'og.title': 'Shinkansen — Chrome web translation extension',
           'og.description': 'Translate web pages with Google Gemini. Original layout preserved. Browsing data never touches a third-party server.',
 
@@ -628,14 +637,15 @@
           'btn.cws.status': 'published',
           'btn.amo.text': 'Install from Firefox Add-ons',
           'btn.amo.status': 'published',
+          'btn.safari.text': 'Safari manual install',
           'btn.github.text': 'Manual install (beta from GitHub)',
-          'hero.sub': 'Open source · <a href="https://github.com/jimmysu0309/shinkansen#readme">Documentation</a> · <a href="https://github.com/jimmysu0309/shinkansen">GitHub</a>',
+          'hero.sub': 'Open source · <a href="https://github.com/jimmysu0309/shinkansen#readme">Documentation</a> · <a href="release-notes.en.html">Release notes</a> · <a href="https://github.com/jimmysu0309/shinkansen">GitHub</a>',
 
           'recent.heading': 'Recent major updates',
-          'recent.0': 'Added <strong>Three target languages</strong> (v1.8.59) — translate into Traditional Chinese (Taiwan), Simplified Chinese (China), or English. Default follows your browser locale.',
+          'recent.0': 'Added <strong>Multi-language translation + multi-language UI</strong>: Traditional Chinese / Simplified Chinese / English / Japanese / Korean / Spanish / French / German',
           'recent.1': 'Added <strong>Instant Translation</strong> — see the page start turning into your target language within 1 second of pressing translate (Gemini only).',
           'recent.2': 'Added <strong>Bilingual mode</strong> — original and translation shown side by side.',
-          'recent.3': 'Added <strong>Custom AI models</strong> — bring your own OpenRouter / Claude / DeepSeek / local Ollama, etc.',
+          'recent.3': 'Added <strong>Custom AI models</strong> — bring your own OpenRouter / Claude / local Ollama, etc.',
           'recent.4': 'Added <strong>AI re-segmentation</strong> — YouTube auto-generated captions are re-segmented by AI for more natural Chinese subtitles.',
           'recent.5': 'Added <strong>Blocked-word list</strong> — explicitly tell the LLM to avoid words you don\'t want appearing in the translation.',
           'recent.6': 'Added <strong>Translate opening only</strong> — preview the first N paragraphs to save tokens.',
@@ -675,7 +685,7 @@
           'feature.cost.title': 'Transparent pricing',
           'feature.cost.body': 'Cost is shown live during translation. The settings page tracks token usage and cost for every past run, with charts and CSV export.',
           'feature.engines.title': 'Three translation engines',
-          'feature.engines.body': 'Gemini + Google Translate + <strong>custom models</strong> (any OpenAI-compatible endpoint — OpenRouter / Together / DeepSeek / local Ollama, etc.) coexist. Switch freely depending on context.',
+          'feature.engines.body': 'Gemini + Google Translate + <strong>custom models</strong> (any OpenAI-compatible endpoint — OpenRouter / Together / local Ollama, etc.) coexist. Switch freely depending on context.',
           'feature.shortcuts.title': 'Custom shortcuts',
           'feature.shortcuts.body': 'Three customizable shortcuts (<code>Alt+A</code> / <code>Alt+S</code> / <code>Alt+D</code>) for switching engines and models on the fly.',
 
@@ -685,9 +695,9 @@
           'install.step2.title': 'Load the extension',
           'install.step2.body': 'Open Chrome, go to <code>chrome://extensions/</code>, enable Developer mode (top right), click "Load unpacked", and select the unzipped <code>shinkansen</code> folder.',
           'install.step3.title': 'Set up your API key',
-          'install.step3.body': 'Click the Shinkansen icon in the toolbar → Settings → paste your <a href="https://github.com/jimmysu0309/shinkansen/blob/main/API-KEY-SETUP.md" style="color:#2563eb;">Gemini API key</a>. Done! Press <code>Alt+S</code> to translate with Gemini, or <code>Alt+D</code> to use the free Google Translate (no API key needed).',
+          'install.step3.body': 'Click the Shinkansen icon in the toolbar → Settings → paste your <a href="https://github.com/jimmysu0309/shinkansen/blob/main/docs/API-KEY-SETUP.md" style="color:#2563eb;">Gemini API key</a>. Done! Press <code>Alt+S</code> to translate with Gemini, or <code>Alt+D</code> to use the free Google Translate (no API key needed).',
 
-          'footer.license': 'Shinkansen is licensed under <a href="https://github.com/jimmysu0309/shinkansen/blob/main/LICENSE">Elastic License 2.0</a> · <a href="privacy-policy.html">Privacy policy</a> · <a href="https://github.com/jimmysu0309/shinkansen">Source code</a>'
+          'footer.license': 'Shinkansen is licensed under <a href="https://github.com/jimmysu0309/shinkansen/blob/main/LICENSE">Elastic License 2.0</a> · <a href="privacy-policy.en.html">Privacy policy</a> · <a href="release-notes.en.html">Release notes</a> · <a href="https://github.com/jimmysu0309/shinkansen">Source code</a>'
         }
       };
 

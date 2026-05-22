@@ -8,10 +8,28 @@
   const PH_OPEN = SK.PH_OPEN;
   const PH_CLOSE = SK.PH_CLOSE;
 
+  // 父 element 的 effective white-space 是 pre/pre-wrap/pre-line/break-spaces 時,
+  // textContent 內的 \n 是視覺換行(不是會被瀏覽器 collapse 成 space 的純 source whitespace)。
+  // 序列化時這些 \n 必須跟 <br> 共用  sentinel 路徑,否則接著 /\s+/g normalize 會
+  // 把 \n 壓成 space,送 LLM/Google MT 的 text 失去原始換行,譯文回來不知如何還原。
+  // 真實場景:Twitter / Reddit / Threads / Mastodon / Discord web 等用 SPAN + textContent
+  // \n + white-space: pre-wrap 顯示換行(完全不用 <br>)。React 社群常見 pattern。
+  function shouldPreserveTextNewlines(el) {
+    if (!el || el.nodeType !== Node.ELEMENT_NODE) return false;
+    const cs = el.ownerDocument?.defaultView?.getComputedStyle?.(el);
+    if (!cs) return false;
+    const ws = cs.whiteSpace;
+    return ws === 'pre' || ws === 'pre-wrap' || ws === 'pre-line' || ws === 'break-spaces';
+  }
+  // 暴露給 spec 用
+  SK._shouldPreserveTextNewlines = shouldPreserveTextNewlines;
+
   // ─── 序列化 ───────────────────────────────────────────
 
   SK.serializeWithPlaceholders = function serializeWithPlaceholders(el) {
-    return serializeNodeIterable(el.childNodes);
+    return serializeNodeIterable(el.childNodes, {
+      preserveNewlines: shouldPreserveTextNewlines(el),
+    });
   };
 
   // ─── Google Translate 專用序列化 ──────────────────────
@@ -43,6 +61,8 @@
         if (child.nodeType !== Node.ELEMENT_NODE) continue;
         if (SK.HARD_EXCLUDE_TAGS.has(child.tagName)) continue;
         if (SK.isAtomicPreserve(child)) continue;
+        // v1.9.31: 含 element child 的 A 在 serialize 走 atomic,不算 paired。
+        if (child.tagName === 'A' && hasElementChild(child)) continue;
         if (SK.GT_INLINE_TAGS.has(child.tagName)) {
           count++;
           if (count > GT_MAX_PAIRED_SLOTS) return;
@@ -55,16 +75,30 @@
     return count;
   }
 
-  function serializeNodeIterableForGoogle(topLevelNodes) {
+  // v1.9.31: 判斷 element 是否含 element child(用於 Google MT 對 anchor atomic 判斷)。
+  function hasElementChild(el) {
+    if (!el || !el.childNodes) return false;
+    for (const c of el.childNodes) {
+      if (c.nodeType === Node.ELEMENT_NODE) return true;
+    }
+    return false;
+  }
+
+  function serializeNodeIterableForGoogle(topLevelNodes, opts) {
     const slots = [];
     let out = '';
+    const preserveNewlines = !!(opts && opts.preserveNewlines);
     // v1.8.13: paired marker 過閾值 → 降級為純文字模式(slots 仍可含
     // atomic,但不再產生 paired【N】/【/N】標記)。
     const degrade = countPairedInlineForGT(topLevelNodes) > GT_MAX_PAIRED_SLOTS;
     function walk(nodeList) {
       for (const child of nodeList) {
         if (child.nodeType === Node.TEXT_NODE) {
-          out += child.nodeValue;
+          // pre/pre-wrap/pre-line:textNode 內 \n 是視覺換行,轉  跟 BR 共用 sentinel,
+          // 避開後續 /\s+/g collapse 把 \n 壓成 space。
+          out += preserveNewlines
+            ? child.nodeValue.replace(/\n/g, '')
+            : child.nodeValue;
         } else if (child.nodeType === Node.ELEMENT_NODE) {
           // Inline <code> 在 HARD_EXCLUDE_TAGS 是給 walker 擋整個 code 區塊用的,
           // 但段落內 inline <code> 走到 serialize 已是另一條路徑,必須當 atomic
@@ -78,10 +112,64 @@
             out += '【*' + idx + '】';
             continue;
           }
+          // 與 LLM serializer 同 pattern:inline <button> 走 paired marker 保留 wrapper。
+          // BUTTON 在 HARD_EXCLUDE_TAGS 是給 walker 擋以 button 為主的 widget 用,
+          // 段落內 inline 用法必須先於 HARD_EXCLUDE 開洞(同 inline CODE 例外位置)。
+          // degrade 模式下走純文字路徑(跟下方 GT_INLINE_TAGS 在 degrade 下的行為一致)。
+          // reuseNode 機制同 LLM path 註解:保留 React fiber → click 能展開。
+          if (child.tagName === 'BUTTON' && SK.hasSubstantiveContent(child)) {
+            if (!degrade) {
+              const idx = slots.length;
+              slots.push({ reuseNode: true, node: child });
+              out += '【' + idx + '】';
+              walk(child.childNodes);
+              out += '【/' + idx + '】';
+            } else {
+              walk(child.childNodes);
+            }
+            continue;
+          }
           if (SK.HARD_EXCLUDE_TAGS.has(child.tagName)) continue;
           if (child.tagName === 'BR') { out += '\u0001'; continue; }
           // Atomic 元素（footnote sup 等）→ 單一標記，不翻內容
           if (SK.isAtomicPreserve(child)) {
+            const idx = slots.length;
+            slots.push({ atomic: true, node: child.cloneNode(true) });
+            out += '【*' + idx + '】';
+            continue;
+          }
+          // v1.9.31: 含 element child 的 anchor 走 atomic deep clone path。
+          // Why:Google MT 對含 nested SPAN 結構的 anchor(典型 X 推文 URL anchor:
+          // <a><span>https://</span>text<span>main</span><span>…</span></a>、X @mention
+          // anchor、framework site 的 link card)若走 paired marker shallow clone,
+          // deserialize 時 anchor 內部結構全丟(只剩 Google MT 翻譯後純 text),
+          // source/target 結構不對等 → Layer A3 collectA3Mutations 對齊失敗 →
+          // framework-managed 段落 fallback dual sibling wrapper(違反 §15 single
+          // 原地替換)。改 atomic 後 anchor 整段 deep clone 不送 Google API,
+          // deserialize 直接塞回 source 原樣 → A3 對齊成功 → nodeValue mutate single。
+          //
+          // Trade-off:含 element child 的 markdown link `<a>some <b>bold</b> text</a>`
+          // anchor inner text 也不翻。但這在 prose 文章較少見,且即使不翻 link text 也
+          // 不會 break 文章主體翻譯。純 text 內 anchor `<a>科學家</a>` 維持 paired
+          // marker 可翻(維基百科 / 一般 inline link 不受影響)。
+          //
+          // 不動 LLM serializeNodeIterable:Gemini path 對 anchor 內 SPAN 翻譯品質較好,
+          // 且 LLM Layer A3 fallback 路徑跟 Google MT 不同(LLM 有更寬鬆的 free text
+          // 吸收邏輯),不需此改動。
+          if (!degrade && child.tagName === 'A' && hasElementChild(child)) {
+            const idx = slots.length;
+            slots.push({ atomic: true, node: child.cloneNode(true) });
+            out += '【*' + idx + '】';
+            continue;
+          }
+          // v1.9.31: IMG 走 atomic deep clone(Twitter / X 用 IMG render emoji)。
+          // 原本 IMG 走 walk(childNodes) 透明展開,IMG 沒 children 等於從 source text
+          // 流消失,Google MT API 收不到 emoji 位置,deserialize 後 tgt 也沒 IMG → src
+          // 端 IMG 位置(sibling text 之間)失去對應 tgt token 跟結構,segment 對齊
+          // 把 tgt 全集塞給第一個 ss,emoji 視覺跑到段尾。改 atomic 後 IMG 在 source
+          // text 出現為【*N】marker,Google MT 看到不翻直接保留,deserialize 後 tgt
+          // 還原 IMG 位置 → src/tgt 兩端 IMG 邊界對齊。
+          if (!degrade && child.tagName === 'IMG') {
             const idx = slots.length;
             slots.push({ atomic: true, node: child.cloneNode(true) });
             out += '【*' + idx + '】';
@@ -116,7 +204,9 @@
   }
 
   SK.serializeForGoogleTranslate = function serializeForGoogleTranslate(el) {
-    return serializeNodeIterableForGoogle(el.childNodes);
+    return serializeNodeIterableForGoogle(el.childNodes, {
+      preserveNewlines: shouldPreserveTextNewlines(el),
+    });
   };
 
   SK.serializeFragmentForGoogleTranslate = function serializeFragmentForGoogleTranslate(unit) {
@@ -127,7 +217,11 @@
       if (cur === unit.endNode) break;
       cur = cur.nextSibling;
     }
-    return serializeNodeIterableForGoogle(nodes);
+    // fragment 容器是 startNode 的 parent
+    const parent = unit.startNode && unit.startNode.parentElement;
+    return serializeNodeIterableForGoogle(nodes, {
+      preserveNewlines: shouldPreserveTextNewlines(parent),
+    });
   };
 
   // 將 Google MT 回傳的【N】/【/N】/【*N】換回⟦N⟧/⟦/N⟧/⟦*N⟧，
@@ -147,16 +241,24 @@
       if (cur === unit.endNode) break;
       cur = cur.nextSibling;
     }
-    return serializeNodeIterable(nodes);
+    const parent = unit.startNode && unit.startNode.parentElement;
+    return serializeNodeIterable(nodes, {
+      preserveNewlines: shouldPreserveTextNewlines(parent),
+    });
   };
 
-  function serializeNodeIterable(topLevelNodes) {
+  function serializeNodeIterable(topLevelNodes, opts) {
     const slots = [];
     let out = '';
+    const preserveNewlines = !!(opts && opts.preserveNewlines);
     function walk(nodeList) {
       for (const child of nodeList) {
         if (child.nodeType === Node.TEXT_NODE) {
-          out += child.nodeValue;
+          // pre/pre-wrap/pre-line:textNode 內 \n 是視覺換行,轉  跟 BR 共用 sentinel,
+          // 避開後續 /\s+/g collapse 把 \n 壓成 space。
+          out += preserveNewlines
+            ? child.nodeValue.replace(/\n/g, "")
+            : child.nodeValue;
         } else if (child.nodeType === Node.ELEMENT_NODE) {
           // Inline <code> 在 HARD_EXCLUDE_TAGS 是給 walker 擋整個 code 區塊用的,
           // 但段落內 inline <code> 走到 serialize 已是另一條路徑,必須當 atomic
@@ -168,6 +270,26 @@
             const idx = slots.length;
             slots.push({ atomic: true, node: child.cloneNode(true) });
             out += PH_OPEN + '*' + idx + PH_CLOSE;
+            continue;
+          }
+          // Inline <button>(段落內含 text 的 SPA「read more」/「show more」展開觸發
+          // 按鈕,Medium 留言、X / 論壇截斷 preview 等)走 paired placeholder 保留
+          // wrapper class 與 children 結構,內文走子節點遞迴翻譯。HARD_EXCLUDE_TAGS
+          // 含 BUTTON 是給 walker 擋以 button 為主的 widget 用,段落內 inline 用法
+          // 必須先於 HARD_EXCLUDE 開洞(同 inline CODE 例外模式)。
+          //
+          // reuseNode 標記:存原 button DOM node reference(不 cloneNode),deserialize
+          // 時 reuse 原 node + 清 children 重填譯文,讓 React 18 root-level event
+          // delegation 透過 button.__reactFiber$ 仍能找到 onClick handler — 點擊才能
+          // 觸發框架展開動作。cloneNode(false) 會創新 node,失去 fiber/props 私有 key,
+          // React 找不到 handler → click dead(實際使用者回報:Medium 留言「more」
+          // 按鈕視覺保留但點下沒展開)。
+          if (child.tagName === 'BUTTON' && SK.hasSubstantiveContent(child)) {
+            const idx = slots.length;
+            slots.push({ reuseNode: true, node: child });
+            out += PH_OPEN + idx + PH_CLOSE;
+            walk(child.childNodes);
+            out += PH_OPEN + '/' + idx + PH_CLOSE;
             continue;
           }
           if (SK.HARD_EXCLUDE_TAGS.has(child.tagName)) continue;
@@ -332,6 +454,46 @@
     return { frag, ok, matched: matchedRef.count };
   };
 
+  // CJK 結尾 + Latin 開頭的邊界自動補空格(台灣排版慣例 + 下游 reader 擷取也需要)。
+  // LLM 重組句子時常把 inline placeholder 周邊的空白吃掉,典型現象:
+  //   原文「...rights ⟦1⟧https://...⟦/1⟧」(有 trailing space)
+  //   LLM 譯成「...轉播權⟦1⟧https://...⟦/1⟧」(無 trailing space)
+  //   deserialize 後 visual = 「轉播權https://...」(無 space)
+  // 修法:append slot element 進 frag 之前,查 frag tail 結尾若 CJK + 此 slot 整段
+  // textContent 開頭是 Latin,給 tail 補一個 space。
+  function _cjkLatinTailEndsCjk(textValue) {
+    return /[㐀-鿿豈-﫿ｦ-ﾟ]$/.test(textValue || '');
+  }
+  function _cjkLatinHeadStartsLatin(textValue) {
+    const t = (textValue || '').replace(/^\s+/, '');
+    return /^[A-Za-z0-9@#\-+/%&]/.test(t);
+  }
+  function _findTrailingTextNode(node) {
+    let cur = node;
+    while (cur && cur.nodeType === Node.ELEMENT_NODE) {
+      if (cur.tagName === 'BR') return null;
+      cur = cur.lastChild;
+    }
+    return cur && cur.nodeType === Node.TEXT_NODE ? cur : null;
+  }
+  function _maybePadCjkLatinSpace(frag, nextElement) {
+    const last = frag.lastChild;
+    if (!last) return;
+    let tailText = '';
+    if (last.nodeType === Node.TEXT_NODE) tailText = last.nodeValue || '';
+    else if (last.nodeType === Node.ELEMENT_NODE) tailText = last.textContent || '';
+    if (!tailText || /\s$/.test(tailText)) return;
+    if (!_cjkLatinTailEndsCjk(tailText)) return;
+    const headText = nextElement.textContent || '';
+    if (!_cjkLatinHeadStartsLatin(headText)) return;
+    if (last.nodeType === Node.TEXT_NODE) {
+      last.nodeValue = tailText + ' ';
+    } else {
+      const trailing = _findTrailingTextNode(last);
+      if (trailing) trailing.nodeValue = (trailing.nodeValue || '') + ' ';
+    }
+  }
+
   function parseSegment(text, slots, matchedRef) {
     const frag = document.createDocumentFragment();
     if (!text) return frag;
@@ -367,21 +529,45 @@
         const idx = Number(m[3]);
         const slot = slots[idx];
         if (slot && slot.atomic && slot.node) {
-          frag.appendChild(slot.node.cloneNode(true));
+          const cloned = slot.node.cloneNode(true);
+          _maybePadCjkLatinSpace(frag, cloned);
+          frag.appendChild(cloned);
           matchedRef.count++;
         }
       } else {
         const idx = Number(m[1]);
         const inner = m[2];
         const slot = slots[idx];
-        if (slot && slot.nodeType === Node.ELEMENT_NODE) {
+        if (slot && slot.reuseNode && slot.node) {
+          // reuseNode 機制(目前用於 inline BUTTON):直接 reuse 原 DOM node,
+          // 不 cloneNode → 原 node 上的 React private key(__reactFiber$ / __reactProps$)
+          // 與 native listener 保留,React 18 root-level event delegation 仍能透過
+          // fiber lookup 找到 onClick → 點擊才能觸發框架展開動作。
+          //
+          // 副作用考量:slot.node 此時仍是原 DOM tree 的成員,frag.appendChild 會把它
+          // detach;後續 inject 階段 el.replaceChildren(frag) 會把它放回原 el(同 parent),
+          // 等同 detach + re-attach。React fiber 對「同 node detach/re-attach」是寬容的,
+          // event delegation 仍 work。LLM 重複輸出同 idx 的情況由 selectBestSlotOccurrences
+          // 提前 dedup,parseSegment 看到時每個 idx 至多一次,不會出現「同 node 同時放
+          // 兩處」的 DOM 例外。
+          const reuse = slot.node;
+          while (reuse.firstChild) reuse.removeChild(reuse.firstChild);
+          const innerFrag = parseSegment(inner, slots, matchedRef);
+          reuse.appendChild(innerFrag);
+          _maybePadCjkLatinSpace(frag, reuse);
+          frag.appendChild(reuse);
+          matchedRef.count++;
+        } else if (slot && slot.nodeType === Node.ELEMENT_NODE) {
           const shell = slot.cloneNode(false);
           const innerFrag = parseSegment(inner, slots, matchedRef);
           shell.appendChild(innerFrag);
+          _maybePadCjkLatinSpace(frag, shell);
           frag.appendChild(shell);
           matchedRef.count++;
         } else if (slot && slot.atomic && slot.node) {
-          frag.appendChild(slot.node.cloneNode(true));
+          const cloned = slot.node.cloneNode(true);
+          _maybePadCjkLatinSpace(frag, cloned);
+          frag.appendChild(cloned);
           matchedRef.count++;
         } else {
           const innerFrag = parseSegment(inner, slots, matchedRef);

@@ -50,7 +50,12 @@ if (window.__shinkansen_loaded) {
   // ─── 共用狀態 ──────────────────────────────────────────
   SK.STATE = {
     translated: false,
-    translatedBy: null,      // v1.4.0: 'gemini' | 'google' | null
+    translatedBy: null,      // v1.4.0: 'gemini' | 'google' | 'openai-compat' | null
+    // 記錄本次成功翻譯使用的完整 provider 上下文,供 SPA observer rescan / 延遲 rescan /
+    // SPA nav 換頁延續翻譯時 replay 同一引擎與參數。
+    // null = 尚未成功翻譯;restorePage 清空。resetForSpaNavigation 故意不清(SPA 換頁要記得引擎)。
+    // shape: { provider: 'gemini'|'google'|'openai-compat', engine?, modelOverride?, glossary? }
+    translationContext: null,
     translating: false,      // v0.80: 翻譯進行中（防止重複觸發 + 支援中途取消）
     abortController: null,   // v0.80: AbortController，翻譯中按 Alt+S 或離開頁面時 abort
     cache: new Map(),       // 段落文字 → 譯文
@@ -68,6 +73,19 @@ if (window.__shinkansen_loaded) {
     // 沒這條 fallback 的話，新 element 不在 translatedHTML 也不在 originalHTML,
     // Content Guard 完全認不出它，使用者捲動觸發 re-render 後譯文就永久消失。
     originalText: new Map(), // el → snapshot 的 textContent.trim()
+    // by-text secondary cache:原始 textContent → savedHTML(已 inject 的 innerHTML)。
+    // 用於對抗 SPA virtualization(Twitter / Reddit / Threads / Mastodon)。virtualization
+    // 把被翻譯的 element 完全 unmount,使用者再滑回來時 React 建立全新 element 沒有 attribute
+    // 也不在 translatedHTML 內 → SPA observer 視為新內容 → 走 collectParagraphs + translateUnits
+    // → 即使 cache hit 也會重新 inject + 短暫 flicker;若 serialize 後 placeholder index 微差導致
+    // cache miss,還會真打 API 重翻一次,且譯文可能跟原本不同(token / batch context 影響)。
+    // 修法:inject 完成同步把 originalText → savedHTML 寫進此 Map;SPA observer rescan 時
+    // 用此 Map 預檢 newUnits,命中就 reuse 既有譯文 inject 進新 element,0 API + 譯文一致。
+    translatedHTMLByText: new Map(),
+    // v1.9.27 Layer A1: nodeValue mutate backup。framework-managed element 走
+    // nodeValue mutate path 後,記錄每個 mutated text node 的 original value,
+    // restorePage 還原時逐個寫回。Map<el, [{node, originalValue}]>。
+    nodeValueMutateBackup: new Map(),
     // v1.0.23: 續翻模式
     stickyTranslate: false,
     // v1.4.12: 記錄本次翻譯使用的 preset slot（1/2/3），供 SPA 導航續翻 + 跨 tab sticky 用。
@@ -85,16 +103,93 @@ if (window.__shinkansen_loaded) {
     //   預設 'zh-TW' 維持 v1.8.58 之前行為——content-detect.js isCandidateText 的
     //   isAlreadyInTarget 檢查在 STATE 尚未 hydrate 前 fallback 到 zh-TW(跳繁中段)。
     targetLanguage: 'zh-TW',
+    // 注入前 element 的 lang attribute 原值(null = 原本沒設)。譯文注入時把 el lang
+    // 設為 targetLanguage 讓瀏覽器選對 CJK 字形變體(避免 zh-TW 頁面下日文譯文用到
+    // 中文字形變體 → 視覺不協調),restorePage / abort 路徑用這份還原回原 lang。
+    originalLang: new Map(), // el → string | null
+    // 注入前 element 的 inline style.fontFamily 原值(空字串 = 原本沒設 inline)。
+    // 譯文注入時若 target 是 CJK locale,會把 LOCALE_FONT_PREPEND 對應字體 stack
+    // prepend 到 inline fontFamily,確保站點 hardcode 單一 locale 字體
+    // (例 upmedia.mg 的 "Noto Serif TC")的情境下,日 / 韓 / 簡中譯文仍能用到對應
+    // locale 字形變體。restore 時還原此原值。
+    originalFontFamily: new Map(), // el → string
   };
 
   // v1.4.12: content script 在 storage.sync.translatePresets 尚未寫入時的 fallback
   // （例如從 v1.4.11 升級但使用者還未開過設定頁 / onInstalled 沒觸發）。
   // 內容必須與 lib/storage.js DEFAULT_SETTINGS.translatePresets 保持一致。
   SK.DEFAULT_PRESETS = [
-    { slot: 1, engine: 'gemini', model: 'gemini-3.1-flash-lite-preview', label: 'Flash Lite' },
+    { slot: 1, engine: 'gemini', model: 'gemini-3.1-flash-lite', label: 'Flash Lite' },
     { slot: 2, engine: 'gemini', model: 'gemini-3-flash-preview', label: 'Flash' },
     { slot: 3, engine: 'google', model: null, label: 'Google MT' },
   ];
+
+  // ─── v1.9.17: 首次 inject hydration wait gate(2026-05-20 已停用,值改 0)──────────
+  //
+  // 【歷史脈絡】v1.9.17 修 SPA framework(Medium React 18 + streaming hydration /
+  // Substack / Notion 等)page reload 後 hydration 期間,Shinkansen auto-translate
+  // 早於 hydration 完成就 inject DOM → 移走 React reconciliation 認為仍掛在 parent
+  // 的 child → React 內部 removeChild 找不到 child → throw NotFoundError → React
+  // Router error boundary fallback render「500 系統出狀況」error page。
+  //
+  // 【2026-05-20 對照實驗結果】Finding 4 instrument-first 5-run 分析發現此 1500ms
+  // gate 是 OP first-paint 3.9s 中**固定 64% 的延遲源頭**。對照實驗(SPEC-PRIVATE
+  // §25.20.12):暫時 disable gate(本常數設 0)+ reload + 跑 3 種 Medium 場景
+  // (cache hit / 404 page / 真實 cold API),全部沒重現 React 500 race,h1 完整
+  // 翻成中文,errors:[]。判斷 Medium 自 v1.9.17 至今(~2026-05-13 → 2026-05-20)
+  // React 版本升級已內部解掉這條 race,gate 已成 dead code。
+  //
+  // 【決策】常數改 0(等同跳過 gate),保留 `SK.ensureFirstInjectIdle` machinery
+  // 跟 streaming inject 路徑的 gate 呼叫(content.js:559-578),萬一未來新 SPA
+  // 站再出現相同 race,只需把這條常數改回 1500 就能一鍵 rollback,不需重新
+  // implement gate 機制。
+  //
+  // 【為什麼不直接刪整套 gate 程式碼】保留 ensureFirstInjectIdle 機制等於保留
+  // 「未來如果某個 site 又出 hydration race,可以 host-scoped 加回 gate」的退路。
+  // 完全刪掉等於下次踩到同樣 race 要從 git history 撈回來重 implement。
+  //
+  // 【效能改進】Finding 4 5-run 實測:
+  // - X 手動 TRANSLATE:OP first-paint 3.9s → 預估 2.4s(-38%)
+  // - Medium auto-translate cache hit:1.5s → ~50ms(-97%)
+  // - Medium auto-translate cold API:8.5s → 預估 7s(-18%)
+  SK.FIRST_INJECT_HYDRATION_WAIT_MS = 0;
+  SK._idleGateReached = false;
+  SK._idleGatePromise = null;
+
+  // v1.9.17 F2: user interaction blackout window — click / 按鍵後 2 秒內 framework
+  // re-render 旺盛期,Shinkansen 任何 sync restore 都可能撞 React commit phase
+  // removeChild race。此 timestamp 由本檔 init 區 mousedown/pointerdown/keydown
+  // capture listener 維護;content-spa.js onSpaObserverMutations 內 sync DOM modify
+  // 對 blackout window 內 mutation 完全跳過(讓 framework 自己處理,Shinkansen 等
+  // armSpaObserverRescan debounce 1s 後 + idle gate 走完整 inject path)。
+  SK.USER_INTERACTION_BLACKOUT_MS = 2000;
+  SK._lastInteractionT = 0;
+  if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+    const markInteraction = () => { SK._lastInteractionT = Date.now(); };
+    // capture phase + passive: 確保最早 fire,不阻塞網頁 listener。
+    ['mousedown', 'pointerdown', 'keydown'].forEach((evt) => {
+      window.addEventListener(evt, markInteraction, { capture: true, passive: true });
+    });
+  }
+  SK.ensureFirstInjectIdle = function ensureFirstInjectIdle() {
+    if (SK._idleGateReached) return Promise.resolve();
+    if (SK._idleGatePromise) return SK._idleGatePromise;
+    // Playwright / WebDriver 自動化環境跳過 gate,避免 1500ms wait 拖累既有 spec 的 mock
+    // timing 期待。Production 環境 navigator.webdriver 為 false / undefined,正常走 gate。
+    if (typeof navigator !== 'undefined' && navigator.webdriver === true) {
+      SK._idleGateReached = true;
+      return Promise.resolve();
+    }
+    SK._idleGatePromise = new Promise((resolve) => {
+      const markDone = () => {
+        SK._idleGateReached = true;
+        SK._idleGatePromise = null;
+        resolve();
+      };
+      setTimeout(markDone, SK.FIRST_INJECT_HYDRATION_WAIT_MS);
+    });
+    return SK._idleGatePromise;
+  };
 
   // ─── v0.88: 統一 Log 系統 ─────────────────────────────
   SK.sendLog = function sendLog(level, category, message, data) {
@@ -286,9 +381,67 @@ if (window.__shinkansen_loaded) {
 
   // SPA 動態載入常數
   SK.SPA_OBSERVER_DEBOUNCE_MS = 1000;
+  // maxWait:即使 mutation 連續來 debounce 持續被 reset,從第一次 arm 起算最多
+  // 等 2 秒就強制 fire 一次 rescan。對抗 Twitter / Threads / Reddit / Mastodon 等
+  // virtualized scroll 站「使用者連續滑動 → debounce 永遠 reset → 譯文遲遲不出現」
+  // 體感問題。設 2000ms 是體感與 batching 效率的折衷:debounce 1s + maxWait 2s
+  // 表示「使用者停手 1s 內 fire,連續滑也每 2s fire」,batch 仍有合併機會不會退化成
+  // 每 mutation 一個 API call。
+  SK.SPA_OBSERVER_MAX_WAIT_MS = 2000;
+
+  // v1.9.27 Layer 13:per-host fast profile 機制(預設關)
+  // 兩次嘗試都沒救 Finding 3 X 串尾 stall(SPEC-PRIVATE §25.20.5 + §25.20.9):
+  //   1. debounce 250/maxWait 500 → 連續 mutation 各 fire 迷你 batch,toast 18s 體感差
+  //   2. debounce 1000/maxWait 500 → over-fire 沒發生但 stall 沒解(2/2 runs sy=10465 仍 100%)
+  // Root cause 不在 timing,在 detect 路徑(SPA observer 第一輪 mount 後沒抓到該 tweet,
+  // 後續 rescan 補但 > 3s window)。正解需 IntersectionObserver rootMargin pre-scan(下輪做)。
+  // 架構保留(常數 + getObserverTiming),FAST_HOSTS 暫空。
+  SK.SPA_OBSERVER_FAST_DEBOUNCE_MS = SK.SPA_OBSERVER_DEBOUNCE_MS;
+  SK.SPA_OBSERVER_FAST_MAX_WAIT_MS = 500;
+  SK.SPA_OBSERVER_FAST_HOSTS = [];  // 暫空,兩次嘗試都無效,留架構供未來 IntersectionObserver 路線用
+  // 子域名(如 www.x.com / m.reddit.com)由 endsWith('.' + host) 攔截
+  SK.getObserverTiming = function getObserverTiming(hostnameOverride) {
+    const host = (hostnameOverride ?? location.hostname ?? '').toLowerCase();
+    if (!host) return { debounce: SK.SPA_OBSERVER_DEBOUNCE_MS, maxWait: SK.SPA_OBSERVER_MAX_WAIT_MS, host: '', profile: 'default' };
+    const isFast = SK.SPA_OBSERVER_FAST_HOSTS.some(h => host === h || host.endsWith('.' + h));
+    return isFast
+      ? { debounce: SK.SPA_OBSERVER_FAST_DEBOUNCE_MS, maxWait: SK.SPA_OBSERVER_FAST_MAX_WAIT_MS, host, profile: 'fast' }
+      : { debounce: SK.SPA_OBSERVER_DEBOUNCE_MS, maxWait: SK.SPA_OBSERVER_MAX_WAIT_MS, host, profile: 'default' };
+  };
   SK.SPA_OBSERVER_MAX_RESCANS = Infinity;
   SK.SPA_OBSERVER_MAX_UNITS = 50;
   SK.SPA_NAV_SETTLE_MS = 800;
+
+  // v1.9.28 Layer 14:IntersectionObserver pre-scan(SPEC-PRIVATE §25.20.9 Finding 3 正解)
+  // POC 數據(2026-05-19 aimikoda 串實測):IO `rootMargin:1000px` fire 比 user dwell on
+  // 該 tweet 早約 3.3s,API 1.5-2s 內 inject → user dwell window 開始已是中文。MO mount
+  // 觸發 io.observe,IO `isIntersecting:true` callback 走 100ms 微 batch → 直接呼叫
+  // `triggerSpaObserverRescan`,跳過 SPA observer debounce 1s + maxWait 2s 整條時序鏈。
+  // 走同條 spaObserverRescan 主體 → tiny silent / by-text reuse / seen-texts TTL /
+  // 800ms loading delay 全 inherit。
+  //
+  // 為什麼不會回到 §25.20.5 over-fire bug:IO 只觀察 selector 命中元素,且每個元素
+  // unobserve 後不重 fire;Phase 5 fast debounce 失敗是因為 mutation 對整片 DOM noise
+  // 開 fire。POC 實測 19+ tweet 收進 ~10 個 IO callback batch(瀏覽器原生合成)。
+  SK.PRESCAN_BATCH_WINDOW_MS = 100;
+  SK.PRESCAN_ROOT_MARGIN = '1000px';
+  // 子域名(如 www.x.com / m.twitter.com)由 endsWith('.' + host) 攔截
+  SK.PRESCAN_HOSTS = ['x.com', 'twitter.com'];
+  // 每個 host 對應的 selector — 沒對到 selector 即使 host 命中也不啟動。
+  // `:not([data-shinkansen-translated])` 排除已翻段,避免重複 enqueue。
+  SK.PRESCAN_SELECTORS = {
+    'x.com':       '[data-testid="tweetText"]:not([data-shinkansen-translated])',
+    'twitter.com': '[data-testid="tweetText"]:not([data-shinkansen-translated])',
+  };
+  SK.getPrescanConfig = function getPrescanConfig(hostnameOverride) {
+    const host = (hostnameOverride ?? location.hostname ?? '').toLowerCase();
+    if (!host) return null;
+    const matched = SK.PRESCAN_HOSTS.find(h => host === h || host.endsWith('.' + h));
+    if (!matched) return null;
+    const selector = SK.PRESCAN_SELECTORS[matched];
+    if (!selector) return null;
+    return { host, matched, selector, rootMargin: SK.PRESCAN_ROOT_MARGIN, batchWindowMs: SK.PRESCAN_BATCH_WINDOW_MS };
+  };
 
   // 術語表常數
   // v1.7.3: blockingThreshold 從 5 提高到 10——中等長度頁面（6-10 批）走 fire-and-forget
@@ -303,6 +456,71 @@ if (window.__shinkansen_loaded) {
 
   // CJK 字元匹配 pattern（serialize 用）
   SK.CJK_CHAR = '[\\u3400-\\u9fff\\uf900-\\ufaff\\u3000-\\u303f\\uff00-\\uffef]';
+
+  // ─── locale-aware 字體 fallback ──────────────────────
+  // 站點若 hardcode 單一 locale 字體(例 upmedia.mg 的 "Noto Serif TC" 開頭 stack)
+  // 涵蓋 CJK 漢字 codepoint 卻只有該 locale 字形變體,單純設 lang attribute 無法
+  // 換到目標 locale 字形(因為瀏覽器停在第一順位字體不再 fallback)。對 CJK target
+  // 譯文 prepend 對應 locale 字體 stack,讓瀏覽器優先選對 locale 字體。
+  // 站點原 stack 仍保留在 prepend 之後當 fallback,系統沒裝這些字體時不影響顯示。
+  // 歐語 target(en/es/fr/de)沒 Han variant 問題,不在表中 → applyTargetLocaleStyling
+  // 跳過 prepend。
+  // 每 locale 兩組 stack:sans-serif / serif。applyTargetLocaleStyling 偵測站點原
+  // font-family 屬於哪種風格,挑對應 stack prepend,避免「站點 serif 但譯文變 sans」
+  // 之類視覺不一致(例 upmedia.mg 用 Noto Serif TC,日文譯文應用 Hiragino Mincho 系)。
+  // Stack 順序:macOS 字體 → Windows 字體 → Linux/通用 Noto CJK fallback。
+  // 瀏覽器依序選第一個系統有的字體,因此 macOS 用戶走 Hiragino / PingFang 等 Apple 字體,
+  // Windows 用戶走 Yu Gothic / Microsoft JhengHei / MingLiU 等內建字體,Linux 用戶
+  // 走 Noto CJK 系列(若已安裝)。三個平台都應有正確 locale 字形變體。
+  SK.LOCALE_FONT_PREPEND = {
+    ja: {
+      'sans-serif': '"Hiragino Sans", "Hiragino Kaku Gothic ProN", "Yu Gothic UI", "Yu Gothic", "Meiryo", "MS Gothic", "Noto Sans CJK JP", "Noto Sans JP"',
+      'serif': '"Hiragino Mincho ProN", "Yu Mincho", "YuMincho", "MS Mincho", "Noto Serif CJK JP", "Noto Serif JP"',
+    },
+    ko: {
+      'sans-serif': '"Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans CJK KR", "Noto Sans KR"',
+      'serif': '"AppleMyungjo", "Batang", "BatangChe", "Gungsuh", "Noto Serif CJK KR", "Noto Serif KR"',
+    },
+    'zh-TW': {
+      'sans-serif': '"PingFang TC", "Heiti TC", "Microsoft JhengHei", "Noto Sans CJK TC", "Noto Sans TC"',
+      'serif': '"Songti TC", "LiSong Pro", "MingLiU", "PMingLiU", "Noto Serif CJK TC", "Noto Serif TC"',
+    },
+    'zh-CN': {
+      'sans-serif': '"PingFang SC", "Heiti SC", "Microsoft YaHei", "DengXian", "Noto Sans CJK SC", "Noto Sans SC"',
+      'serif': '"Songti SC", "STSong", "SimSun", "NSimSun", "Noto Serif CJK SC", "Noto Serif SC"',
+    },
+  };
+
+  // 偵測 font-family stack 屬於 serif 還是 sans-serif 風格,以決定 prepend 哪組 locale 字體。
+  // 策略:取第一個顯式字體名(去引號 trim),命中 serif 標記詞 → serif,否則一律 sans-serif。
+  // serif 標記詞涵蓋常見 serif 字體 family 名(Times / Georgia / Mincho / Songti / Sung /
+  // Ming / 宋 / 明朝)+ 通用 generic family `serif`。先排除 `sans-serif` 整字 token
+  // 避免子字串誤命中。
+  SK.detectFontStyle = function detectFontStyle(fontFamily) {
+    if (!fontFamily || typeof fontFamily !== 'string') return 'sans-serif';
+    const firstFont = (fontFamily.split(',')[0] || '').replace(/^["']|["']$/g, '').trim();
+    if (!firstFont) return 'sans-serif';
+    if (/sans-serif/i.test(firstFont)) return 'sans-serif';
+    if (/serif|mincho|songti|sungti|\bsung\b|\bming\b|times|georgia|palatino|garamond|cambria|宋|明朝/i.test(firstFont)) {
+      return 'serif';
+    }
+    return 'sans-serif';
+  };
+
+  // 把 BCP 47 lang code 正規化成 LOCALE_FONT_PREPEND 的 key(zh-TW / zh-CN / ja / ko)。
+  // 涵蓋常見 BCP 47 變體:zh-Hant-TW / zh-Hans-CN / ja-JP / ko-KR / zh-HK 等。
+  // 'zh' 不帶 region 視為 ambiguous → 回 null(讓 caller 不 prepend 而非猜地區)。
+  // 不認識的 lang code(en / fr / 空字串)也回 null。
+  SK.normalizeLangCode = function normalizeLangCode(lang) {
+    if (!lang || typeof lang !== 'string') return null;
+    const lower = lang.toLowerCase();
+    if (lower === 'ja' || lower.startsWith('ja-')) return 'ja';
+    if (lower === 'ko' || lower.startsWith('ko-')) return 'ko';
+    // zh 變體:Hant / TW / HK / MO → zh-TW;Hans / CN / SG → zh-CN
+    if (lower.includes('hant') || lower === 'zh-tw' || lower === 'zh-hk' || lower === 'zh-mo') return 'zh-TW';
+    if (lower.includes('hans') || lower === 'zh-cn' || lower === 'zh-sg') return 'zh-CN';
+    return null;
+  };
 
   // ─── v1.5.0 雙語對照模式常數 ─────────────────────────
   SK.TRANSLATION_WRAPPER_TAG = 'shinkansen-translation';
@@ -449,6 +667,10 @@ if (window.__shinkansen_loaded) {
       // serializer 後面會跳過整顆，grey background 一併消失)。必須先於 HARD_EXCLUDE。
       if (n.tagName === 'CODE'
           && !(n.parentElement && n.parentElement.tagName === 'PRE')) return true;
+      // Inline <button>(段落內含 text 的 SPA read-more 觸發按鈕)同 inline CODE 模式:
+      // BUTTON 在 HARD_EXCLUDE_TAGS 擋 form / dialog widget,inline 用法必須開洞保留。
+      // 必須先於 HARD_EXCLUDE 檢查。
+      if (n.tagName === 'BUTTON' && SK.hasSubstantiveContent(n)) return true;
       if (SK.HARD_EXCLUDE_TAGS.has(n.tagName)) continue;
       if (SK.isAtomicPreserve(n)) return true;
       if (SK.isPreservableInline(n)) return true;
@@ -502,6 +724,48 @@ if (window.__shinkansen_loaded) {
     return main;
   };
 
+  // v1.9.27: 偵測 element 是否被 framework(React / Vue)直接管理。
+  // 用途:inject 時若 element 被 framework 接管,改子樹會破 framework 的 DOM
+  // node ref(典型 React fiber),導致使用者後續點按鈕(X 推文「顯示更多」/
+  // Reddit/Threads/Medium 留言「展開」)後 framework click handler 失效
+  // 或 silent bail out(facebook/react#11538 同類)。
+  //
+  // 對應 facebook/react#11538 系列 issue:framework 認知的 DOM ref 在外部
+  // mutation 後變孤兒,framework reconcile 失敗。修法是「不動 element 子樹」=
+  // 退回 dual mode(sibling 加 wrapper),由 SK.injectTranslation 入口分派。
+  //
+  // 偵測必須走 main world bridge:Chrome content script isolated world 看不到
+  // main world expando 屬性(`__reactFiber$xxx` / `__vue_app__` 等),
+  // `for(k in el)` 對 isolated world 直接 reactKeysFound=0(Chrome for Claude
+  // 2026-05-19 在真實 X 推文上 probe 驗證)。修法:content-fw-detect-main.js
+  // 跑在 world: MAIN,監聽 CustomEvent bridge,sync dispatch detect 結果(primitive
+  // string,跨 world clone safe)。
+  //
+  // 結構性通則(§8):描述「element 被前端 framework instance 直接接管」這個
+  // runtime 特徵,不綁站點 / class / hostname。X / Threads / Reddit / Medium
+  // 留言 / Mastodon CW 等所有 React-based SPA 上的同類問題都套用。
+  const _fwQueryCache = new WeakMap();
+  SK.isFrameworkManaged = function isFrameworkManaged(el) {
+    if (!el || el.nodeType !== Node.ELEMENT_NODE) return false;
+    if (_fwQueryCache.has(el)) return _fwQueryCache.get(el);
+    let result = false;
+    const handler = (e) => {
+      const r = e?.detail?.result;
+      if (r === 'react' || r === 'vue') result = true;
+    };
+    el.addEventListener('shinkansen-fw-detect-response', handler, { once: true });
+    try {
+      el.dispatchEvent(new CustomEvent('shinkansen-fw-detect-request', { bubbles: true }));
+    } catch (_) {
+      // dispatch 失敗(極罕見)→ 視為非 framework-managed
+    } finally {
+      // once: true 已自動 remove,這層只是保險(處理 dispatch 拋例外的情境)
+      el.removeEventListener('shinkansen-fw-detect-response', handler);
+    }
+    _fwQueryCache.set(el, result);
+    return result;
+  };
+
   // v1.6.5: 「今日」鍵字串 'YYYY-MM-DD'——**本地時區**而非 UTC。鏡像 lib/update-check.js
   // 的 localTodayKey()。content script 不能 import ES module，且必須與 lib 端用同樣
   // 算法（不然 toast / popup / background 之間 today 不一致導致節流失效或重複提示）。
@@ -551,6 +815,12 @@ if (window.__shinkansen_loaded) {
 
   SK.maybeBuildUpdateNotice = async function maybeBuildUpdateNotice() {
     try {
+      // MAS build:不顯示 update notice toast(同 popup banner 守衛理由 — Apple
+      // Review Guideline 2.3.10 + 同 Bundle ID 覆蓋風險,見 lib/distribution.js)。
+      // defense in depth — checkForUpdate 已 gate,storage 正常不會有資料,但
+      // 從 Developer ID 切 MAS 的使用者可能殘留 storage。SK.IS_MAS_BUILD 由
+      // lib/distribution-cs.js 設(content-ns.js 之後注入)。
+      if (SK.IS_MAS_BUILD) return null;
       const { disableUpdateNotice } = await browser.storage.sync.get('disableUpdateNotice');
       if (disableUpdateNotice === true) return null;
       const { updateAvailable } = await browser.storage.local.get('updateAvailable');

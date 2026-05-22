@@ -6,7 +6,14 @@ import { getCachedRate, FALLBACK_USD_TWD_RATE } from '../lib/exchange-rate.js';
 import { RELEASE_HIGHLIGHTS } from '../lib/release-highlights.js';
 import { shouldShowWelcomeNotice } from '../lib/welcome-notice.js';
 import { isWorthNotifying } from '../lib/update-check.js';
-import { pickPopupSlot, presetsRequireGemini } from '../lib/storage.js';
+import { IS_MAS_BUILD } from '../lib/distribution.js';
+import { pickPopupSlot, presetsRequireGemini, TARGET_LANGUAGES, DEFAULT_SETTINGS } from '../lib/storage.js';
+
+// P2 (v1.8.60):i18n. lib/i18n.js 在 popup.html 內以普通 <script> 早於本 module 載入,
+// 因此 window.__SK.i18n API 必然存在
+const I18N = (typeof window !== 'undefined' && window.__SK && window.__SK.i18n) || null;
+const t = (key, params) => (I18N ? I18N.t(key, params, _currentTarget) : key);
+let _currentTarget = 'zh-TW'; // init 時讀 storage 覆蓋
 
 // v1.6.5: 把 markdown 風的 **粗體** 標記轉成 <strong>，其他字符做 escapeHtml
 function highlightToHtml(s) {
@@ -22,21 +29,24 @@ const statusEl = $('status');
 
 async function refreshUsageInfo() {
   try {
-    // v1.8.41：讀 displayCurrency + cached rate 決定金額顯示幣值
-    // 兩個 storage read 並行，失敗時走 fallback(USD or rate=31.6)，不阻塞 UI
+    // 讀 displayCurrency + cached rate 決定金額顯示幣值。
+    // grand total 走 IndexedDB getStats（與用量明細分頁同源，避免 drift）。
     const [resp, currencyState] = await Promise.all([
-      browser.runtime.sendMessage({ type: 'USAGE_STATS' }),
+      browser.runtime.sendMessage({ type: 'QUERY_USAGE_STATS' }),
       readCurrencyState(),
     ]);
-    if (resp?.ok) {
-      const totalTok = (resp.totalInputTokens || 0) + (resp.totalOutputTokens || 0);
-      $('usage-info').textContent =
-        `累計：${formatMoney(resp.totalCostUSD || 0, currencyState)} / ${formatTokens(totalTok)} tokens`;
+    const stats = resp?.ok ? resp.stats : null;
+    if (stats) {
+      const totalTok = (stats.totalInputTokens || 0) + (stats.totalOutputTokens || 0);
+      $('usage-info').textContent = t('popup.usage.value', {
+        cost: formatMoney(stats.totalBilledCostUSD || 0, currencyState),
+        tokens: formatTokens(totalTok),
+      });
     } else {
-      $('usage-info').textContent = '累計：讀取失敗';
+      $('usage-info').textContent = t('popup.usage.failed');
     }
   } catch {
-    $('usage-info').textContent = '累計：無法讀取';
+    $('usage-info').textContent = t('popup.usage.unreadable');
   }
 }
 
@@ -57,13 +67,15 @@ async function refreshCacheInfo() {
   try {
     const resp = await browser.runtime.sendMessage({ type: 'CACHE_STATS' });
     if (resp?.ok) {
-      $('cache-info').textContent =
-        `快取：${resp.count} 段 / ${formatBytes(resp.bytes)}`;
+      $('cache-info').textContent = t('popup.cache.value', {
+        count: resp.count,
+        bytes: formatBytes(resp.bytes),
+      });
     } else {
-      $('cache-info').textContent = '快取：讀取失敗';
+      $('cache-info').textContent = t('popup.cache.failed');
     }
   } catch {
-    $('cache-info').textContent = '快取：無法讀取';
+    $('cache-info').textContent = t('popup.cache.unreadable');
   }
 }
 
@@ -76,20 +88,20 @@ async function refreshTranslateButton() {
     if (!tab?.id) return;
     const resp = await browser.tabs.sendMessage(tab.id, { type: 'GET_STATE' });
     if (resp?.translated) {
-      btn.textContent = '顯示原文';
+      btn.textContent = t('popup.action.restore');
       btn.dataset.mode = 'restore';
       // v1.0.3: 已翻譯時顯示編輯按鈕
       editBtn.hidden = false;
-      editBtn.textContent = resp?.editing ? '結束編輯' : '編輯譯文';
+      editBtn.textContent = resp?.editing ? t('popup.action.editDone') : t('popup.action.editStart');
     } else {
-      btn.textContent = '翻譯本頁';
+      btn.textContent = t('popup.action.translate');
       btn.dataset.mode = 'translate';
       editBtn.hidden = true;
     }
   } catch {
-    // 頁面尚未注入 content script （例如 chrome:// 頁、剛 reload extension）
+    // 頁面尚未注入 content script (例如 chrome:// 頁、剛 reload extension)
     // 維持預設「翻譯本頁」即可
-    btn.textContent = '翻譯本頁';
+    btn.textContent = t('popup.action.translate');
     btn.dataset.mode = 'translate';
     editBtn.hidden = true;
   }
@@ -106,10 +118,10 @@ async function refreshShortcutHint() {
     const cmd = cmds.find((c) => c.name === 'translate-preset-0');
     const shortcut = cmd?.shortcut?.trim();
     if (shortcut) {
-      el.textContent = `${shortcut} 快速切換`;
+      el.textContent = t('popup.shortcut.value', { shortcut });
     } else {
       // 使用者可能在 chrome://extensions/shortcuts 清掉了快捷鍵
-      el.textContent = '未設定快捷鍵';
+      el.textContent = t('popup.shortcut.unset');
     }
   } catch {
     // browser.commands 不可用時靜默留白，不要顯示錯誤
@@ -133,17 +145,31 @@ document.addEventListener('click', async (e) => {
 // v1.6.3: 用 document-level event delegation 處理 update banner 點擊，
 // 不依賴 init() async timing 也不靠 a-tag navigate 行為——任何時候 button 出現在
 // DOM 都能 click 觸發。click handler 內臨時讀 storage 拿 release URL，最穩固。
+//
+// Safari macOS 分支(路徑 A 半鍵更新):直接 navigate 到 .pkg 下載 URL,
+// 觸發瀏覽器下載(Developer ID 簽 + 公證的 pkg),省掉「開 release page → 找
+// asset 連結」兩步,使用者下載完雙擊 pkg 即可重裝。其他 platform 維持開
+// release page,讓使用者選要下載哪個 asset。
+// 偵測:safari-web-extension:// = Safari(macOS)。註:未來 iOS Safari 上架後
+// 同一 scheme 也會 match,但 iOS 不裝 .pkg,屆時需加 `os==='mac'` 守衛。
 document.addEventListener('click', async (e) => {
   if (!e.target.closest('#update-banner')) return;
   e.preventDefault();
   try {
     const { updateAvailable } = await browser.storage.local.get('updateAvailable');
-    // 三層 fallback：storage.releaseUrl > 用 version 組 tag URL > releases 索引頁
-    // 即使 storage 內缺 releaseUrl 或損壞也能跳到合理頁面
-    const url = updateAvailable?.releaseUrl
-      || (updateAvailable?.version
-        ? `https://github.com/jimmysu0309/shinkansen/releases/tag/v${updateAvailable.version}`
-        : 'https://github.com/jimmysu0309/shinkansen/releases');
+    const version = updateAvailable?.version;
+    const isSafari = browser.runtime.getURL('').startsWith('safari-web-extension://');
+    let url;
+    if (isSafari && version) {
+      url = `https://github.com/jimmysu0309/shinkansen/releases/download/v${version}/shinkansen-macos-v${version}.pkg`;
+    } else {
+      // 三層 fallback:storage.releaseUrl > 用 version 組 tag URL > releases 索引頁
+      // 即使 storage 內缺 releaseUrl 或損壞也能跳到合理頁面
+      url = updateAvailable?.releaseUrl
+        || (version
+          ? `https://github.com/jimmysu0309/shinkansen/releases/tag/v${version}`
+          : 'https://github.com/jimmysu0309/shinkansen/releases');
+    }
     await browser.tabs.create({ url });
     window.close();
   } catch (err) {
@@ -156,7 +182,9 @@ async function init() {
   const manifest = browser.runtime.getManifest();
   $('version').textContent = 'v' + manifest.version;
 
-  refreshShortcutHint();
+  // v1.8.60: 不在這裡呼叫 refreshShortcutHint() — 此時 _currentTarget 仍是初始 zh-TW,
+  // 會把 t('popup.shortcut.value') 的 zh-TW 字串塞進 #shortcut-hint 黏到後面 applyI18n
+  // 之後 stale。改在 storage 讀完 + applyI18n 之後一起呼叫(見下方)。
 
   // v1.6.5: welcome banner（CWS 剛升級）優先於 update banner（GitHub 有新版）顯示。
   // 兩者互斥——CWS 自動升級後使用者不需要看「有新版可下載」（已在最新），看「歡迎升級」即可；
@@ -172,7 +200,7 @@ async function init() {
       welcomeShown = true;
       $('update-dot').hidden = false;
       $('welcome-banner').hidden = false;
-      $('welcome-banner-title').textContent = `🎉 已升級至 v${welcomeNotice.version}`;
+      $('welcome-banner-title').textContent = t('popup.banner.welcome', { version: welcomeNotice.version });
       // AMO source review: RELEASE_HIGHLIGHTS 是 dev hardcoded 字串陣列（見 lib/release-highlights.js）,
       // highlightToHtml 是同檔案內的安全 markdown-to-html 轉換（只處理 **bold** → <strong>），無 user input。
       $('welcome-bullets').innerHTML = RELEASE_HIGHLIGHTS
@@ -182,7 +210,10 @@ async function init() {
   } catch { /* 略 */ }
 
   // v1.6.1: 更新提示 — 有新版時顯示版本紅點 + banner（welcome 顯示時跳過）
-  if (!welcomeShown) {
+  // MAS build:整段跳過 — defense in depth,即使 storage 殘留舊 updateAvailable
+  // 也不錯顯 banner(checkForUpdate 已在 update-check.js 內 MAS gate,正常不會
+  // 寫入 storage,但若使用者從 Developer ID 切換到 MAS 安裝,storage 可能殘留)。
+  if (!welcomeShown && !IS_MAS_BUILD) {
     try {
       const { disableUpdateNotice } = await browser.storage.sync.get('disableUpdateNotice');
       if (disableUpdateNotice !== true) {
@@ -196,25 +227,50 @@ async function init() {
           $('update-dot').hidden = false;
           const banner = $('update-banner');
           banner.hidden = false;
-          $('update-banner-version').textContent = `v${updateAvailable.version}（你目前是 v${manifest.version}）`;
+          $('update-banner-version').textContent = t('popup.banner.updateNoticeVersion', {
+            newVersion: updateAvailable.version,
+            currentVersion: manifest.version,
+          });
         }
       }
     } catch { /* 讀取失敗就略過 */ }
   }
 
   // v0.62 起：autoTranslate 仍走 sync（跨裝置同步），apiKey 改走 local（不同步）
-  // P1 (v1.8.59): 加讀 targetLanguage,非 zh-TW target 顯示 i18n 過渡 banner
-  const { autoTranslate = false, displayMode = 'single', translatePresets = [], targetLanguage } = await browser.storage.sync.get(['autoTranslate', 'displayMode', 'translatePresets', 'targetLanguage']);
+  // P2 (v1.8.60): UI 語系獨立於 targetLanguage,讀 uiLanguage('auto' / 三語)後
+  // 透過 I18N.getUiLanguage('auto') 解析為 navigator.language 推導值
+  const { autoTranslate = false, displayMode = 'single', translatePresets = [], uiLanguage, targetLanguage } = await browser.storage.sync.get(['autoTranslate', 'displayMode', 'translatePresets', 'uiLanguage', 'targetLanguage']);
   const { apiKey = '' } = await browser.storage.local.get(['apiKey']);
   $('auto').checked = autoTranslate;
 
-  // P1: i18n 過渡 banner — 非 zh-TW target 才顯示(P2 完成 UI i18n 後拿掉)
-  {
-    const banner = $('i18n-transition-banner');
-    if (banner && targetLanguage && targetLanguage !== 'zh-TW') {
-      banner.hidden = false;
-    }
+  // 翻譯目標語言 picker(saved 不在合法集合 → 走 DEFAULT_SETTINGS.targetLanguage,
+  // 跟 options 載入相同 fallback)。targetLanguage 是總 switch,影響所有翻譯路徑,
+  // 切了立刻寫 storage(下方 change handler),不需要按「儲存」按鈕。
+  if ($('targetLanguage')) {
+    const tl = (typeof targetLanguage === 'string' && TARGET_LANGUAGES.includes(targetLanguage))
+      ? targetLanguage : DEFAULT_SETTINGS.targetLanguage;
+    $('targetLanguage').value = tl;
   }
+
+  // P2: UI i18n — 寫入 _currentTarget(現在叫「ui dict 語系」更貼切,但變數名沿用),
+  // 套 applyI18n,訂閱 storage.uiLanguage 變動
+  _currentTarget = I18N ? I18N.getUiLanguage(uiLanguage || 'auto') : 'zh-TW';
+  if (I18N) {
+    I18N.applyI18n(document, _currentTarget);
+    I18N.subscribeUiLanguageChange((newUi /* , newPref */) => {
+      _currentTarget = newUi || 'zh-TW';
+      I18N.applyI18n(document, _currentTarget);
+      // 動態欄位重新整理(cache / usage / button label / shortcut)
+      refreshCacheInfo();
+      refreshUsageInfo();
+      refreshTranslateButton();
+      refreshShortcutHint();
+    });
+  }
+  // v1.8.60: _currentTarget ready 後才呼叫 refreshShortcutHint(原本在 init 開頭呼叫,
+  // 那時 _currentTarget=zh-TW 會把繁中「快速切換」黏到 #shortcut-hint, applyI18n 也救不回
+  // 因為這個元素沒掛 data-i18n、由 JS 動態設 textContent)。
+  refreshShortcutHint();
 
   // v1.5.0: 顯示模式 toggle 初始狀態
   setDisplayModeButtons(displayMode === 'dual' ? 'dual' : 'single');
@@ -256,7 +312,7 @@ async function init() {
   // v1.8.12: 只有當 translatePresets 中有任一 slot 用 Gemini engine 時，才提醒未設 API Key。
   // 使用者若三組 preset 都改成 Google MT / 自訂模型，popup 不再嘮叨他沒填 Gemini Key。
   if (!apiKey && presetsRequireGemini(translatePresets)) {
-    statusEl.textContent = '狀態：⚠ 尚未設定 API Key';
+    statusEl.textContent = t('popup.status.noApiKey');
     statusEl.style.color = '#ff3b30';
   }
 
@@ -274,7 +330,7 @@ $('translate-btn').addEventListener('click', async () => {
   const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
   if (!tab?.id) { btn.disabled = false; return; }
   const mode = btn.dataset.mode;
-  statusEl.textContent = mode === 'restore' ? '狀態：正在還原原文…' : '狀態：正在翻譯…';
+  statusEl.textContent = mode === 'restore' ? t('popup.status.restoring') : t('popup.status.translating');
   try {
     // v1.6.6: 讀 settings.popupButtonSlot 決定按鈕對應的 preset slot（預設 2 = Flash）
     // content.js handleTranslatePreset 自帶 toggle 行為（已翻譯 → 還原 / 翻譯中 → abort / 閒置 → 翻譯）
@@ -283,7 +339,7 @@ $('translate-btn').addEventListener('click', async () => {
     await browser.tabs.sendMessage(tab.id, { type: 'TRANSLATE_PRESET', payload: { slot } });
     window.close();
   } catch (err) {
-    statusEl.textContent = '狀態：無法在此頁面執行，請重新整理後再試';
+    statusEl.textContent = t('popup.status.cannotRun');
     statusEl.style.color = '#ff3b30';
     btn.disabled = false;
   }
@@ -291,6 +347,19 @@ $('translate-btn').addEventListener('click', async () => {
 
 $('auto').addEventListener('change', async (e) => {
   await browser.storage.sync.set({ autoTranslate: e.target.checked });
+});
+
+// 翻譯目標語言切換 — 立刻寫 storage(content script 下一次翻譯讀新值生效;
+// 舊翻譯快取仍保留,使用者可手動清快取重新翻譯)。non-集合值 fallback DEFAULT
+// 避免損壞值寫進 storage。
+$('targetLanguage').addEventListener('change', async (e) => {
+  const v = e.target.value;
+  const tl = TARGET_LANGUAGES.includes(v) ? v : DEFAULT_SETTINGS.targetLanguage;
+  try {
+    await browser.storage.sync.set({ targetLanguage: tl });
+  } catch (err) {
+    console.error('[shinkansen] targetLanguage set failed', err);
+  }
 });
 
 // v1.5.0: 顯示模式切換 toggle
@@ -344,7 +413,7 @@ $('yt-subtitle-toggle').addEventListener('change', async (e) => {
       }).catch(() => {});
     }
   } catch (err) {
-    statusEl.textContent = '狀態：無法切換字幕翻譯，請重新整理頁面';
+    statusEl.textContent = t('popup.status.subtitleToggleFailed');
     statusEl.style.color = '#ff3b30';
   }
 });
@@ -360,7 +429,7 @@ $('drive-subtitle-toggle').addEventListener('change', async (e) => {
       ytSubtitle: { ...ytSubtitle, autoTranslate: enabled },
     });
   } catch (err) {
-    statusEl.textContent = '狀態：無法切換字幕翻譯，請重新整理頁面';
+    statusEl.textContent = t('popup.status.subtitleToggleFailed');
     statusEl.style.color = '#ff3b30';
   }
 });
@@ -375,7 +444,7 @@ $('bilingual-toggle').addEventListener('change', async (e) => {
       ytSubtitle: { ...ytSubtitle, bilingualMode: bilingual },
     });
   } catch (err) {
-    statusEl.textContent = '狀態：無法切換雙語對照';
+    statusEl.textContent = t('popup.status.bilingualToggleFailed');
     statusEl.style.color = '#ff3b30';
   }
 });
@@ -416,14 +485,14 @@ $('edit-btn').addEventListener('click', async () => {
   try {
     const resp = await browser.tabs.sendMessage(tab.id, { type: 'TOGGLE_EDIT_MODE' });
     if (resp?.ok) {
-      $('edit-btn').textContent = resp.editing ? '結束編輯' : '編輯譯文';
+      $('edit-btn').textContent = resp.editing ? t('popup.action.editDone') : t('popup.action.editStart');
       statusEl.textContent = resp.editing
-        ? `狀態：編輯模式（${resp.elements} 個區塊可編輯）`
-        : '狀態：已結束編輯';
+        ? t('popup.status.editMode', { count: resp.elements })
+        : t('popup.status.editEnded');
       statusEl.style.color = resp.editing ? '#0071e3' : '#86868b';
     }
   } catch {
-    statusEl.textContent = '狀態：無法切換編輯模式';
+    statusEl.textContent = t('popup.status.editFailed');
     statusEl.style.color = '#ff3b30';
   }
 });
@@ -445,11 +514,11 @@ $('clear-cache-yes').addEventListener('click', async () => {
   $('clear-cache-btn').hidden = false;
   const resp = await browser.runtime.sendMessage({ type: 'CLEAR_CACHE' });
   if (resp?.ok) {
-    statusEl.textContent = `狀態：已清除 ${resp.removed} 筆快取`;
+    statusEl.textContent = t('popup.status.cacheCleared', { count: resp.removed });
     statusEl.style.color = '#34c759';
     refreshCacheInfo();
   } else {
-    statusEl.textContent = '狀態：清除失敗 — ' + (resp?.error || '未知錯誤');
+    statusEl.textContent = t('popup.status.cacheClearFailed', { error: resp?.error || t('common.errorUnknown') });
     statusEl.style.color = '#ff3b30';
   }
 });

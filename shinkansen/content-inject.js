@@ -20,6 +20,85 @@
     if (!STATE.originalText.has(el)) {
       STATE.originalText.set(el, (el.textContent || '').trim());
     }
+    if (!STATE.originalLang.has(el)) {
+      STATE.originalLang.set(el, el.hasAttribute('lang') ? el.getAttribute('lang') : null);
+    }
+    if (!STATE.originalFontFamily.has(el)) {
+      STATE.originalFontFamily.set(el, el.style.fontFamily || '');
+    }
+  };
+
+  // 注入時對 el 套 locale-aware 樣式:
+  //   1. lang attribute 設為 STATE.targetLanguage(讓瀏覽器選對 CJK 字形變體)
+  //   2. CJK target(ja / ko / zh-TW / zh-CN)時 prepend locale 字體到 inline fontFamily
+  //      站點 hardcode 單一 locale 字體 stack(例 upmedia.mg "Noto Serif TC" 開頭)
+  //      時,單純設 lang 救不了(瀏覽器停在第一順位字體不再 fallback);prepend 對應
+  //      locale 字體讓瀏覽器優先選對 locale 字形。
+  // Why prepend 而非取代:保留站點原 stack 當 fallback,系統沒裝 locale 字體時不影響
+  //   顯示;有裝時前面字體會涵蓋 CJK codepoint → 用對 locale 字形變體。
+  function applyTargetLocaleStyling(el) {
+    const target = STATE.targetLanguage;
+    if (!target || typeof target !== 'string') return;
+    el.setAttribute('lang', target);
+
+    const localeMap = SK.LOCALE_FONT_PREPEND && SK.LOCALE_FONT_PREPEND[target];
+    if (!localeMap) return;
+
+    // 只在 source locale ≠ target locale 時 prepend。同 locale 時站點 CSS 已選對
+    // 字形變體,prepend 反而會強制覆寫站點 typography(例 zh-TW 站特意用 Noto Serif TC
+    // 變成譯文段被換成 sans-serif PingFang TC)。source 未知(<html> 沒設 lang 或
+    // 不認識的 code)也跳過 prepend——保守做法,避免在不確定的場景動站點 typography。
+    const doc = el.ownerDocument;
+    const pageLang = SK.normalizeLangCode?.(doc?.documentElement?.lang);
+    if (!pageLang || pageLang === target) return;
+
+    // base = 「我們動之前的 stack」:
+    //   - 有 inline(dual mode buildDualInner 剛 copy 原段落 cs.fontFamily 進來,或
+    //     站點對 el 寫死 inline style):直接用 inline 當 base
+    //   - 無 inline:讀 computed(站點 CSS cascade 過來的 stack)
+    const current = el.style.fontFamily || '';
+    let base = current;
+    if (!base) {
+      const win = el.ownerDocument?.defaultView;
+      const cs = win?.getComputedStyle?.(el);
+      base = cs?.fontFamily || '';
+    }
+
+    // 偵測站點 stack 是 serif 還是 sans-serif,選對應 prepend stack。
+    // 偵測必須用「我們動之前的 stack」(用 STATE.originalFontFamily 或 computed 反推),
+    // 不能用 current(SPA 第二次 apply 時 current 已含我們的 prepend → 會用第一字體
+    // 偵測誤判成 prepend 的風格 → idempotent 偵測歪)。優先 STATE.originalFontFamily
+    // (snapshotOnce 記錄的原 inline);沒記錄時用 base。
+    const originalForDetect = STATE.originalFontFamily.has(el)
+      ? (STATE.originalFontFamily.get(el) || base)
+      : base;
+    const style = SK.detectFontStyle?.(originalForDetect) || 'sans-serif';
+    const prepend = localeMap[style] || localeMap['sans-serif'];
+    if (!prepend) return;
+
+    // Idempotent guard:已經 prepend 過(SPA reapply / Content Guard 多次觸發),
+    // 不再重複 prepend → 避免 stack 越疊越長。比對「第一字體名」(剝去引號)即可,
+    // 不能直接 startsWith(prepend),因為瀏覽器會正規化 CSS string(例如把
+    // `"Meiryo"` 簡化成 `Meiryo` 不必要引號),導致 setter 進去跟 getter 出來不字面相等。
+    const stripQuotes = (s) => s.replace(/^["']|["']$/g, '').trim();
+    const firstOf = (s) => stripQuotes((s.split(',')[0] || '').trim());
+    if (firstOf(current) === firstOf(prepend)) return;
+
+    el.style.fontFamily = base ? `${prepend}, ${base}` : prepend;
+  }
+
+  // restorePage / abort 路徑用:還原翻譯前的 lang attribute + inline fontFamily。
+  // originalLang 為 null = 原本沒設 attribute,移除即可;originalFontFamily 空字串 =
+  // 原本沒 inline style,設空字串會清掉 inline,重新繼承站點 CSS。
+  SK.restoreLocaleStyling = function restoreLocaleStyling(el) {
+    if (STATE.originalLang.has(el)) {
+      const orig = STATE.originalLang.get(el);
+      if (orig === null) el.removeAttribute('lang');
+      else el.setAttribute('lang', orig);
+    }
+    if (STATE.originalFontFamily.has(el)) {
+      el.style.fontFamily = STATE.originalFontFamily.get(el);
+    }
   };
 
   /**
@@ -69,7 +148,9 @@
   function injectIntoTarget(target, content) {
     const isString = typeof content === 'string';
 
-    // (B) 條件：含媒體 && (target 是 heading [H1-H6] || target 無 CONTAINER_TAGS 直屬子元素)
+    // (B) 條件:target 內單一文字區塊(textBearingChildCount <= 1)+ 有東西值得保留
+    //         (媒體 OR 空結構占位子,後者對應 lazy-loaded media container)
+    //         + (heading 例外 || 無 CONTAINER 子元素 || 有空結構占位子)
     //
     // v1.5.7: heading 例外。WordPress 主題（如 nippper.com）會把 hero 圖塞進 <h1> 內：
     //   <h1><img class="wp-post-image"><div><span>標題</span></div></h1>
@@ -78,10 +159,36 @@
     // 「文字節點分散在多個結構容器」的 vBulletin 情境，所以強制走 (B) media-preserving
     // 把譯文塞進最長文字節點、IMG 保留位置不動。
     // 用 tag name 規範（HTML5 語意層）判斷不是站點 class，屬結構性通則（CLAUDE.md §8）。
+    //
+    // textBearingChildCount 守門:target 直屬有 ≥ 2 個含文字的 element children 時跳過 (B)。
+    // (B) 的 findLongestTextNode 假設「單一主文字區塊 + 媒體」,挑 main → 清空其他 text node →
+    // walk up 把空 inline 殼移除（v1.2.2 為 Gmail Team Picks 加的）。當「IMG 把多個 inline 文字
+    // 區塊切開」時這個假設破:把 main 所在以外的 SPAN 整顆當空殼移除,front 段落就消失。
+    // 真實案例:X(Twitter) 推文 `<div data-testid="tweetText">[<span>intro</span>, <img alt="🤯">,
+    // <span>rest</span>]</div>` — IMG emoji 把推文切成兩個 SPAN 文字區塊,(B) 把 SPAN[0] 殺掉,
+    // 譯文只剩後半段 + 浮動 IMG。
+    // 結構性通則(§8):描述「target 內多個 text-bearing 兄弟元素被媒體切開」這個結構,不綁站點 / class。
+    //
+    // hasEmptyPlaceholderChild 守門:target 直屬有 element child「自身有 children 但無 text」
+    // → 視為 lazy-loaded media container 占位子。即使 containsMedia 此刻 false(IMG / 背景圖
+    // 還沒 lazy-load),也走 (B) 保結構。否則 (A) clean-slate 會把占位 DIV 連同 image lazy-load
+    // 容器一起清掉,後續 X 的 lazy load 找不到容器,圖片永遠不顯示。
+    // 真實案例:X 推文裡帶 URL card preview,結構為
+    //   <a><div(empty img placeholder, has children no text)><div(title)></a>
+    // (A) 清掉 → cardLink.children = [],只剩 a.textContent = 翻完的標題,大圖預覽消失。
+    // 結構性通則(§8):描述「element child 自身有 children 但無 text 文字內容」這個 lazy-load
+    // pattern,不綁 X / class / data-testid。任何 SPA 用 placeholder DIV 等 image lazy-load
+    // 注入的場景都會踩到。
     const isHeading = /^H[1-6]$/.test(target.tagName);
     const hasContainerChild = Array.from(target.children).some(c =>
       SK.CONTAINER_TAGS.has(c.tagName));
-    if (SK.containsMedia(target) && (isHeading || !hasContainerChild)) {
+    const textBearingChildCount = Array.from(target.children).filter(c =>
+      (c.textContent || '').trim().length > 0).length;
+    const hasEmptyPlaceholderChild = Array.from(target.children).some(c =>
+      c.children.length > 0 && (c.textContent || '').trim().length === 0);
+    const containsMediaOrPlaceholder = SK.containsMedia(target) || hasEmptyPlaceholderChild;
+    if (containsMediaOrPlaceholder && textBearingChildCount <= 1
+        && (isHeading || !hasContainerChild || hasEmptyPlaceholderChild)) {
       // (B) media-preserving path
       if (!isString) {
         let fragHasBr = false;
@@ -252,11 +359,111 @@
     // 導致字面 \n 殘留可見 DOM 字元。在此入口統一處理，覆蓋所有後續路徑。
     if (translation.includes('\\n')) translation = translation.replace(/\\n/g, '\n');
 
+    // §5 單一資料源:祖先已走 nvMutate(整棵子樹 text node 全 mutate 過)時,
+    // 本 unit 重複 inject 會覆蓋已成功 mutate 的子 DOM。典型場景:
+    //   1. translatePage auto:tweetText(React fiber 在)走 framework branch
+    //      nvMutate 成功;SPAN[5] children 也有 fiber 進 framework branch,
+    //      祖先 tweetText 有 attr → framework 內 dedup bail。三 unit 安全。
+    //   2. restorePage 後再 translatePage:tweetText.innerHTML = originalHTML
+    //      重 parse,tweetText 自己 ref 不變(fiber 在)但內部 children 變
+    //      orphan 新節點(沒 fiber)→ isFrameworkManaged(SPAN[5]) = false
+    //      → SPAN[5] 跳過 framework branch 走 standard slots path →
+    //      replaceNodeInPlace 把 tweetText 已 mutate 的 SPAN[5] 內部蓋成
+    //      [text, BR, BR, text] fragment 結構,trailing \n\n 丟失。
+    //
+    // 入口只擋 nvMutated 祖先(整棵 mutate 過)。
+    // 不擋 data-shinkansen-translated(fragment inject 會設,但 outer fragment +
+    // inner element 是 SPEC §15 path 的合法雙段 inject,inner 不該被擋)。
+    // 不擋 data-shinkansen-dual-source(dual 路徑由 injectDual 內部去重)。
+    if (unit && unit.el && unit.el.parentElement) {
+      let anc = unit.el.parentElement;
+      while (anc && anc !== document.body) {
+        if (anc.hasAttribute && anc.hasAttribute('data-shinkansen-nodevalue-mutated')) return;
+        anc = anc.parentElement;
+      }
+    }
+
     // v1.5.0: 雙語對照模式分派——dual 走 SK.injectDual 走另一條路徑。
     // 只 element 走得到 dual（fragment unit 結構特殊，dual 模式直接 fallback 走 single）。
     // 模式由 STATE.translatedMode 決定（translatePage 進入時依 settings.displayMode 設定）。
     if (STATE.translatedMode === 'dual' && unit.kind !== 'fragment' && SK.injectDual) {
       SK.injectDual(unit, translation, slots);
+      return;
+    }
+
+    // v1.9.27: 即便全局 mode 是 single,個別 framework-managed element 也 fall back
+    // 到 dual inject(append sibling wrapper,不動原 element 子樹),保 framework
+    // 的 DOM node ref 完整。
+    // Why:single mode 改 element.innerHTML / text node nodeValue 會讓 React fiber
+    // 認知的 DOM ref 變孤兒,使用者後續點按鈕(X 推文「顯示更多」、Reddit/Threads/
+    // Medium 留言「展開」)時 framework click handler 失效或 silent bail out
+    // (Chrome for Claude 在真實 X 推文上 probe 2026-05-19 驗證:single inject 後
+    // click 不展開;dual inject 後 click 正常展開到 4663 chars,btn 消失)。
+    // Trade-off:framework-managed 段落變雙語(原文 + 譯文 sibling),違反使用者
+    // 預期的「single 全頁原地替換」+ Readwise Reader 擷取對應段帶 wrapper 噪音。
+    // 但對 X / Threads / Reddit 這類 React SPA,寧可保 click 互動 work,使用者
+    // 體驗整體較好。詳見 facebook/react#11538 系列。
+    if (STATE.translatedMode !== 'dual' && unit.kind !== 'fragment'
+        && SK.injectDual && SK.isFrameworkManaged?.(unit.el)) {
+      // v1.9.27 Layer A2 局部 dedup:framework-managed 場景下 collectParagraphs 對
+      // X tweetText 可能同時抓父 + 內部 inline 子 element(各為一個 unit)。兩個都
+      // inject 會造成雙倍中文(父走 dual sibling wrapper、子走 nodeValue mutate)。
+      // dedup 限縮在此 branch 內不影響其他合法雙段 inject(outer fragment + inner
+      // element 等場景,SPEC §15 path)。
+      if (unit.el.hasAttribute) {
+        let anc = unit.el.parentElement;
+        while (anc && anc !== document.body) {
+          if (anc.hasAttribute && (
+            anc.hasAttribute('data-shinkansen-translated') ||
+            anc.hasAttribute('data-shinkansen-dual-source') ||
+            anc.hasAttribute('data-shinkansen-nodevalue-mutated')
+          )) return;
+          anc = anc.parentElement;
+        }
+        if (unit.el.querySelector && unit.el.querySelector(
+          '[data-shinkansen-translated], [data-shinkansen-dual-source], [data-shinkansen-nodevalue-mutated]'
+        )) return;
+      }
+
+      SK.snapshotOnce(unit.el);
+
+      // v1.9.27 Layer A1: 先試 nodeValue mutate(類似 Immersive Translate SR()):
+      // 對「source 是 single visible text node」場景,直接改 text node 的 nodeValue
+      // 為譯文,不動 element 結構。React fiber 認識的 text node 物件 ref 不變,
+      // click handler 在它上面操作仍 work(Chrome for Claude 早期 probe 證實:單一
+      // text node nodeValue mutate 後 X click show more 仍能 expand)。
+      // 視覺等同 single mode(只看到中文,沒並列原文),且 Readwise Reader 擷取
+      // 乾淨(無 wrapper sibling 噪音)。
+      // 配對失敗(multi text node、含 placeholder、含 \n 多段)→ fallback dual visible。
+      if (SK.tryInjectNodeValueMutate?.(unit.el, translation, slots)) {
+        unit.el.setAttribute('data-shinkansen-nodevalue-mutated', '1');
+        // 同時設 single-mode attribute 讓 collectParagraphs / SPA observer 既有
+        // skip 邏輯仍 work(避免重複 inject)。restorePage 兩個 attribute 都清。
+        unit.el.setAttribute('data-shinkansen-translated', '1');
+        return;
+      }
+
+      // fallback: dual visible(layer 1-8 path)
+      // 確保 dual wrapper style 已注入(translatePage 入口在 single mode 下沒 ensure)
+      SK.ensureDualWrapperStyle?.();
+      SK.injectDual(unit, translation, slots);
+      // v1.9.27 設計決策:framework-managed fallback 走 dual visible,不嘗試
+      // hide-original「視覺 single」。Chrome for Claude probe 在真實 X 推文上
+      // 試過多種隱藏方式:
+      //   - display:none → 撞 X flex parent 重算 height,wrapper 壓 8px
+      //   - position:absolute + clip-path:inset(100%) + opacity 0 套件:初翻 work
+      //     (wrapper 208px / single-look),但 click show more 觸發 X article
+      //     re-mount 後,wrapper 仍變 8px(可能 deserializer 在新 wrapper 重設
+      //     display:none child,或 X 重 mount 環境跟初始不同)
+      // 業界對齊:Immersive Translate 在 X / Reddit / Threads / Medium / Facebook
+      // 等 React SPA + 留言系統全部走 paragraph mode(等同 dual visible),也不嘗試
+      // hide-original。沒看到任何 reference 解決「React click-triggered re-mount
+      // 場景下單語視覺」的 robust workaround。
+      // Trade-off vs §15「single 必須原地替換」:framework site 上原文 + 譯文並列
+      // 違反原始設計,但保 click 互動可運作 + 譯文視覺呈現比「點按鈕沒反應」優先。
+      // Non-framework site 維持 single 原地替換,符合 §15。
+      // hide-original 留 future:可考慮對「無 click-triggered re-mount」的 framework
+      // site(若有的話)再啟用 position absolute 路線。
       return;
     }
 
@@ -271,9 +478,11 @@
       if (ok) {
         replaceNodeInPlace(el, frag);
         el.setAttribute('data-shinkansen-translated', '1');
+        applyTargetLocaleStyling(el);
         STATE.translatedHTML.set(el, el.innerHTML);
         SK.refreshAncestorSavedHTML?.(el);
         SK._guardObserveEl?.(el); // v1.8.20: 把新譯段註冊進 IO subset
+        SK._recordTranslatedByText?.(el, el.innerHTML);
         return;
       }
       const cleaned = SK.stripStrayPlaceholderMarkers(translation);
@@ -282,24 +491,30 @@
       if (recovered) {
         replaceNodeInPlace(el, recovered);
         el.setAttribute('data-shinkansen-translated', '1');
+        applyTargetLocaleStyling(el);
         STATE.translatedHTML.set(el, el.innerHTML);
         SK.refreshAncestorSavedHTML?.(el);
         SK._guardObserveEl?.(el);
+        SK._recordTranslatedByText?.(el, el.innerHTML);
         return;
       }
       plainTextFallback(el, cleaned);
       el.setAttribute('data-shinkansen-translated', '1');
+      applyTargetLocaleStyling(el);
       STATE.translatedHTML.set(el, el.innerHTML);
       SK.refreshAncestorSavedHTML?.(el);
       SK._guardObserveEl?.(el);
+      SK._recordTranslatedByText?.(el, el.innerHTML);
       return;
     }
 
     replaceTextInPlace(el, translation);
     el.setAttribute('data-shinkansen-translated', '1');
+    applyTargetLocaleStyling(el);
     STATE.translatedHTML.set(el, el.innerHTML);
     SK.refreshAncestorSavedHTML?.(el);
     SK._guardObserveEl?.(el);
+    SK._recordTranslatedByText?.(el, el.innerHTML);
   };
 
   function injectFragmentTranslation(unit, translation, slots) {
@@ -346,9 +561,13 @@
     // v1.8.20: fragment 路徑也要寫 attribute + STATE.translatedHTML——
     // 否則 dual 模式下 fragment 段落 Content Guard 保護不到、SPA observer 重複偵測 → 重複翻譯。
     el.setAttribute('data-shinkansen-translated', '1');
+    applyTargetLocaleStyling(el);
     STATE.translatedHTML.set(el, el.innerHTML);
     SK.refreshAncestorSavedHTML?.(el);
     SK._guardObserveEl?.(el);
+    // 注意:fragment unit 的 by-text key 對應原 fragment 文字(startNode → endNode 串接),
+    // 不是整個 el.textContent。SPA observer rescan 路徑用 unitText() 算 fragment 原文後查 cache,
+    // 此處 el 是 fragment 父容器,key 不對,故此 record 行為不對 fragment 路徑寫 byText。
   }
 
   // 暴露 resolveWriteTarget / injectIntoTarget 供 Debug API testInject 使用
@@ -466,6 +685,10 @@
     // 到 wrapper.style.marginBottom)。
     inner.style.padding = '0';
     inner.style.margin = '0';
+
+    // 設 lang 讓瀏覽器選對 CJK 字形變體。dual 模式 inner 完全是譯文,直接設 lang 比
+    // 設在 wrapper 更精準(wrapper element 本身不含可見文字)。
+    applyTargetLocaleStyling(inner);
 
     // 譯文內容：有 slots 走 deserializer 重建 inline 結構，否則純文字 / br fragment
     if (slots && slots.length > 0) {
@@ -781,6 +1004,467 @@
     original.setAttribute('data-shinkansen-dual-source', '1');
     STATE.translationCache.set(original, { wrapper, insertMode });
     SK._guardObserveEl?.(original); // v1.8.20: dual 路徑也要進 IO subset
+  };
+
+  /**
+   * v1.9.27 Layer A2: 對 framework-managed element 試做 nodeValue mutate。
+   * 不動 element 結構,保 framework DOM ref(類似 Immersive Translate SR())。
+   *
+   * 三條配對 path:
+   *   Case 1: slots > 0 → fallback(inline element placeholder 重建只能走 fragment)
+   *   Case 2: 1 source text node → 直接 mutate 整段譯文(允許 \n,LLM 譯文含 \n
+   *     會由站點 CSS 的 white-space: pre-wrap 等 render 出視覺換行)
+   *   Case 3: N > 1 source text nodes → 譯文按 /\n+/ split 成 chunks,N == chunks
+   *     才 1:1 順序配對 mutate;N != chunks 視為配對失敗 → fallback dual
+   *
+   * 所有 case mutate 前都存 backup 到 STATE.nodeValueMutateBackup,供 restorePage
+   * 還原。multi-inject 場景(同 el 第二次 inject)保第一次 backup,不覆蓋。
+   */
+  // Layer A3 helper:遞迴抽 element 內 [text|inline] 序列。
+  // inline 判斷直接呼叫 SK.isPreservableInline 跟 serializer 完全對齊(包含
+  // hasSubstantiveContent 檢查)— SPAN 雖有 class 但內容無 alphanum/CJK
+  // (例 SPAN(" ")、SPAN("…")、emoji-only SPAN)serializer 視為透明,
+  // extractA3Seq 必須一致視為透明、遞迴拆進子節點,否則 source seq 帶 inline
+  // 而 target seq(來自 deserialize)是 text,type 不符 alignment fail。
+  // 同 CLAUDE.md §5 單一資料源:preservable 判斷一條 source of truth。
+  function extractA3Seq(rootEl, imgIsInline = false) {
+    const seq = [];
+    for (const child of rootEl.childNodes) {
+      if (child.nodeType === Node.TEXT_NODE) {
+        if (child.nodeValue && child.nodeValue.trim()) {
+          seq.push({ type: 'text', node: child });
+        }
+        continue;
+      }
+      if (child.nodeType !== Node.ELEMENT_NODE) continue;
+      // v1.9.31: IMG 視為 inline atomic 只在 tgt 端含 IMG 時啟用(Google MT IMG
+      // atomic path 才會,LLM Gemini path 對 IMG 透明,tgt 沒 IMG → src 也須透明
+      // 避免 src/tgt seq 長度錯位)。
+      if (imgIsInline && child.tagName === 'IMG') {
+        seq.push({ type: 'inline', node: child, tag: 'IMG' });
+        continue;
+      }
+      if (SK.isPreservableInline?.(child)) {
+        seq.push({ type: 'inline', node: child, tag: child.tagName });
+      } else {
+        // 透明 container(unstyled SPAN / DIV / 無實質內容 SPAN / IMG ...)
+        // 拆解進子節點
+        const inner = extractA3Seq(child, imgIsInline);
+        for (const item of inner) seq.push(item);
+      }
+    }
+    return seq;
+  }
+
+  // v1.9.31: Layer A3 對 SPAN 完全透明的變體 — 任何 SPAN(無論 class、無論 inner 內容)
+  // 一律透明展開,A / B / I / STRONG 等 semantic inline 維持 opaque。
+  //
+  // Why:Google MT serializer 對 SPAN 一律透明展開(content-serialize.js
+  // serializeNodeIterableForGoogle line 144 註解:「SPAN 是最常見的爆炸來源」),
+  // deserialize 後 target frag 內 SPAN.class wrapper 不存在(只剩 inner)。但
+  // extractA3Seq 對 source 端 preservable SPAN 仍視為 inline,造成 src.inline(SPAN)
+  // vs tgt.text 型別不符 alignment fail → framework-managed 段落走 dual sibling
+  // wrapper(違反 §15 single 原地替換)。
+  //
+  // 對應真實 X 推文(2026-05-20 Chrome for Claude 驗證):
+  //   source: <div><span class="...">主文 prose</span><a>URL</a><span> </span><div><span><a>@mention</a></span></div></div>
+  //   Google MT serializer:主文 prose 純文字 + 【*0】(A.url atomic) + ' ' + 【1】@mention【/1】
+  //   Google MT 翻完 deserialize:[text("中文主文"), A.url(deep clone), text(' '), A.mention]
+  //   strict extractA3Seq src:[inline(SPAN.main), inline(A.url), inline(SPAN.mention-wrap)]
+  //     vs tgt:[text, inline(A.url), inline(A.mention)] → src[0] inline vs tgt[0] text → fail。
+  //
+  // SPAN-unwrap src:[text(主文), inline(A.url), inline(A.mention)](SPAN.main 展開為 text、
+  // DIV/SPAN.mention-wrap 展開為 A.mention)。
+  // SPAN-unwrap tgt:[text, inline(A.url), inline(A.mention)] = 3 items。
+  // 對齊成功 → nodeValue mutate single。
+  //
+  // 只在 strict fail 後當 fallback 用,不取代 extractA3Seq(避免影響 Gemini LLM
+  // path 的既有 spec 假設,LLM SPAN 走 paired marker,target 端保留 SPAN wrapper,
+  // strict 就過,不會走到此 fallback)。
+  function extractA3SeqSpanUnwrapped(rootEl, imgIsInline = false) {
+    const seq = [];
+    for (const child of rootEl.childNodes) {
+      if (child.nodeType === Node.TEXT_NODE) {
+        if (child.nodeValue && child.nodeValue.trim()) {
+          seq.push({ type: 'text', node: child });
+        }
+        continue;
+      }
+      if (child.nodeType !== Node.ELEMENT_NODE) continue;
+      // v1.9.31: IMG 視為 inline atomic 同 extractA3Seq(動態)
+      if (imgIsInline && child.tagName === 'IMG') {
+        seq.push({ type: 'inline', node: child, tag: 'IMG' });
+        continue;
+      }
+      // SPAN 一律透明展開(無論有無 class、無論 inner 是 text 還是 element)
+      if (child.tagName === 'SPAN') {
+        const inner = extractA3SeqSpanUnwrapped(child, imgIsInline);
+        for (const item of inner) seq.push(item);
+      } else if (SK.isPreservableInline?.(child)) {
+        // A / B / I / STRONG / EM / SUB / SUP / ... 維持 opaque inline
+        seq.push({ type: 'inline', node: child, tag: child.tagName });
+      } else {
+        const inner = extractA3SeqSpanUnwrapped(child, imgIsInline);
+        for (const item of inner) seq.push(item);
+      }
+    }
+    return seq;
+  }
+
+  // Layer A3 helper:source seq vs target seq 對齊檢查 + 收集 text mutation pairs。
+  // 配對成功 return mutation list(尚未實作 mutate);任何位置 type / inline tag 不對 → null。
+  // inline element 內部遞迴對齊,因此 source 跟 target 結構必須完全同構。
+  // Layer A3 helper:把 target container 內 text+br 結構還原成含 \n 的字串。
+  // 對應 deserializer 的 buildFragmentFromTextWithBr:原 LLM \n 轉成 br,還原時 br 轉回 \n。
+  function targetContainerToText(targetContainer) {
+    let s = '';
+    for (const child of targetContainer.childNodes) {
+      if (child.nodeType === Node.TEXT_NODE) {
+        s += child.nodeValue;
+      } else if (child.nodeType === Node.ELEMENT_NODE && child.tagName === 'BR') {
+        s += '\n';
+      }
+    }
+    return s;
+  }
+
+  // 檢查 container 是否含直接 BR 子節點(extractA3Seq 對 BR 不收進 seq,
+  // BR 在邊緣的 case 從 seq.length 看不出來,要看 container 本身)。
+  function targetContainerHasBr(container) {
+    if (!container || !container.childNodes) return false;
+    for (const child of container.childNodes) {
+      if (child.nodeType === Node.ELEMENT_NODE && child.tagName === 'BR') return true;
+    }
+    return false;
+  }
+
+  // v1.9.31:1-to-1 text mutate 的 leading/trailing whitespace preserve helper。
+  // 對應 X 推文「✨ Spatial...」emoji 後空格、「\n\n」段落空行等 — Google MT / LLM
+  // 翻譯後常去掉原 leading space 跟 trailing \n,mutate src text 為純翻譯結果會丟失
+  // 視覺結構。helper 規則:tgt 自帶 ws 優先用 tgt 的,否則 fallback 用 src ws(preserve)。
+  function preserveWsTextMutate(srcVal, tgtVal) {
+    const srcLead = (srcVal.match(/^\s+/) || [''])[0];
+    const srcTrail = (srcVal.match(/\s+$/) || [''])[0];
+    const tgtLead = ((tgtVal || '').match(/^\s+/) || [''])[0];
+    const tgtTrail = ((tgtVal || '').match(/\s+$/) || [''])[0];
+    const tgtStripped = (tgtVal || '').replace(/^\s+|\s+$/g, '');
+    return (tgtLead || srcLead) + tgtStripped + (tgtTrail || srcTrail);
+  }
+
+  function collectA3Mutations(sourceContainer, targetContainer, mutations) {
+    // v1.9.31:tgt 含 IMG → Google MT IMG atomic path → src 端也視 IMG 為 inline;
+    // tgt 無 IMG → LLM Gemini path 對 IMG 透明,src 端也須透明(否則 src 多 IMG inline
+    // 比 tgt 多,長度不符 fallback dual,破壞 LLM path 原本 work 的對齊)。
+    const imgIsInline = !!targetContainer.querySelector?.('img');
+    const sourceSeq = extractA3Seq(sourceContainer, imgIsInline);
+    const targetSeq = extractA3Seq(targetContainer, imgIsInline);
+    // Special case:source 是單一 text node(內含 \n)+ target 是純 text 序列(deserialize
+    // 把原 LLM \n 拆成 br,extractA3Seq 不收 br)。還原 target br 為 \n 接成完整字串
+    // 設給 source text node。對應 X tweetText 結構:source SPAN 內 1 text node 含
+    // \n\n vs target SPAN 內 br+text+br 混合。
+    //
+    // 兩條 trigger path:
+    //   - targetSeq.length > 1:BR 夾在 text 之間(原 \n 在文字中段),extractA3Seq
+    //     drop BR 後剩多 text item。
+    //   - targetSeq.length === 1 但 container 直接含 BR:BR 在邊緣(原 \n 在文字
+    //     首/尾),drop BR 後僅剩 1 text item,length 看不出 BR 存在 → 加查 container
+    //     本身有沒有 BR。對應 X tweet「\n\nEnjoy : )\n\n」結構,單純走 length > 1
+    //     會漏。
+    //   source 必須真的含 \n(否則保守走 normal flow,避免無中生有添加 \n)。
+    if (sourceSeq.length === 1 && sourceSeq[0].type === 'text' &&
+        targetSeq.every(t => t.type === 'text')) {
+      const sourceHasNewline = /\n/.test(sourceSeq[0].node.nodeValue || '');
+      if (targetSeq.length > 1
+          || (targetSeq.length >= 1 && sourceHasNewline && targetContainerHasBr(targetContainer))) {
+        mutations.push({
+          node: sourceSeq[0].node,
+          newValue: targetContainerToText(targetContainer),
+        });
+        return true;
+      }
+    }
+    // 寬容對齊:source 是純 inline 序列(中間沒 text),target 是 inline + 之間穿插
+    // free text node。對應 LLM(尤其 Flash Lite)重組句子時把原 placeholder 內文字
+    // 搬到 placeholder 之間自由 text 區。把 target free text 吸收進「下一個 inline
+    // 的 leading」,合進該 inline mutate 的 newValue。
+    //
+    // 真實案例(@jsnell 2026-05-20 probe + Flash Lite):
+    //   source 結構:[SPAN("Steve Jobs in Exile by "), DIV(@geoffrey_cain), SPAN(" is out today..."), A.url]
+    //   extractA3Seq source → [inline, inline, inline, inline](DIV 透明,recurse 進去抓 SPAN.r-18u37iz)
+    //   target deserialize → [SPAN("由 "), SPAN.r-18u37iz, text(" 撰寫的"), SPAN("《...》..."), A.url]
+    //   extractA3Seq target → [inline, inline, text, inline, inline]
+    //   原本長度不符 4 vs 5 → fallback dual。寬容後把 " 撰寫的" 視為下一個 inline 的
+    //   leading,合進 SPAN.middle 譯文 → mutate 結果「 撰寫的《Steve Jobs in Exile》...」。
+    //
+    // 守門:source 必須是純 inline(全 inline 沒夾 text),否則 source 結構複雜不易判斷
+    // 自由 text 該吸收去哪。
+    const sourceAllInline = sourceSeq.length > 0 && sourceSeq.every(s => s.type === 'inline');
+    if (sourceAllInline && targetSeq.length !== sourceSeq.length) {
+      const tightened = [];
+      let prepend = '';
+      for (const item of targetSeq) {
+        if (item.type === 'text') {
+          prepend += item.node.nodeValue || '';
+        } else {
+          tightened.push({ inline: item, prepend });
+          prepend = '';
+        }
+      }
+      // trailing free text(在最後一個 inline 之後)沒地方放,捨棄(罕見 + 通常是
+      // LLM 譯文尾巴的標點,visually 影響小)。
+      if (tightened.length === sourceSeq.length) {
+        let allTagOk = true;
+        for (let i = 0; i < sourceSeq.length; i++) {
+          if (sourceSeq[i].tag !== tightened[i].inline.tag) { allTagOk = false; break; }
+        }
+        if (allTagOk) {
+          for (let i = 0; i < sourceSeq.length; i++) {
+            const s = sourceSeq[i];
+            const t = tightened[i].inline;
+            const pre = tightened[i].prepend;
+            const innerMutations = [];
+            const innerOk = collectA3Mutations(s.node, t.node, innerMutations);
+            if (innerOk) {
+              if (pre && innerMutations.length > 0) {
+                // 把 free text 合進該 inline 的第一個 text mutation 的 leading
+                innerMutations[0].newValue = pre + innerMutations[0].newValue;
+              }
+              for (const m of innerMutations) mutations.push(m);
+            }
+            // innerOk false:opaque(source 內部保留),free text 就丟掉(沒地方放;
+            // 但這是 placeholder opaque case,通常 inline 內容無譯文意義,可接受)
+          }
+          return true;
+        }
+      }
+    }
+
+    if (sourceSeq.length === targetSeq.length) {
+      let strictOk = true;
+      const strictMutations = [];
+      for (let i = 0; i < sourceSeq.length; i++) {
+        const s = sourceSeq[i];
+        const t = targetSeq[i];
+        if (s.type !== t.type) { strictOk = false; break; }
+        if (s.type === 'text') {
+          strictMutations.push({
+            node: s.node,
+            newValue: preserveWsTextMutate(s.node.nodeValue || '', t.node.nodeValue || ''),
+          });
+        } else if (s.type === 'inline') {
+          if (s.tag !== t.tag) { strictOk = false; break; }
+          // inline 視為 opaque placeholder:遞迴對齊內部成功 → 套用 inner mutations;
+          // 失敗 → 跳過該 inline 內部不 mutate(source 端原狀保留),不讓整段對齊
+          // 因 inline 子結構不同構而 fail 觸發 dual sibling fallback。對應 X URL <a>
+          // 場景:source <a> 含 <span class>https://</span>...<span>…</span> 三段
+          // inline,deserializer 從 placeholder slot 還原時只剩 text node 子序列,
+          // type 不符。協定本意是「inline placeholder 內部 source 端保持原樣」,
+          // 此鬆綁讓父層 text 仍能照常 mutate,符合 CLAUDE.md §15 single 原地替換。
+          const innerMutations = [];
+          const innerOk = collectA3Mutations(s.node, t.node, innerMutations);
+          if (innerOk) {
+            for (const m of innerMutations) strictMutations.push(m);
+          }
+        }
+      }
+      if (strictOk) {
+        for (const m of strictMutations) mutations.push(m);
+        return true;
+      }
+    }
+
+    const srcSpanU = extractA3SeqSpanUnwrapped(sourceContainer, imgIsInline);
+    const tgtSpanU = extractA3SeqSpanUnwrapped(targetContainer, imgIsInline);
+    if (srcSpanU.length === tgtSpanU.length && srcSpanU.length > 0) {
+      const unwrapMutations = [];
+      let unwrapOk = true;
+      for (let i = 0; i < srcSpanU.length; i++) {
+        const s = srcSpanU[i];
+        const t = tgtSpanU[i];
+        if (s.type !== t.type) { unwrapOk = false; break; }
+        if (s.type === 'text') {
+          unwrapMutations.push({ node: s.node, newValue: t.node.nodeValue });
+        } else {
+          // inline:tag 必符
+          if (s.tag !== t.tag) { unwrapOk = false; break; }
+          const innerMutations = [];
+          const innerOk = collectA3Mutations(s.node, t.node, innerMutations);
+          if (innerOk) {
+            for (const m of innerMutations) unwrapMutations.push(m);
+          }
+        }
+      }
+      if (unwrapOk) {
+        for (const m of unwrapMutations) mutations.push(m);
+        return true;
+      }
+    }
+
+    // v1.9.31 \n-aware segment fallback:SPAN-unwrap 等長對齊也失敗時,以 inline 為
+    // 錨點把 srcSpanU / tgtSpanU 分段(inline 跟相鄰 text 區塊),inline-to-inline
+    // tag 對齊 + 區段內多 text 用 \n join 起來 mutate。
+    //
+    // Why:X 推文使用者打 Enter 換行時 source 端 SPAN 內 text node 含 `\n` char
+    // (white-space: pre-wrap render 出換行視覺),Google MT serializer 對 SPAN
+    // 透明 + preserveNewlines=true 把 \n 送進 Google API,Google 翻完保留 \n,
+    // deserialize 時 \n 拆成 BR + text node。target seq SPAN-unwrap 後比 src 多
+    // 出 BR-split 的 text node,strict / SPAN-unwrap 等長都對不上。
+    //
+    // 對應 @asymco Mont Blanc / Exotica tweet(2026-05-20 Chrome for Claude probe):
+    //   source structure:[SPAN.main(含 \n + Mont Blanc), A.url1, SPAN("\nExotica "), A.url2, ...hashtags]
+    //   target structure(BR + text 拆 \n):[text(中文主文), BR, text(萬寶龍), A.url1, BR, text(奇特), A.url2, ...]
+    //   src SpanU 6 vs tgt SpanU 7(BR-skip 後 tgt 主文段多 1 個 text)→ SPAN-unwrap fail。
+    //   segment 後 inline 數量對等(4=4)→ 區段內 1 text vs N text 用 \n join mutate。
+    function segment(seq) {
+      const segs = [];
+      let cur = [];
+      for (const item of seq) {
+        if (item.type === 'text') cur.push(item);
+        else { segs.push(cur); segs.push(item); cur = []; }
+      }
+      segs.push(cur);
+      return segs;
+    }
+    const srcSegs = segment(srcSpanU);
+    const tgtSegs = segment(tgtSpanU);
+    if (srcSegs.length === tgtSegs.length && srcSegs.length > 1) {
+      const segMutations = [];
+      let segOk = true;
+      for (let i = 0; i < srcSegs.length; i++) {
+        const ss = srcSegs[i];
+        const ts = tgtSegs[i];
+        if (i % 2 === 1) {
+          // inline 位置
+          if (ss.tag !== ts.tag) { segOk = false; break; }
+          const inner = [];
+          const innerOk = collectA3Mutations(ss.node, ts.node, inner);
+          if (innerOk) for (const m of inner) segMutations.push(m);
+          continue;
+        }
+        // text segment(可空)
+        if (ss.length === 0 && ts.length === 0) continue;
+        if (ss.length === 0 && ts.length > 0) { segOk = false; break; }
+        // v1.9.31:Google MT 把短 metadata 連接詞(" by " / " - " / " via " /
+        // " at "等)跟前段主文一起翻譯,deserialize 後該 text segment 在 tgt 消失。
+        // src 端的 text 失去對應 tgt → mutate 為 "" 接受視覺上失去該連接詞(中文翻譯
+        // 通常會把連接詞合進前後 text)。守門:只在 src 全部 text 加總 ≤ 12 字時容忍
+        // (避免把實質 prose 丟掉)。
+        if (ts.length === 0 && ss.length > 0) {
+          const totalLen = ss.reduce((acc, item) => acc + (item.node.nodeValue || '').length, 0);
+          if (totalLen <= 12) {
+            for (const item of ss) {
+              segMutations.push({ node: item.node, newValue: '' });
+            }
+            continue;
+          }
+          segOk = false; break;
+        }
+        if (ss.length === ts.length) {
+          // 1-to-1 mutate:用 helper preserve src 原 leading/trailing whitespace
+          // (含 \n 跟 leading space — Google MT 翻譯「 Spatial...\n」變「空間運算...」,
+          // 失去前空格跟 trailing \n,視覺結構就破)
+          for (let j = 0; j < ss.length; j++) {
+            segMutations.push({
+              node: ss[j].node,
+              newValue: preserveWsTextMutate(ss[j].node.nodeValue || '', ts[j].node.nodeValue || ''),
+            });
+          }
+        } else {
+          // src N vs tgt M(N != M)— Google MT 對含 \n / IMG emoji / 多段 prose 的
+          // 推文翻譯後 text 切分跟 src 不對等(IMG 透明不送 API、\n 拆 BR 後 skip
+          // 不同數量)。catch-all:把 tgt 全部 text join 塞給 ss[0],ss[1..N] mutate
+          // 為 ""。視覺結果:src 端集中 nodeValue 在 ss[0],含完整中文 + 分段。
+          //
+          // separator 看 src 全部 text 是否含 \n\n:含 → join('\n\n') 保留段落空行;
+          // 否則 join('\n')。leading/trailing whitespace 從 src ss 整段抽含 space
+          // 跟 \n(preserveWsTextMutate 同邏輯)。
+          const ssJoined = ss.map(s => s.node.nodeValue || '').join('');
+          const srcLead = (ssJoined.match(/^\s+/) || [''])[0];
+          const srcTrail = (ssJoined.match(/\s+$/) || [''])[0];
+          const sep = /\n\n/.test(ssJoined) ? '\n\n' : '\n';
+          const tgtJoined = ts
+            .map(t => (t.node.nodeValue || '').replace(/^\s+|\s+$/g, ''))
+            .join(sep);
+          segMutations.push({ node: ss[0].node, newValue: srcLead + tgtJoined + srcTrail });
+          for (let j = 1; j < ss.length; j++) {
+            segMutations.push({ node: ss[j].node, newValue: '' });
+          }
+        }
+      }
+      if (segOk) {
+        for (const m of segMutations) mutations.push(m);
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  SK.tryInjectNodeValueMutate = function tryInjectNodeValueMutate(el, translation, slots) {
+    if (!el || el.nodeType !== Node.ELEMENT_NODE) return false;
+    if (!translation || typeof translation !== 'string') return false;
+
+    // Layer A3:slots > 0 場景(source 含 inline element 像 <a> / 帶 class SPAN)
+    // 走「同構序列配對」path:source 跟 target 各自抽 [text|inline] 序列,N==N 同 type
+    // 同 inline tag → 收集 text mutation list → 一次性 mutate text nodes nodeValue;
+    // inline element 結構不動,React fiber DOM ref 完整保留。
+    // 配對失敗(序列長度不一 / type 不對 / inline tag 不對)→ return false 走 fallback dual。
+    if (slots && slots.length > 0) {
+      if (!SK.deserializeWithPlaceholders) return false;
+      const { frag, ok } = SK.deserializeWithPlaceholders(translation, slots);
+      if (!ok || !frag) return false;
+      // 快速 short-circuit:source 沒任何 visible content → 不適合 mutate
+      if (extractA3Seq(el).length === 0) return false;
+      const mutations = [];
+      const aligned = collectA3Mutations(el, frag, mutations);
+      if (!aligned) return false;
+      if (mutations.some(m => !m.node.isConnected)) return false;
+      if (!STATE.nodeValueMutateBackup) STATE.nodeValueMutateBackup = new Map();
+      if (!STATE.nodeValueMutateBackup.has(el)) {
+        // backup 同時存 originalValue(restorePage 還原用)與 translatedValue(Layer A4
+        // partial-reset detect 用 — framework 把任一 backup text node reset 成新值
+        // 時 nodeValue !== translatedValue 觸發 unmark + 重翻)。
+        STATE.nodeValueMutateBackup.set(el,
+          mutations.map(m => ({
+            node: m.node,
+            originalValue: m.node.nodeValue,
+            translatedValue: m.newValue,
+          }))
+        );
+      }
+      for (const m of mutations) m.node.nodeValue = m.newValue;
+      return true;
+    }
+
+    const textNodes = SK.collectVisibleTextNodes?.(el);
+    if (!textNodes || textNodes.length === 0) return false;
+    if (textNodes.some(n => !n.isConnected)) return false;
+
+    if (!STATE.nodeValueMutateBackup) STATE.nodeValueMutateBackup = new Map();
+
+    // Case 2: single source text node — 整段譯文(含 \n)mutate 進去
+    if (textNodes.length === 1) {
+      const node = textNodes[0];
+      if (!STATE.nodeValueMutateBackup.has(el)) {
+        STATE.nodeValueMutateBackup.set(el, [{ node, originalValue: node.nodeValue, translatedValue: translation }]);
+      }
+      node.nodeValue = translation;
+      return true;
+    }
+
+    // Case 3: multi source text nodes — 譯文按 \n+ 切 chunks,N == chunks 1:1 配對
+    const chunks = translation.split(/\n+/).map(s => s).filter(s => s.length > 0);
+    if (chunks.length !== textNodes.length) return false; // N != M → fallback
+
+    // 都 OK,做 backup + mutate
+    if (!STATE.nodeValueMutateBackup.has(el)) {
+      const backup = textNodes.map((node, i) => ({ node, originalValue: node.nodeValue, translatedValue: chunks[i] }));
+      STATE.nodeValueMutateBackup.set(el, backup);
+    }
+    for (let i = 0; i < textNodes.length; i++) {
+      textNodes[i].nodeValue = chunks[i];
+    }
+    return true;
   };
 
   /** 還原 dual 模式：移除所有 wrapper、清乾淨 attribute（restorePage 雙語分支用） */

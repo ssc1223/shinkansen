@@ -48,7 +48,6 @@ test('translate-partial-mode-ignore: ignorePartialMode=true + STATE.translated=t
         maxCharsPerBatch: 100000,
         maxTranslateUnits: 1000,
         partialMode: { enabled: true, maxUnits: 8 },
-        skipTraditionalChinesePage: false,
       };
     };
 

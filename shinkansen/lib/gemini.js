@@ -5,7 +5,7 @@
 import { debugLog } from './logger.js';
 // v1.5.7: DELIMITER / packChunks / buildEffectiveSystemInstruction 抽到共用模組，
 // 與 lib/openai-compat.js 共用同一份「翻譯 batch 構建」邏輯。
-import { DELIMITER, MARKER_COMPACT, packChunks, buildEffectiveSystemInstruction } from './system-instruction.js';
+import { DELIMITER, SEP_RE, MARKER_COMPACT, packChunks, buildEffectiveSystemInstruction } from './system-instruction.js';
 
 const MAX_BACKOFF_MS = 8000;
 
@@ -59,8 +59,14 @@ function extractQuotaDimension(json) {
   return null;
 }
 
+// 主翻譯 fetch 層級 timeout。15s = Flash 系列慢 case(~8s)留 2x margin,
+// 真正卡死的情境(Gemini 沒回 / 連線吊住)在 15s 後 AbortError,走下面 retry 路徑。
+// 預設 preset 都是 Flash 系列(storage.js:617-618),Pro thinking 邊緣情境不納入。
+const FETCH_TIMEOUT_MS = 15_000;
+
 /**
- * fetch Gemini API,帶 429 退避重試。
+ * fetch Gemini API,帶 fetch-level timeout + 429 退避重試。
+ * - 15s 內沒回應 → AbortError → 走網路錯誤 retry path
  * - 收到 429 → 讀 Retry-After header(秒數)等待後重試
  * - Retry-After 沒給 → 指數退避 2^n * 500ms(上限 8s)
  * - 爆的是 RPD → 丟 DailyQuotaExceededError,不 retry
@@ -71,19 +77,26 @@ async function fetchWithRetry(url, body, { maxRetries = 3 } = {}) {
   // eslint-disable-next-line no-constant-condition
   while (true) {
     let resp;
+    const controller = new AbortController();
+    const abortTimer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
     try {
       resp = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
+        signal: controller.signal,
       });
     } catch (err) {
-      await debugLog('error', 'api', 'gemini fetch network error', { error: err.message, attempt });
-      if (attempt >= maxRetries) throw new Error('網路錯誤：' + err.message);
+      clearTimeout(abortTimer);
+      const isTimeout = err.name === 'AbortError';
+      const errMsg = isTimeout ? `逾時(${FETCH_TIMEOUT_MS}ms)` : err.message;
+      await debugLog('error', 'api', isTimeout ? 'gemini fetch timeout' : 'gemini fetch network error', { error: err.message, attempt, timeoutMs: isTimeout ? FETCH_TIMEOUT_MS : undefined });
+      if (attempt >= maxRetries) throw new Error('網路錯誤：' + errMsg);
       await sleep(Math.min(MAX_BACKOFF_MS, 500 * Math.pow(2, attempt)));
       attempt += 1;
       continue;
     }
+    clearTimeout(abortTimer);
 
     // v0.84: 5xx 伺服器錯誤也重試（Gemini 偶爾回 500/503 服務暫時不可用）
     if (resp.status >= 500 && resp.status < 600) {
@@ -158,8 +171,11 @@ export async function extractGlossary(compressedText, settings) {
   const glossaryPrompt = glossaryConfig?.prompt || '';
   const glossaryTemperature = glossaryConfig?.temperature ?? 0.1;
   const maxTerms = glossaryConfig?.maxTerms ?? 200;
-  // v0.70: fetch 層級的 timeout — Structured Output 對大輸入可能需要 30–60 秒
-  const fetchTimeoutMs = glossaryConfig?.fetchTimeoutMs ?? 55_000;
+  // fetch 層級的 timeout。v0.70 原為 55s(Structured Output 大輸入需 30-60s),v0.72
+  // 拿掉 JSON mode 後該理由消失;v1.9.21 對齊主翻譯路徑 15s(術語表用 Flash Lite
+  // 典型 2-5s,慢 case ~10s,15s 留 50% margin)。glossaryConfig.fetchTimeoutMs 仍可
+  // override(JSON / 工具測試套件直接給值)。
+  const fetchTimeoutMs = glossaryConfig?.fetchTimeoutMs ?? 15_000;
 
   // v0.72: 保底至少 4096，作為額外防線。
   const glossaryMaxOutput = Math.max(maxOutputTokens || 0, 4096);
@@ -507,7 +523,7 @@ async function translateChunk(texts, settings, glossary, fixedGlossary, forbidde
   });
 
   // v0.89: split 後移除序號標記（若有）
-  const parts = text.split(DELIMITER).map(s => s.trim().replace(MARKER_COMPACT.re, ''));
+  const parts = text.split(SEP_RE).map(s => s.trim().replace(MARKER_COMPACT.re, ''));
   // 若回傳段數不符，且本批不只一段，則 fallback 改為逐段單獨翻譯，確保對齊
   if (parts.length !== texts.length) {
     await debugLog('warn', 'api', 'segment count mismatch — fallback to per-segment', {
@@ -609,17 +625,35 @@ export async function translateBatchStream(texts, settings, glossary, fixedGloss
 
   const t0 = Date.now();
 
+  // 跟 fetchWithRetry 一致的 15s headers timeout — 真正卡死(Gemini 不回 response headers)
+  // 在 FETCH_TIMEOUT_MS 後 AbortError。headers 收到後 clearTimeout,stream phase 改靠
+  // 外部 signal 控制(user 按 × 取消或 background.js inFlightStreams 清掉時 abort)。
+  // 用 internal AC + forward external signal,讓 ac.signal 同時 cover headers timeout
+  // 跟外部 cancel 兩條 abort path;外層 try/finally 統一清掉 listener 防 leak。
+  const ac = new AbortController();
+  let headersTimer = setTimeout(() => ac.abort(), FETCH_TIMEOUT_MS);
+  const onExternalAbort = () => ac.abort();
+  if (signal?.aborted) ac.abort();
+  else signal?.addEventListener('abort', onExternalAbort);
+
+  try {
   let resp;
   try {
     resp = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
-      signal,
+      signal: ac.signal,
     });
+    clearTimeout(headersTimer);
+    headersTimer = null;
   } catch (err) {
-    if (signal?.aborted || err?.name === 'AbortError') {
+    if (headersTimer) clearTimeout(headersTimer);
+    if (signal?.aborted) {
       throw new Error('streaming aborted');
+    }
+    if (err?.name === 'AbortError') {
+      throw new Error(`streaming fetch timeout (${FETCH_TIMEOUT_MS}ms)`);
     }
     throw err;
   }
@@ -648,7 +682,7 @@ export async function translateBatchStream(texts, settings, glossary, fixedGloss
   // 自動處理占位符斷裂——占位符在 segment 內部,DELIMITER 不會切到占位符中間。
   function tryEmitSegments() {
     if (!callbacks.onSegment) return;
-    const allParts = allText.split(DELIMITER);
+    const allParts = allText.split(SEP_RE);
     // allParts 最後一個 element 是「尚未完成的當前段落」(因為它後面沒 DELIMITER 接),先不 emit
     const numComplete = allParts.length - 1;
     while (segmentsEmitted < numComplete && segmentsEmitted < texts.length) {
@@ -721,7 +755,7 @@ export async function translateBatchStream(texts, settings, glossary, fixedGloss
 
   // 流結束後 emit 最後一段(allText 最後一個 split element 是 trailing segment)
   if (callbacks.onSegment) {
-    const allParts = allText.split(DELIMITER);
+    const allParts = allText.split(SEP_RE);
     while (segmentsEmitted < allParts.length && segmentsEmitted < texts.length) {
       const segText = allParts[segmentsEmitted].trim().replace(MARKER_COMPACT.re, '');
       callbacks.onSegment(segmentsEmitted, segText, false);
@@ -753,7 +787,7 @@ export async function translateBatchStream(texts, settings, glossary, fixedGloss
   }
 
   // 計算對齊後的譯文 array(跟 non-streaming 一致),hadMismatch 留給呼叫端決定如何處理
-  const translations = allText.split(DELIMITER).map(s => s.trim().replace(MARKER_COMPACT.re, ''));
+  const translations = allText.split(SEP_RE).map(s => s.trim().replace(MARKER_COMPACT.re, ''));
   const hadMismatch = translations.length !== texts.length;
 
   if (hadMismatch) {
@@ -768,4 +802,10 @@ export async function translateBatchStream(texts, settings, glossary, fixedGloss
     hadMismatch,
     finishReason,
   };
+  } finally {
+    // 統一清 external signal listener + 防 leak headers timer(catch 路徑 throw 之前
+    // 已清,但成功路徑 / post-stream throw 都靠這條 finally 兜底)
+    if (headersTimer) clearTimeout(headersTimer);
+    signal?.removeEventListener('abort', onExternalAbort);
+  }
 }

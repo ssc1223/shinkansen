@@ -39,6 +39,22 @@
     } else if (action === 'TRANSLATE') {
       respond({ ok: true, triggered: true });
       SK.translatePage();
+    } else if (action === 'TRANSLATE_ENGINE') {
+      // Debug Bridge:指定翻譯引擎觸發整頁翻譯
+      // engine: 'gemini'(預設,等同 TRANSLATE)| 'google'(Google MT)| 'openai-compat'
+      const eng = (e.detail && e.detail.engine) || 'gemini';
+      respond({ ok: true, triggered: true, engine: eng });
+      if (eng === 'google') {
+        SK.translatePageGoogle({ label: 'Google MT (debug bridge)' });
+      } else if (eng === 'openai-compat') {
+        SK.translatePage({ engine: 'openai-compat', label: 'OpenAI-compat (debug bridge)' });
+      } else {
+        SK.translatePage();
+      }
+    } else if (action === 'GET_SPA_DEBUG') {
+      // Debug Bridge:暴露 SPA observer 內部狀態(含 mutation/rescan counters)
+      const info = SK._spaDebug ? SK._spaDebug() : null;
+      respond({ ok: true, spa: info });
     } else if (action === 'RESTORE') {
       if (STATE.translated) {
         restorePage();
@@ -55,12 +71,47 @@
       // v1.2.52: 清除持久化 log（測試前呼叫，避免舊資料干擾）
       forwardToBackground('CLEAR_PERSISTED_LOGS');
     } else if (action === 'GET_STATE') {
-      respond({
+      // YT 頁多附 yt 子物件(精簡版供「一鍵全看」),完整 raw / captionMap 內容仍走 GET_YT_DEBUG
+      const out = {
         ok: true,
         translated: STATE.translated,
         translating: STATE.translating,
         segmentCount: STATE.originalHTML.size,
-      });
+      };
+      if (SK.isYouTubePage?.() && SK.YT) {
+        out.yt = {
+          active:          SK.YT.active,
+          translating:     SK.YT.translating,
+          rawCount:        SK.YT.rawSegments?.length ?? 0,
+          captionMapSize:  SK.YT.captionMap?.size ?? 0,
+          captionLang:     SK.YT.captionLang,
+          isAsr:           SK.YT.isAsr,
+          displayCuesLen:  SK.YT.displayCues?.length ?? 0,
+          ytConfig:        SK.YT.config,
+        };
+      }
+      respond(out);
+    } else if (action === 'GET_STORAGE') {
+      // Debug Bridge:暴露 storage.sync 設定供除錯讀取
+      // (Chrome for Claude / 主世界 javascript_tool 拿不到 chrome.storage,需 isolated 端橋接)
+      const keys = (e.detail && e.detail.keys) || null;  // null = 全部 key
+      browser.storage.sync.get(keys)
+        .then((data) => respond({ ok: true, sync: data }))
+        .catch((err) => respond({ ok: false, error: err?.message || String(err) }));
+    } else if (action === 'YT_TRANSLATE') {
+      // Debug Bridge:觸發 YouTube 字幕翻譯(等同 Alt+S 在 YT 頁的行為)
+      if (!SK.isYouTubePage?.()) {
+        respond({ ok: false, error: 'not on YouTube page' });
+      } else {
+        respond({ ok: true, triggered: true });
+        SK.translateYouTubeSubtitles?.({ source: 'debug' }).catch((err) => {
+          SK.sendLog('warn', 'system', 'YT_TRANSLATE failed', { error: err?.message });
+        });
+      }
+    } else if (action === 'YT_STOP') {
+      // Debug Bridge:停掉 YouTube 字幕翻譯(乾淨重啟測試循環)
+      try { SK.stopYouTubeTranslation?.(); respond({ ok: true }); }
+      catch (err) { respond({ ok: false, error: err?.message || String(err) }); }
     } else if (action === 'RELOAD_EXTENSION') {
       // DEBUG: hot reload extension(讀磁碟新 code),sendResponse 同步先回再讓
       // background 重啟 SW；此 tab 的 content script 會變成 orphan，下次 navigate
@@ -135,7 +186,7 @@
     const newUnits = SK.collectParagraphs();
     if (newUnits.length > 0) {
       try {
-        const { done, failures } = await SK.translateUnits(newUnits);
+        const { done, failures } = await SK.translateUnitsByProvider(newUnits);
         if (!STATE.translated) return;
         if (done > 0) {
           SK.sendLog('info', 'translate', 'rescan caught new units', { done, failures: failures.length, attempt: rescanAttempts + 1 });
@@ -387,24 +438,35 @@
         // v1.8.10 A:strip LLM 偷懶殘留的 SEP / «N» 標記
         // v1.8.39: dedup broadcast — 同一份譯文 broadcast 到所有 dup 原始位置，
         // 讓 60 段重複的 image alt 只翻 1 次但 inject 60 個 element。
-        let injectedThisBatch = 0;
-        translations.forEach((tr, j) => {
-          const sanitized = SK.sanitizeMarkers(tr);
-          const uniqueText = job.texts[j];
-          const allOrigIndices = origIndicesByText.get(uniqueText);
-          if (allOrigIndices && allOrigIndices.length > 0) {
-            for (const origIdx of allOrigIndices) {
-              SK.injectTranslation(units[origIdx], sanitized, slotsList[origIdx]);
+        // v1.9.17: 首次 inject 等 idle gate(機制同 streaming path,見 content-ns.js
+        // SK.ensureFirstInjectIdle 註解)。本路徑是 non-streaming retry / fallback,
+        // 整批一次性 inject,只需在進入 forEach 前 await 一次 gate。
+        const performBatchInject = () => {
+          let injectedThisBatch = 0;
+          translations.forEach((tr, j) => {
+            const sanitized = SK.sanitizeMarkers(tr);
+            const uniqueText = job.texts[j];
+            const allOrigIndices = origIndicesByText.get(uniqueText);
+            if (allOrigIndices && allOrigIndices.length > 0) {
+              for (const origIdx of allOrigIndices) {
+                SK.injectTranslation(units[origIdx], sanitized, slotsList[origIdx]);
+                injectedThisBatch++;
+              }
+            } else {
+              // 防呆 fallback:dedup map 沒命中（理論上不會發生）→ 退回單次 inject
+              SK.injectTranslation(job.units[j], sanitized, job.slots[j]);
               injectedThisBatch++;
             }
-          } else {
-            // 防呆 fallback:dedup map 沒命中（理論上不會發生）→ 退回單次 inject
-            SK.injectTranslation(job.units[j], sanitized, job.slots[j]);
-            injectedThisBatch++;
-          }
-        });
-        done += injectedThisBatch;
-        if (onProgress) onProgress(done, total, hadAnyMismatch);
+          });
+          done += injectedThisBatch;
+          if (onProgress) onProgress(done, total, hadAnyMismatch);
+        };
+        if (SK._idleGateReached) {
+          performBatchInject();
+        } else {
+          await SK.ensureFirstInjectIdle();
+          performBatchInject();
+        }
       } catch (err) {
         const elapsed = Date.now() - t0;
         SK.sendLog('error', 'translate', `batch ${batchIdx + 1}/${jobs.length} FAILED`, { elapsed, start: job.start, error: err.message });
@@ -416,8 +478,11 @@
     // first_chunk / segment / done / error / aborted 訊息。回傳兩個 promise 讓主流程協調：
     //   firstChunkPromise：第一個 SSE chunk 抵達時 resolve（主流程在此時同步 dispatch batch 1+)
     //   donePromise:streaming 完整結束（成功/失敗/abort）時 resolve/reject
-    // 1.5 秒沒收到 first_chunk 視為 streaming 失敗，呼叫端 fallback 走 non-streaming runBatch。
-    const FIRST_CHUNK_TIMEOUT_MS = 1500;
+    // v1.9.21: timeout 從 1.5s → 3s。原 1.5s 來自 reports/streaming-probe Flash first_chunk
+    // 實測 936-991ms + 50% margin,但偶發網路 / API 高峰 / Pro 模型 TTFT 1-3s 容易誤判
+    // fallback(浪費已產生 token + 多等 ~1.5s)。3s 留 200% margin,真正卡死的 case 也只
+    // 多等 1.5s 才 fallback 接住,trade-off 划算。
+    const FIRST_CHUNK_TIMEOUT_MS = 3000;
     const runBatch0Streaming = (job) => {
       const streamId = `stream_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
       const t0 = Date.now();
@@ -435,6 +500,9 @@
 
       // v1.8.0 instrumentation：第一個 segment inject 時間（對應使用者首字延遲）
       let firstSegmentInjectedT = null;
+      // v1.9.29-DEV instrument(Finding 4 streaming inject 段拆解):量 firstChunk → first inject 2.5s gap 內部組成
+      let firstSegMsgLogged = false;
+      let idleGateInstrumented = false;
 
       // v1.8.0: abort 傳播 — 使用者按 Option+S 取消 → 通知 SW 中斷 streaming + 清理 listener
       const abortHandler = () => {
@@ -461,29 +529,55 @@
           firstChunkResolve(true);
         } else if (message.type === 'STREAMING_SEGMENT') {
           const idx = message.payload.segmentIdx;
+          // v1.9.29-DEV instrument: 量 STREAMING_SEGMENT 第一次抵達 cs 的時點(扣 stream start 起)
+          if (!firstSegMsgLogged) {
+            SK.sendLog('info', 'translate', 'milestone:stream_first_seg_msg', { streamId, idx, t: Date.now() - t0 });
+            firstSegMsgLogged = true;
+          }
           // v1.8.10 A:strip LLM 偷懶殘留的 SEP / «N» 標記
           const tr = SK.sanitizeMarkers(message.payload.translation);
           if (typeof idx === 'number' && idx >= 0 && idx < job.texts.length && tr) {
-            try {
-              // v1.8.39: dedup broadcast(streaming 路徑）— 同 text 翻譯結果 broadcast 到所有 dup unit
-              const uniqueText = job.texts[idx];
-              const allOrigIndices = origIndicesByText.get(uniqueText);
-              if (allOrigIndices && allOrigIndices.length > 0) {
-                for (const origIdx of allOrigIndices) {
-                  SK.injectTranslation(units[origIdx], tr, slotsList[origIdx]);
+            // v1.9.17: 首次 inject 等 framework hydration idle(idle gate 機制見
+            // content-ns.js SK.ensureFirstInjectIdle 註解)。idle reach 後直接通過,
+            // 後續 segments 不再等。translate API call 與 hydration 並行跑,通常
+            // API 比 hydration 慢 → 等 API 回來時 gate 早已 reach,wall-time 不變。
+            const performInject = () => {
+              try {
+                // v1.8.39: dedup broadcast(streaming 路徑）— 同 text 翻譯結果 broadcast 到所有 dup unit
+                const uniqueText = job.texts[idx];
+                const allOrigIndices = origIndicesByText.get(uniqueText);
+                if (allOrigIndices && allOrigIndices.length > 0) {
+                  for (const origIdx of allOrigIndices) {
+                    SK.injectTranslation(units[origIdx], tr, slotsList[origIdx]);
+                    done += 1;
+                  }
+                } else {
+                  SK.injectTranslation(job.units[idx], tr, job.slots[idx]);
                   done += 1;
                 }
-              } else {
-                SK.injectTranslation(job.units[idx], tr, job.slots[idx]);
-                done += 1;
+                if (onProgress) onProgress(done, total, hadAnyMismatch);
+                if (firstSegmentInjectedT === null) {
+                  firstSegmentInjectedT = Date.now() - t0;
+                  SK.sendLog('info', 'translate', `batch 1/${jobs.length} stream first segment injected`, { streamId, idx, t: firstSegmentInjectedT });
+                }
+              } catch (injectErr) {
+                SK.sendLog('warn', 'translate', 'streaming inject failed', { idx, error: injectErr.message });
               }
-              if (onProgress) onProgress(done, total, hadAnyMismatch);
-              if (firstSegmentInjectedT === null) {
-                firstSegmentInjectedT = Date.now() - t0;
-                SK.sendLog('info', 'translate', `batch 1/${jobs.length} stream first segment injected`, { streamId, idx, t: firstSegmentInjectedT });
-              }
-            } catch (injectErr) {
-              SK.sendLog('warn', 'translate', 'streaming inject failed', { idx, error: injectErr.message });
+            };
+            if (SK._idleGateReached) {
+              performInject();
+            } else if (!idleGateInstrumented) {
+              // v1.9.29-DEV instrument: idle gate 第一次啟動(setTimeout 1500ms 開始等)
+              idleGateInstrumented = true;
+              const gateStartT = Date.now() - t0;
+              SK.sendLog('info', 'translate', 'milestone:stream_idle_gate_start', { streamId, idx, t: gateStartT, waitMs: SK.FIRST_INJECT_HYDRATION_WAIT_MS });
+              SK.ensureFirstInjectIdle().then(() => {
+                SK.sendLog('info', 'translate', 'milestone:stream_idle_gate_resolved', { streamId, t: Date.now() - t0, dt: Date.now() - t0 - gateStartT });
+                performInject();
+              });
+            } else {
+              // idx > 0 共享同一條 gate promise,不重複 log
+              SK.ensureFirstInjectIdle().then(performInject);
             }
           }
         } else if (message.type === 'STREAMING_DONE') {
@@ -672,7 +766,7 @@
       const mobileUrl = getGoogleDocsMobileBasicUrl();
       if (mobileUrl) {
         SK.sendLog('info', 'translate', 'Google Docs detected, redirecting to mobilebasic', { mobileUrl });
-        SK.showToast('loading', '偵測到 Google Docs，正在開啟可翻譯的閱讀版⋯');
+        SK.showToast('loading', SK.t('toast.detectGoogleDocs'));
         SK.safeSendMessage({
           type: 'OPEN_GDOC_MOBILE',
           payload: { url: mobileUrl },
@@ -684,12 +778,12 @@
     if (STATE.translating) {
       SK.sendLog('info', 'translate', 'aborting in-progress translation');
       STATE.abortController?.abort();
-      SK.showToast('loading', '正在取消翻譯⋯');
+      SK.showToast('loading', SK.t('toast.cancelling'));
       return;
     }
 
     if (!navigator.onLine) {
-      SK.showToast('error', '目前處於離線狀態，無法翻譯。請確認網路連線後再試', { autoHideMs: 5000 });
+      SK.showToast('error', SK.t('toast.offline'), { autoHideMs: 5000 });
       return;
     }
 
@@ -708,29 +802,15 @@
       ? settings.targetLanguage : 'zh-TW';
     STATE.targetLanguage = TARGET;
 
-    // P1: 頁面層級「源語言已等於目標」偵測(原為「整頁繁中就跳過」,改成依 target 動態比對)。
-    // 設定 skipTraditionalChinesePage 沿用舊名,但實際語意是「整頁同 target 語言時跳過」。
-    {
-      const skipCheck = settings.skipTraditionalChinesePage === false;
-      if (!skipCheck) {
-        const contentRoot =
-          document.querySelector('article') ||
-          document.querySelector('main') ||
-          document.querySelector('[role="main"]') ||
-          document.body;
-        const pageSample = (contentRoot.innerText || '').slice(0, 2000);
-        if (pageSample.length > 20 && SK.isAlreadyInTarget(pageSample, TARGET)) {
-          // P1: toast 訊息依 target 給對應措辭(P1 暫不做完整 UI i18n)
-          const targetLabel = ({
-            'zh-TW': '繁體中文', 'zh-CN': '簡體中文', 'en': '英文',
-            'ja': '日文', 'ko': '韓文', 'es': '西班牙文', 'fr': '法文', 'de': '德文',
-          })[TARGET] || '繁體中文';
-          SK.showToast('error', `此頁面已是${targetLabel}，不需翻譯`, { autoHideMs: 3000 });
-          return;
-        }
-      }
-    }
-    SK.sendLog('info', 'translate', 'milestone:zh_check_done', { t: Date.now() - entryTime });
+    // v1.9.26:原「頁面層級整頁同 target skip」機制移除——`document.querySelector('article')`
+    // 第一個 sampling 在 SPA 多 article 站(X / Twitter)會被「先載入的繁中 article」或
+    // 「Shinkansen 上輪殘留譯文 DOM」誤導整頁 skip;且 X 自家繁中 UI 字串(「4 小時前」
+    // 等)混入 article container 會讓 detectTextLang trad 命中,簡中原文被誤判 zh-Hant
+    // fallback。整頁 skip 是早期 optimization,paragraph-level isCandidateText 已涵蓋
+    // 「逐段判 target lang 跳過」語意,移除整頁 skip 後 X 多 article SPA 場景簡中內容
+    // 可正常翻;對純繁中網頁 paragraph 全 skip 結果相同(只少跳一個 toast)。
+    // 對應移除:storage.skipTraditionalChinesePage / options.html#skipTraditionalChinesePage /
+    // options.js _renderLangDetectLabels / i18n options.langDetect.* + toast.alreadyInTarget。
 
     // v1.5.0: 讀顯示模式設定，寫進 STATE.translatedMode 鎖定本次翻譯用的模式。
     // 同一頁中途切模式不會即時生效（避免半翻半改），需重新觸發翻譯。
@@ -770,7 +850,7 @@
     const t_collect_start = Date.now();
     let units = SK.collectParagraphs();
     if (units.length === 0) {
-      SK.showToast('error', '找不到可翻譯的內容', { autoHideMs: 3000 });
+      SK.showToast('error', SK.t('toast.noContent'), { autoHideMs: 3000 });
       STATE.translating = false;
       STATE.abortController = null;
       return;
@@ -889,7 +969,7 @@
       // SK.getSubtitleBatchType 收斂單一資料源，術語表也對齊不重複 inline 三元式。
       const _glossaryMsgType = SK.getGlossaryExtractType(options?.engine);
       if (batchCount > blockingThreshold) {
-        SK.showToast('loading', '建立術語表⋯', { progress: 0, startTimer: true });
+        SK.showToast('loading', SK.t('toast.glossaryBuilding'), { progress: 0, startTimer: true });
         try {
           const glossaryResult = await Promise.race([
             SK.safeSendMessage({
@@ -929,10 +1009,14 @@
       }
     }
 
-    SK.showToast('loading', `${labelPrefix}翻譯中… 0 / ${total}`, {
+    SK.showToast('loading', SK.t('toast.translateProgress', { prefix: labelPrefix, done: 0, total }), {
       progress: 0,
       startTimer: true,
     });
+
+    // v1.9.28:onProgress race guard。await return / catch 後 set true,後續
+    // SW 殘留 STREAMING_PROGRESS message 觸發的 onProgress 不再蓋 success/error toast。
+    let _progressClosed = false;
 
     try {
       if (!glossary && STATE._glossaryPromise) {
@@ -954,30 +1038,43 @@
         engine: options.engine || 'gemini',
         // v1.8.8: 「翻譯剩餘段落」路徑要繞過 partialMode 的 skip batch 1+ 邏輯
         ignorePartialMode: !!options.ignorePartialMode,
-        onProgress: (d, t, mismatch) => SK.showToast('loading', `${labelPrefix}翻譯中… ${d} / ${t}`, {
-          progress: d / t,
-          mismatch: !!mismatch,
-        }),
+        onProgress: (d, t, mismatch) => {
+          if (_progressClosed) return;
+          SK.showToast('loading', SK.t('toast.translateProgress', { prefix: labelPrefix, done: d, total: t }), {
+            progress: d / t,
+            mismatch: !!mismatch,
+          });
+        },
       });
+      _progressClosed = true;
 
       if (abortSignal.aborted) {
         SK.sendLog('info', 'translate', 'translation aborted', { done, total });
         restoreOriginalHTMLAndReset();
-        SK.showToast('success', '已取消翻譯', { progress: 1, stopTimer: true, autoHideMs: 2000 });
+        SK.showToast('success', SK.t('toast.cancelled'), { progress: 1, stopTimer: true, autoHideMs: 2000 });
         return;
       }
 
       if (failures.length) {
         const failedSegs = failures.reduce((s, f) => s + f.count, 0);
         const firstErr = failures[0].error;
-        SK.showToast('error', `翻譯部分失敗：${failedSegs} / ${total} 段失敗`, {
+        SK.showToast('error', SK.t('toast.partialFailed', { failed: failedSegs, total }), {
           stopTimer: true,
           detail: firstErr.slice(0, 120),
         });
       }
 
       STATE.translated = true;
-      STATE.translatedBy = 'gemini';  // v1.4.0
+      // openai-compat 視為獨立 provider 記錄,避免 rescan / SPA nav 把它誤當 Gemini replay。
+      const _providerUsed = options.engine === 'openai-compat' ? 'openai-compat' : 'gemini';
+      STATE.translatedBy = _providerUsed;  // v1.4.0
+      // 把本次翻譯參數記下供 SPA observer rescan / 延遲 rescan / SPA nav replay 重放同引擎+模型+術語表。
+      STATE.translationContext = {
+        provider: _providerUsed,
+        engine: options.engine || null,
+        modelOverride: options.modelOverride || null,
+        glossary: glossary || null,
+      };
       STATE.stickyTranslate = true;
       STATE.stickySlot = options.slot ?? null;  // v1.4.12: 記錄 preset slot 供 SPA 續翻 + 跨 tab 繼承
       SK.safeSendMessage({ type: 'SET_BADGE_TRANSLATED' }).catch(() => {});
@@ -1088,7 +1185,7 @@
 
       if (rpdWarning) {
         setTimeout(() => {
-          SK.showToast('error', '提醒：今日 API 請求次數已超過預算上限', {
+          SK.showToast('error', SK.t('toast.budgetWarning'), {
             detail: '翻譯仍可正常使用，但請留意用量。每日計數於太平洋時間午夜重置（約台灣時間下午 3 點）',
             autoHideMs: 6000,
           });
@@ -1098,11 +1195,13 @@
       scheduleRescanForLateContent();
       SK.startSpaObserver();
     } catch (err) {
+      _progressClosed = true;
       SK.sendLog('error', 'translate', 'translatePage error', { error: err.message || String(err) });
       if (!abortSignal.aborted) {
-        SK.showToast('error', `翻譯失敗：${err.message}`, { stopTimer: true });
+        SK.showToast('error', SK.t('toast.translateFailed', { error: err.message }), { stopTimer: true });
       }
     } finally {
+      _progressClosed = true;
       STATE.translating = false;
       STATE.abortController = null;
     }
@@ -1120,16 +1219,21 @@
       STATE.originalHTML.forEach((originalHTML, el) => {
         if (!el.isConnected) { detached++; return; }
         // AMO source review: originalHTML 來自 STATE.originalHTML（本 extension 翻譯前用
-        // el.innerHTML 讀出來自存的原始 DOM 字串），純還原用，無 user input 流入。
+        // el.innerHTML 讀出來自存的原始 DOM 字串），純還原用,無 user input 流入。
         el.innerHTML = originalHTML;
         el.removeAttribute('data-shinkansen-translated');
+        SK.restoreLocaleStyling?.(el);
       });
       STATE.originalHTML.clear();
+      STATE.translatedHTML?.clear?.();
+      STATE.translatedHTMLByText?.clear?.();
       if (detached > 0) {
         SK.sendLog?.('warn', 'system', 'restoreOriginalHTMLAndReset: skipped detached elements', { detached });
       }
     }
     STATE.originalText?.clear?.();
+    STATE.originalLang?.clear?.();
+    STATE.originalFontFamily?.clear?.();
     STATE.translated = false;
   }
 
@@ -1150,8 +1254,27 @@
     // v1.8.14: dual 與 single 共用 originalHTML 還原迴圈（原本兩分支字字相同）。
     // dual 額外多一步：先移除 wrapper（同時清 data-shinkansen-dual-source attribute);
     // 之後共用 forEach 還原 dual fallback 元素 + single 全部元素。
-    if (STATE.translatedMode === 'dual') {
+    // v1.9.27: dual mode 或混合模式(single 全局 + framework-managed element 走 dual)
+    // 都要清掉所有 sibling wrapper。混合模式下 STATE.translationCache 有項即代表
+    // 有 dual wrapper 要清。
+    if (STATE.translatedMode === 'dual' || (STATE.translationCache && STATE.translationCache.size > 0)) {
       SK.removeDualWrappers?.();
+    }
+    // v1.9.27 Layer A1: 還原 nodeValue mutate 過的 text node。對 el 內存的每個
+    // {node, originalValue} 寫回 originalValue。
+    if (STATE.nodeValueMutateBackup && STATE.nodeValueMutateBackup.size > 0) {
+      STATE.nodeValueMutateBackup.forEach((backup, el) => {
+        backup.forEach(({ node, originalValue }) => {
+          if (node && node.isConnected) {
+            try { node.nodeValue = originalValue; } catch (_) {}
+          }
+        });
+        try {
+          el.removeAttribute('data-shinkansen-nodevalue-mutated');
+          SK.restoreLocaleStyling?.(el);
+        } catch (_) {}
+      });
+      STATE.nodeValueMutateBackup.clear();
     }
     // v1.8.20: 跳過已 detached 的元素（SPA framework 重建 DOM tree 後對舊 ref 寫入無效）,
     // 並 log 出來讓使用者知道原文未必能完整還原（這在 SPA 上是不可逆的）
@@ -1161,16 +1284,21 @@
       // AMO source review: originalHTML 來自 STATE.originalHTML（本 extension 自存的原文 DOM)，純還原用。
       el.innerHTML = originalHTML;
       el.removeAttribute('data-shinkansen-translated');
+      SK.restoreLocaleStyling?.(el);
     });
     if (restoreDetached > 0) {
       SK.sendLog?.('warn', 'system', 'restorePage: skipped detached elements (page may not fully restore)', { detached: restoreDetached });
     }
     STATE.originalHTML.clear();
     STATE.translatedHTML.clear();
+    STATE.translatedHTMLByText?.clear?.();
     STATE.originalText?.clear?.();
+    STATE.originalLang?.clear?.();
+    STATE.originalFontFamily?.clear?.();
     STATE.translationCache?.clear?.();  // v1.5.0
     STATE.translated = false;
     STATE.translatedBy = null;  // v1.4.0
+    STATE.translationContext = null;
     STATE.translatedMode = null;  // v1.5.0
     STATE.stickyTranslate = false;
     STATE.stickySlot = null;    // v1.4.12
@@ -1178,7 +1306,7 @@
     SK.safeSendMessage({ type: 'CLEAR_BADGE' }).catch(() => {});
     // v1.4.11: 清除跨 tab sticky（只影響當前 tab，不影響樹中其他 tab）
     SK.safeSendMessage({ type: 'STICKY_CLEAR' }).catch(() => {});
-    SK.showToast('success', '已還原原文', { progress: 1, autoHideMs: 2000 });
+    SK.showToast('success', SK.t('toast.restored'), { progress: 1, autoHideMs: 2000 });
   }
 
   // ─── v1.4.0: Google Translate 批次送出 ──────────────────────
@@ -1207,6 +1335,7 @@
 
     let done = 0;
     let totalChars = 0;
+    let totalCacheHits = 0;
     const failures = [];
 
     const jobs = packBatches(texts, units, slotsList, 20, 4000, SK.BATCH0_UNITS, SK.BATCH0_CHARS);
@@ -1223,7 +1352,13 @@
         }, BATCH_TIMEOUT_MS);
         if (!response?.ok) throw new Error(response?.error || '未知錯誤');
         totalChars += response.usage?.chars || 0;
+        totalCacheHits += response.usage?.cacheHits || 0;
         const translations = response.result;
+        // v1.9.17: 首次 inject 等 idle gate(機制同 streaming path,見 content-ns.js
+        // SK.ensureFirstInjectIdle 註解)。
+        if (!SK._idleGateReached) {
+          await SK.ensureFirstInjectIdle();
+        }
         translations.forEach((tr, j) => {
           const unit = job.units[j];
           if (!tr) return;
@@ -1252,9 +1387,54 @@
 
     SK.sendLog('info', 'translate', 'translateUnitsGoogle complete', {
       elapsed: Date.now() - t0All, done, total, failures: failures.length, chars: totalChars,
+      cacheHits: totalCacheHits,
     });
 
-    return { done, total, failures, chars: totalChars };
+    return { done, total, failures, chars: totalChars, cacheHits: totalCacheHits };
+  };
+
+  // ─── Provider-aware rescan / SPA replay router ──────────────────────
+  // rescanTick(content.js)/ spaObserverRescan(content-spa.js)/ SPA nav fallback 統一過這兩個 router,
+  // 依 STATE.translationContext 分流到首次翻譯時使用的 provider + 參數,
+  // 避免「首翻用 Google MT / openai-compat,rescan 卻 fallback 到預設 Gemini」這類 drift
+  // (對應 CLAUDE.md 全域 §5 單一資料源原則)。
+
+  // 增量翻譯路徑:回傳 { done, total, failures, pageUsage?, rpdWarning? }。
+  // v1.9.8: Google MT 路徑改回 pageUsage: { cacheHits },讓 pickRescanToast 能
+  // 正確判別「純 cache hit 應 silent」。先前回 null 讓 SPA rescan 每次撈 cache
+  // 都跳「已翻譯 N 段新內容」success toast,在 X / Threads 等不斷 lazy-load 的
+  // 站滑動時被使用者體感為「不斷彈 toast 干擾」。
+  SK.translateUnitsByProvider = async function translateUnitsByProvider(units, opts = {}) {
+    const ctx = STATE.translationContext;
+    if (!ctx) {
+      // 防禦性:理論上 rescan 一定在 translated=true 之後觸發,context 應已 set;
+      // 若意外無 context,fallback 走預設 Gemini path(舊行為)。
+      SK.sendLog?.('warn', 'translate', 'translateUnitsByProvider: no translationContext, fallback to default gemini');
+      return SK.translateUnits(units, opts);
+    }
+    if (ctx.provider === 'google') {
+      const r = await SK.translateUnitsGoogle(units, opts);
+      return { ...r, pageUsage: { cacheHits: r.cacheHits || 0 }, rpdWarning: null };
+    }
+    // gemini / openai-compat 共用 SK.translateUnits,以 engine 欄位區分。
+    return SK.translateUnits(units, {
+      ...opts,
+      engine: ctx.engine || undefined,
+      modelOverride: ctx.modelOverride || undefined,
+      glossary: ctx.glossary || undefined,
+    });
+  };
+
+  // SPA nav fallback(stickyTranslate=true 但 stickySlot=null)用:依首翻 provider 重新整頁翻譯。
+  // 主要 cover 走 Opt+G (Google MT 無 slot) 或 autoTranslate 舊路徑的 SPA 換頁情境。
+  SK.replayTranslateByProvider = function replayTranslateByProvider() {
+    const ctx = STATE.translationContext;
+    if (!ctx) return SK.translatePage();
+    if (ctx.provider === 'google') return SK.translatePageGoogle();
+    return SK.translatePage({
+      engine: ctx.engine || undefined,
+      modelOverride: ctx.modelOverride || undefined,
+    });
   };
 
   // ─── v1.4.0: Google Translate 翻譯整頁 ──────────────────────
@@ -1275,7 +1455,7 @@
     // 若正在翻譯中（任何引擎）→ 中止
     if (STATE.translating) {
       STATE.abortController?.abort();
-      SK.showToast('loading', '正在取消翻譯⋯');
+      SK.showToast('loading', SK.t('toast.cancelling'));
       return;
     }
 
@@ -1285,7 +1465,7 @@
     }
 
     if (!navigator.onLine) {
-      SK.showToast('error', '目前處於離線狀態，無法翻譯。請確認網路連線後再試', { autoHideMs: 5000 });
+      SK.showToast('error', SK.t('toast.offline'), { autoHideMs: 5000 });
       return;
     }
 
@@ -1296,26 +1476,7 @@
     const TARGET = (typeof settings.targetLanguage === 'string' && ['zh-TW','zh-CN','en','ja','ko','es','fr','de'].includes(settings.targetLanguage))
       ? settings.targetLanguage : 'zh-TW';
     STATE.targetLanguage = TARGET;
-    // P1: 頁面層級「源語言已等於目標」偵測,target-aware
-    {
-      const skipCheck = settings.skipTraditionalChinesePage === false;
-      if (!skipCheck) {
-        const contentRoot =
-          document.querySelector('article') ||
-          document.querySelector('main') ||
-          document.querySelector('[role="main"]') ||
-          document.body;
-        const pageSample = (contentRoot.innerText || '').slice(0, 2000);
-        if (pageSample.length > 20 && SK.isAlreadyInTarget(pageSample, TARGET)) {
-          const targetLabel = ({
-            'zh-TW': '繁體中文', 'zh-CN': '簡體中文', 'en': '英文',
-            'ja': '日文', 'ko': '韓文', 'es': '西班牙文', 'fr': '法文', 'de': '德文',
-          })[TARGET] || '繁體中文';
-          SK.showToast('error', `此頁面已是${targetLabel}，不需翻譯`, { autoHideMs: 3000 });
-          return;
-        }
-      }
-    }
+    // v1.9.26:整頁同 target skip 移除(同 Gemini 路徑,見上方註解)
 
     // v1.5.0: 顯示模式（與 Gemini 路徑相同邏輯）
     {
@@ -1335,7 +1496,7 @@
 
     let units = SK.collectParagraphs();
     if (units.length === 0) {
-      SK.showToast('error', '找不到可翻譯的內容', { autoHideMs: 3000 });
+      SK.showToast('error', SK.t('toast.noContent'), { autoHideMs: 3000 });
       STATE.translating = false;
       STATE.abortController = null;
       return;
@@ -1367,25 +1528,32 @@
     }
     const total = units.length;
 
-    SK.showToast('loading', `${labelPrefix}Google 翻譯中… 0 / ${total}`, { progress: 0, startTimer: true });
+    SK.showToast('loading', SK.t('toast.translateProgressGoogle', { prefix: labelPrefix, done: 0, total }), { progress: 0, startTimer: true });
+
+    // v1.9.28:onProgress race guard,同 translatePage 修法
+    let _progressClosed = false;
 
     try {
       const { done, failures, chars } = await SK.translateUnitsGoogle(units, {
         signal: abortSignal,
-        onProgress: (d, t) => SK.showToast('loading', `${labelPrefix}Google 翻譯中… ${d} / ${t}`, {
-          progress: d / t,
-        }),
+        onProgress: (d, t) => {
+          if (_progressClosed) return;
+          SK.showToast('loading', SK.t('toast.translateProgressGoogle', { prefix: labelPrefix, done: d, total: t }), {
+            progress: d / t,
+          });
+        },
       });
+      _progressClosed = true;
 
       if (abortSignal.aborted) {
         restoreOriginalHTMLAndReset();
-        SK.showToast('success', '已取消翻譯', { progress: 1, stopTimer: true, autoHideMs: 2000 });
+        SK.showToast('success', SK.t('toast.cancelled'), { progress: 1, stopTimer: true, autoHideMs: 2000 });
         return;
       }
 
       if (failures.length) {
         const failedSegs = failures.reduce((s, f) => s + f.count, 0);
-        SK.showToast('error', `翻譯部分失敗：${failedSegs} / ${total} 段失敗`, {
+        SK.showToast('error', SK.t('toast.partialFailed', { failed: failedSegs, total }), {
           stopTimer: true,
           detail: failures[0].error.slice(0, 120),
         });
@@ -1393,6 +1561,8 @@
 
       STATE.translated = true;
       STATE.translatedBy = 'google';  // v1.4.0
+      // 同 Gemini 路徑記錄 provider context 供 rescan / SPA nav replay。Google MT 無 model / glossary 參數。
+      STATE.translationContext = { provider: 'google' };
       STATE.stickyTranslate = true;
       STATE.stickySlot = gtOptions.slot ?? null;  // v1.4.12
       SK.safeSendMessage({ type: 'SET_BADGE_TRANSLATED' }).catch(() => {});
@@ -1426,11 +1596,13 @@
       scheduleRescanForLateContent();
       SK.startSpaObserver();
     } catch (err) {
+      _progressClosed = true;
       SK.sendLog('error', 'translate', 'translatePageGoogle error', { error: err.message || String(err) });
       if (!abortSignal.aborted) {
-        SK.showToast('error', `翻譯失敗：${err.message}`, { stopTimer: true });
+        SK.showToast('error', SK.t('toast.translateFailed', { error: err.message }), { stopTimer: true });
       }
     } finally {
+      _progressClosed = true;
       STATE.translating = false;
       STATE.abortController = null;
     }
@@ -1482,7 +1654,7 @@
     if (STATE.translating) {
       SK.sendLog('info', 'translate', 'aborting in-progress translation (preset key)');
       STATE.abortController?.abort();
-      SK.showToast('loading', '正在取消翻譯⋯');
+      SK.showToast('loading', SK.t('toast.cancelling'));
       return;
     }
     // 閒置：讀 preset 定義。若 storage 還沒寫入（例如從 v1.4.11 升級第一次按快捷鍵）
@@ -1522,10 +1694,6 @@
       handleTranslatePreset(2);
       return;
     }
-    if (msg?.type === 'TOGGLE_YT_BORDERLESS') {
-      SK.YT?.Borderless?.toggle();
-      return;
-    }
     if (msg?.type === 'TOGGLE_EDIT_MODE') {
       sendResponse(toggleEditMode());
       return true;
@@ -1556,7 +1724,7 @@
       const mode = msg.mode === 'dual' ? 'dual' : 'single';
       if (STATE.translated) {
         const desc = mode === 'dual' ? '雙語對照' : '單語覆蓋';
-        SK.showToast('success', `顯示模式已切換為「${desc}」，請按快速鍵重新翻譯以套用`, {
+        SK.showToast('success', SK.t('toast.modeChanged', { desc }), {
           autoHideMs: 5000,
         });
       }
