@@ -2,6 +2,11 @@
 <html lang="zh-Hant">
 <head>
   <meta charset="UTF-8">
+  <!-- iOS Safari 以一般分頁開啟 options 頁，沒有 viewport meta 時 WebKit 用
+       ~980px 桌面虛擬 viewport，720px container 整頁等比縮小到不可讀（v1.10.22
+       popup 已加，options 漏了）。桌面瀏覽器分頁一律忽略 viewport meta，加了
+       無副作用。窄版排版調整見 options.css 末段 media query -->
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Shinkansen 設定</title>
   <link rel="stylesheet" href="options.css">
 </head>
@@ -11,7 +16,7 @@
 
   <div class="container">
     <h1><img src="../icons/icon-128.png" alt="" class="page-title-icon">Shinkansen</h1>
-    <p class="muted" data-i18n-html="options.intro.html"><a href="https://jimmysu0309.github.io/shinkansen/" target="_blank" rel="noopener">專案主頁</a>，功能介紹與使用說明請參考 <a href="https://github.com/jimmysu0309/shinkansen#readme" target="_blank" rel="noopener">README</a> · <a href="https://jimmysu0309.github.io/shinkansen/release-notes.html" target="_blank" rel="noopener">更新紀錄</a></p>
+    <p class="muted" data-i18n-html="options.intro.html"><a href="https://jimmysu0309.github.io/shinkansen/" target="_blank" rel="noopener">專案主頁</a>，功能介紹與使用說明請參考 <a href="https://github.com/jimmysu0309/shinkansen#readme" target="_blank" rel="noopener">README</a> · <a href="https://jimmysu0309.github.io/shinkansen/release-notes.html" target="_blank" rel="noopener">更新紀錄</a> · <span id="options-version" class="options-version"></span></p>
 
     <!-- v0.86: Tab 切換列 -->
     <nav class="tab-bar">
@@ -75,12 +80,66 @@
       </label>
     </section>
 
+    <!-- 送到 Instapaper：把翻譯後的整頁存進使用者自己的 Instapaper 帳號 -->
+    <section id="instapaper-section">
+      <h2 data-i18n="options.instapaper.heading">Instapaper</h2>
+      <label class="toggle">
+        <input type="checkbox" id="instapaperEnabled">
+        <span data-i18n="options.instapaper.enable">啟用「送到 Instapaper」</span>
+        <small class="muted" data-i18n="options.instapaper.enableHint">啟用後，工具列視窗會出現「送到 Instapaper」按鈕，也可用快速鍵 Alt+I，把目前（翻譯後）的整頁存到你的 Instapaper</small>
+      </label>
+      <label class="toggle">
+        <input type="checkbox" id="instapaperSummaryEnabled">
+        <span data-i18n="options.instapaper.summary">送出時附上文章摘要</span>
+        <small class="muted" data-i18n="options.instapaper.summaryHint">摘要會顯示在 Instapaper 項目底下，使用你的翻譯目標語言，固定以最便宜的 Gemini Flash Lite 產生（需要有效的 Gemini API Key）。每次送出會多一筆極小的用量；沒有 Gemini Key 或摘要失敗時自動略過，書籤照常送出</small>
+      </label>
+
+      <!-- 未連結：email + 密碼 + 連結按鈕 -->
+      <div id="instapaper-link-form">
+        <label>
+          <span data-i18n="options.instapaper.emailLabel">Instapaper 帳號 Email</span>
+          <input type="email" id="instapaper-email" autocomplete="username" data-i18n-attr-placeholder="options.instapaper.emailPlaceholder" placeholder="you@example.com">
+        </label>
+        <label>
+          <span data-i18n="options.instapaper.passwordLabel">Instapaper 密碼</span>
+          <div class="api-key-row">
+            <input type="password" id="instapaper-password" autocomplete="current-password" data-i18n-attr-placeholder="options.instapaper.passwordPlaceholder" placeholder="輸入密碼以連結帳號">
+            <button type="button" id="instapaper-connect" class="ghost-btn" data-i18n="options.instapaper.connect">連結</button>
+          </div>
+          <div id="instapaper-connect-result" class="api-test-result" hidden></div>
+        </label>
+        <small class="muted" data-i18n="options.instapaper.desc">透過 Instapaper Full API（xAuth）連結。密碼只用於換取一組存取權杖，用完即丟、不會儲存；權杖僅存在本機 chrome.storage.sync，內容只在你主動觸發時送往 Instapaper 自有端點。沒有設定 Instapaper 密碼的帳號，可在 Instapaper 設定頁先設一組</small>
+      </div>
+
+      <!-- 已連結：顯示帳號 + 解除連結 -->
+      <div id="instapaper-linked" hidden>
+        <p class="muted instapaper-linked-line">
+          <span data-i18n="options.instapaper.linkedPrefix">已連結：</span>
+          <strong id="instapaper-linked-user"></strong>
+          <button type="button" id="instapaper-unlink" class="ghost-btn" data-i18n="options.instapaper.unlink">解除連結</button>
+        </p>
+      </div>
+    </section>
+
     <section>
       <h2 data-i18n="options.preset.heading">翻譯快速鍵</h2>
-      <p class="muted" data-i18n-html="options.preset.intro.html">
-        三組可自訂的翻譯預設,對應三個快速鍵。依網頁內容選擇不同引擎或模型（例如文學性強用最強模型、一般網頁用最省錢）。
-        已翻譯狀態下按任一快速鍵都會還原原文;翻譯中按任一快速鍵則取消翻譯。
-        鍵位可至 <a href="#" id="open-shortcuts" class="open-shortcuts-link">chrome://extensions/shortcuts</a> 變更
+      <!-- 桌面 Chrome / Firefox 版說明（⌥ Option 或 ⌃ Control）。CSS 依 body.runtime-* 顯示 -->
+      <p class="muted intro-desktop" data-i18n-html="options.preset.intro.html">
+        三組可自訂的翻譯預設，對應三組快速鍵。依網頁內容選擇不同引擎或模型（例如文學性強用最強模型、一般網頁用最省錢）。
+        點各組右上方欄位後直接按下想要的組合鍵即可自訂（需包含 <strong>⌥ Option</strong> 或 <strong>⌃ Control</strong>，按 <strong>ESC</strong> 取消）；內建預設鍵仍然有效。
+        已翻譯狀態下按任一快速鍵都會還原原文；翻譯中按任一快速鍵則取消翻譯。
+        鍵位也可至 <a href="#" id="open-shortcuts" class="open-shortcuts-link">chrome://extensions/shortcuts</a> 變更
+      </p>
+      <!-- Safari（Mac / iPad / iPhone）版說明（只能用 ⌃ Control）。body.runtime-safari 才顯示 -->
+      <p class="muted intro-safari" data-i18n-html="options.preset.introSafari.html">
+        三組可自訂的翻譯預設，對應三組快速鍵。依網頁內容選擇不同引擎或模型（例如文學性強用最強模型、一般網頁用最省錢）。
+        點各組右上方欄位後直接按下想要的組合鍵即可自訂（需用 <strong>⌃ Control</strong>，按 <strong>ESC</strong> 取消）；內建預設鍵仍然有效。
+        已翻譯狀態下按任一快速鍵都會還原原文；翻譯中按任一快速鍵則取消翻譯
+      </p>
+      <!-- iOS / iPadOS 專屬說明（SPEC-PRIVATE §26）：預設隱藏，body.runtime-ios 才顯示 -->
+      <p class="muted ios-only" data-i18n-html="options.preset.introIos.html">
+        <strong>iOS／iPadOS</strong>：網頁上以四指輕點即可翻譯（等同主要預設），再次輕點還原原文或取消翻譯；
+        接上實體鍵盤時，上列快速鍵照常可用
       </p>
       <!-- v1.8.44 Firefox 警告 -->
       <small id="shortcut-firefox-warn" class="muted firefox-https-warn" hidden data-i18n-html="options.preset.firefoxWarn.html">
@@ -93,7 +152,10 @@
         <div class="preset-card preset-card-primary" data-slot="2">
           <div class="preset-card-header">
             <strong data-i18n="options.preset.primary">主要預設</strong>
-            <span class="preset-key" id="preset-key-2" data-i18n="options.preset.unset">—</span>
+            <div class="shortcut-controls">
+              <button type="button" class="shortcut-recorder" id="sc-2"></button>
+              <button type="button" class="shortcut-clear" id="sc-clear-2" data-i18n-attr-title="options.preset.restoreDefault" title="還原預設">✕</button>
+            </div>
           </div>
           <label>
             <span data-i18n="options.preset.label">標籤</span>
@@ -120,7 +182,10 @@
         <div class="preset-card" data-slot="1">
           <div class="preset-card-header">
             <strong data-i18n="options.preset.slot2">預設 2</strong>
-            <span class="preset-key" id="preset-key-1" data-i18n="options.preset.unset">—</span>
+            <div class="shortcut-controls">
+              <button type="button" class="shortcut-recorder" id="sc-1"></button>
+              <button type="button" class="shortcut-clear" id="sc-clear-1" data-i18n-attr-title="options.preset.restoreDefault" title="還原預設">✕</button>
+            </div>
           </div>
           <label>
             <span data-i18n="options.preset.label">標籤</span>
@@ -147,7 +212,10 @@
         <div class="preset-card" data-slot="3">
           <div class="preset-card-header">
             <strong data-i18n="options.preset.slot3">預設 3</strong>
-            <span class="preset-key" id="preset-key-3" data-i18n="options.preset.unset">—</span>
+            <div class="shortcut-controls">
+              <button type="button" class="shortcut-recorder" id="sc-3"></button>
+              <button type="button" class="shortcut-clear" id="sc-clear-3" data-i18n-attr-title="options.preset.restoreDefault" title="還原預設">✕</button>
+            </div>
           </div>
           <label>
             <span data-i18n="options.preset.label">標籤</span>
@@ -171,11 +239,12 @@
           </label>
         </div>
       </div>
+      <div id="shortcut-hint"></div>
     </section>
 
     <section>
       <h2 data-i18n="options.popupBtn.heading">工具列「翻譯本頁」按鈕</h2>
-      <p class="hint" data-i18n="options.popupBtn.intro">點擊瀏覽器工具列上的 Shinkansen 圖示後，跳出視窗中「翻譯本頁」按鈕要使用哪一組設定（與翻譯快速鍵共用三組預設）</p>
+      <p class="muted" data-i18n="options.popupBtn.intro">點擊瀏覽器工具列上的 Shinkansen 圖示後，跳出視窗中「翻譯本頁」按鈕要使用哪一組設定（與翻譯快速鍵共用三組預設）</p>
       <label class="popup-button-slot-label">
         <span data-i18n="options.popupBtn.label">對應的翻譯預設</span>
         <!-- 注意:option text 由 refreshSlotDropdownLabels() 動態管理(prefix + 使用者
@@ -275,12 +344,46 @@
           <option value="top-left" data-i18n="options.toast.posTL">左上角</option>
         </select>
       </label>
-      <label>
+      <label class="opacity-row">
         <!-- v1.8.61:純動態 i18n label(原本寫死繁中沒掛 data-i18n,en/zh-CN UI 漏翻)。
              由 options.js _renderToastOpacityLabel 在 init / slider input / UI 語系切換時設整段字串。 -->
         <span id="toastOpacityLabelWrap">通知透明度 70%</span>
         <input type="range" id="toastOpacity" min="10" max="100" step="10" value="70">
+        <div class="opacity-demo" id="toastOpacityDemo" aria-hidden="true">
+          <span class="toast-demo-box">
+            <span class="toast-demo-line"></span>
+            <span class="toast-demo-bar"></span>
+          </span>
+        </div>
         <small class="muted" data-i18n="options.toast.opacityHint">如果覺得太搶眼，可以往左拉降低不透明度，讓通知變淡一點</small>
+      </label>
+    </section>
+
+    <section>
+      <h2 data-i18n="options.floating.heading">懸浮翻譯按鈕</h2>
+      <p class="muted" data-i18n="options.floating.intro">在頁面邊緣顯示一顆可拖移的圓形按鈕，短按用預設翻譯、長按選三組預設，可拖到左右任一邊吸附</p>
+      <label class="toggle">
+        <input type="checkbox" id="floatingIcon">
+        <span data-i18n="options.floating.enable">顯示懸浮翻譯按鈕</span>
+        <small class="muted" data-i18n="options.floating.enableHint">手機 / 平板預設開啟、桌面瀏覽器預設關閉；短按等同工具列「翻譯本頁」按鈕的預設</small>
+      </label>
+      <label class="opacity-row">
+        <span id="floatingOpacityLabelWrap">按鈕透明度 70%</span>
+        <input type="range" id="floatingIconOpacity" min="10" max="100" step="10" value="70">
+        <div class="opacity-demo" id="floatingOpacityDemo" aria-hidden="true">
+          <img src="../icons/icon-48.png" alt="" width="16" height="16">
+        </div>
+        <small class="muted" data-i18n="options.floating.opacityHint">覺得太搶眼可以往左拉降低不透明度，讓按鈕變淡一點</small>
+      </label>
+    </section>
+
+    <!-- 四指觸控翻譯：iOS / iPadOS only，由 options.js 依 IS_IOS_BUILD 控制 hidden -->
+    <section id="four-finger-section" hidden>
+      <h2 data-i18n="options.fourFinger.heading">四指觸控翻譯</h2>
+      <p class="muted" data-i18n="options.fourFinger.intro">在手機 / 平板用四隻手指輕點頁面即翻譯、四指長按用次要預設；關閉後仍可用硬體鍵盤快速鍵與懸浮按鈕</p>
+      <label class="toggle">
+        <input type="checkbox" id="fourFingerGesture" checked>
+        <span data-i18n="options.fourFinger.enable">啟用四指觸控手勢</span>
       </label>
     </section>
 
@@ -409,7 +512,7 @@
         <small class="muted" data-i18n="options.gemini.params.tempHint">控制回覆的隨機程度。數字越低翻譯越穩定一致，越高則越有創意但可能偏離原意，範圍 0–2，預設 1.0（Gemini 3 Flash 原廠預設值）</small>
       </label>
       <details class="advanced-details">
-        <summary data-i18n="options.gemini.params.advSummary">進階設定（Service Tier、Top P、Top K、Max Output Tokens）</summary>
+        <summary data-i18n="options.gemini.params.advSummary">進階設定（Service Tier、Max Output Tokens）</summary>
         <label>
           <span data-i18n="options.gemini.params.tierLabel">服務層級（Service Tier）— 影響費用與延遲</span>
           <select id="serviceTier">
@@ -419,16 +522,6 @@
             <option value="PRIORITY" data-i18n="options.gemini.params.tierPriority">Priority（優先，更貴）</option>
           </select>
           <small class="muted" data-i18n="options.gemini.params.tierHint">注意：Service Tier 僅較新模型支援（如 gemini-3-flash-preview），舊模型請用「預設」避免錯誤</small>
-        </label>
-        <label>
-          Top P
-          <input type="number" id="topP" step="0.05" min="0" max="1">
-          <small class="muted" data-i18n="options.gemini.params.topPHint">限制模型從機率最高的幾個候選詞中挑選。數字越低結果越集中，越高則用詞越多樣，範圍 0–1，預設 0.95</small>
-        </label>
-        <label>
-          Top K
-          <input type="number" id="topK" step="1" min="1" max="100">
-          <small class="muted" data-i18n="options.gemini.params.topKHint">限制每次選詞時最多考慮幾個候選詞。數字越小越精準，越大越多樣，範圍 1–100，預設 40（Gemini 3 Flash 原廠預設值，Pro 系列為 64）</small>
         </label>
         <label>
           Max Output Tokens
@@ -717,7 +810,7 @@
       </label>
 
       <details>
-        <summary class="muted" style="font-size: 13px; cursor: pointer; margin-top: 8px;" data-i18n="options.cp.advSummary">進階：思考強度 / 段序號 / 自訂 body</summary>
+        <summary class="muted" style="font-size: 13px; cursor: pointer; margin-top: 8px;" data-i18n="options.cp.advSummary">進階：思考強度 / 段序號 / 逾時 / 自訂 body</summary>
 
         <label>
           <span data-i18n="options.cp.thinkingLabel">思考強度</span>
@@ -754,12 +847,18 @@
           <span data-i18n="options.cp.extraBodyLabel">自訂 request body 額外參數（JSON，覆蓋上方思考強度）</span>
           <textarea id="cp-extra-body-json" rows="4" placeholder='e.g. {"reasoning":{"max_tokens":4000},"top_k":40}' style="font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;"></textarea>
           <small class="muted" data-i18n-html="options.cp.extraBodyHint.html">
-            內容會深層 merge 進 chat.completions request body，可用來：
+            內容會深層合併進 chat.completions request body，可用來：
             （1）強制覆蓋上方「思考強度」自動產生的設定；
             （2）加 provider 專屬參數（例如 OpenRouter 的 <code>top_k</code> / <code>min_p</code>、
             Anthropic 的 <code>metadata</code>）。
             格式錯誤會在 Debug 分頁 log 一條 warn 並忽略，翻譯不會中斷
           </small>
+        </label>
+
+        <label style="margin-top: 8px;">
+          <span data-i18n="options.cp.timeoutLabel">API 逾時時間（秒）</span>
+          <input type="number" id="cp-fetchTimeout" step="1" min="5" max="600" placeholder="15">
+          <small class="muted" data-i18n="options.cp.timeoutHint">每次 API 請求等待回應的最長時間。本機 LLM（Ollama 等）冷啟動載入模型可能需要 120-300 秒，請視硬體調高；商用 API 通常不需更改</small>
         </label>
       </details>
     </section>
@@ -801,9 +900,10 @@
     <section>
       <h2 data-i18n="options.forbidden.heading">禁用詞清單</h2>
       <p class="muted" data-i18n="options.forbidden.intro">
-        針對 AI 模型容易漏網的禁用辭彙自訂禁用對照表。內容會以高顯著性區塊
-        注入翻譯引擎的翻譯 Prompt 末端，明確要求譯文不可使用左欄詞彙、
-        必須改用右欄。修改清單後會自動讓既有翻譯快取分區，不再命中舊譯文
+        自訂不希望出現在譯文中的詞彙清單。內容會以高顯著性區塊注入翻譯引擎的
+        翻譯 Prompt 末端，要求譯文不可使用「禁用詞」欄的詞彙。「替換詞」可留空：
+        填了就要求改用指定詞，留空時則由 AI 自行改寫成自然的台灣慣用說法。
+        修改清單後會自動讓既有翻譯快取分區，不再命中舊譯文
       </p>
       <div class="glossary-table-wrapper">
         <table class="glossary-edit-table" id="forbidden-terms-table">
@@ -1144,6 +1244,10 @@
 
   <script src="../lib/vendor/chart.min.js"></script>
   <script src="../lib/i18n.js"></script>
+  <script src="../lib/shortcut-utils.js"></script>
+  <!-- instapaper-keys.js（gitignored，consumer 金鑰）：classic script 早於 options.js
+       module 執行，把金鑰掛上 globalThis.__SK；fresh clone 無此檔時 404 無害，功能停用 -->
+  <script src="../lib/instapaper-keys.js"></script>
   <script type="module" src="options.js"></script>
 </body>
 </html>

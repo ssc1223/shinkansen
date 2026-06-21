@@ -10,6 +10,10 @@
   const STATE = SK.STATE;
 
   // ─── v0.88: Debug Bridge ──────────────────────────────
+  // 已知限制（刻意不修）：response 的 object detail 在 Firefox main world 讀屬性
+  // 會 throw Permission denied（Xray 安全模型，同 content-youtube.js bridgeRequest
+  // 註解）→ Firefox 上 Debug Bridge 回讀不可用。消費者（cage / debug-harness /
+  // CLAUDE.md 文件片段）全是 Chromium-only tooling，改 JSON 字串反而破既有讀法。
   window.addEventListener('shinkansen-debug-request', (e) => {
     const { action, afterSeq } = (e.detail || {});
     const respond = (detail) => {
@@ -56,7 +60,7 @@
       const info = SK._spaDebug ? SK._spaDebug() : null;
       respond({ ok: true, spa: info });
     } else if (action === 'RESTORE') {
-      if (STATE.translated) {
+      if (SK.isPageTranslated()) {
         restorePage();
         respond({ ok: true, restored: true });
       } else {
@@ -74,7 +78,8 @@
       // YT 頁多附 yt 子物件(精簡版供「一鍵全看」),完整 raw / captionMap 內容仍走 GET_YT_DEBUG
       const out = {
         ok: true,
-        translated: STATE.translated,
+        translated: STATE.translated,             // 記憶體 raw flag(供 drift 偵測對照)
+        pageTranslated: SK.isPageTranslated?.(),   // v1.10.57: DOM 裁決源(單一真相)
         translating: STATE.translating,
         segmentCount: STATE.originalHTML.size,
       };
@@ -95,9 +100,21 @@
       // Debug Bridge:暴露 storage.sync 設定供除錯讀取
       // (Chrome for Claude / 主世界 javascript_tool 拿不到 chrome.storage,需 isolated 端橋接)
       const keys = (e.detail && e.detail.keys) || null;  // null = 全部 key
-      browser.storage.sync.get(keys)
-        .then((data) => respond({ ok: true, sync: data }))
-        .catch((err) => respond({ ok: false, error: err?.message || String(err) }));
+      const _storage = (typeof browser !== 'undefined' && browser.storage) || (typeof chrome !== 'undefined' && chrome.storage);
+      if (!_storage || !_storage.sync) {
+        respond({ ok: false, error: 'storage.sync unavailable in this context' });
+      } else {
+        _storage.sync.get(keys)
+          .then((data) => respond({ ok: true, sync: data }))
+          .catch((err) => respond({ ok: false, error: err?.message || String(err) }));
+      }
+    } else if (action === 'GET_USAGE_STATS') {
+      // DEBUG(v1.10.18.x):用量統計查詢。usage-db 在背景(extension origin)的 IndexedDB,
+      // content script / cage 都讀不到,故中繼給 background 的 QUERY_USAGE_STATS。
+      // detail.from / detail.to 為 ms epoch 時間範圍(省略 = 全部)。回傳 stats 含
+      // totalInputTokens / totalOutputTokens / totalBilledInputTokens / totalBilledCostUSD
+      // / byModel——對帳 Google 帳單 + 看有沒有套 cache 折扣(input vs billedInput 差)用。
+      forwardToBackground('QUERY_USAGE_STATS', { from: e.detail?.from, to: e.detail?.to });
     } else if (action === 'YT_TRANSLATE') {
       // Debug Bridge:觸發 YouTube 字幕翻譯(等同 Alt+S 在 YT 頁的行為)
       if (!SK.isYouTubePage?.()) {
@@ -162,6 +179,29 @@
   let rescanAttempts = 0;
   let rescanTimer = null;
 
+  // v1.10.46(批次 2-4):rescan 注入路徑的 abort 訊號。
+  // rescanTick(本檔)/ spaObserverRescan(content-spa.js)呼叫 translateUnitsByProvider
+  // 原本不帶 signal → translateUnits 的注入前 `signal?.aborted` guard 全是 undefined
+  // 放行——使用者還原頁面後,晚到的 rescan 批次仍把譯文注回乾淨頁面(DOM 帶
+  // data-shinkansen-translated 但 STATE.translated=false 的殭屍狀態)。
+  // 這顆 controller 由 translateUnitsByProvider 統一掛上(呼叫端沒自帶 signal 時),
+  // restorePage / restoreOriginalHTMLAndReset / resetForSpaNavigation 時 abort。
+  let rescanAbortController = null;
+
+  SK.getRescanSignal = function getRescanSignal() {
+    if (!rescanAbortController || rescanAbortController.signal.aborted) {
+      rescanAbortController = new AbortController();
+    }
+    return rescanAbortController.signal;
+  };
+
+  SK.abortRescanRuns = function abortRescanRuns() {
+    if (rescanAbortController) {
+      rescanAbortController.abort();
+      rescanAbortController = null;
+    }
+  };
+
   SK.cancelRescan = function cancelRescan() {
     if (rescanTimer) {
       clearTimeout(rescanTimer);
@@ -183,7 +223,10 @@
       SK.sendLog('info', 'translate', 'partialMode: skip rescan');
       return;
     }
-    const newUnits = SK.collectParagraphs();
+    let newUnits = SK.collectParagraphs();
+    if (STATE.translatedMode === 'dual' && SK.consolidateDualInlineUnits) {
+      newUnits = SK.consolidateDualInlineUnits(newUnits);
+    }
     if (newUnits.length > 0) {
       try {
         const { done, failures } = await SK.translateUnitsByProvider(newUnits);
@@ -215,7 +258,7 @@
     let timer;
     const timeoutPromise = new Promise((_, reject) => {
       timer = setTimeout(
-        () => reject(new Error(`批次逾時（${timeoutMs / 1000}s）`)),
+        () => reject(new Error(SK.t('error.batchTimeout', { s: timeoutMs / 1000 }))),
         timeoutMs,
       );
     });
@@ -223,7 +266,10 @@
       .finally(() => clearTimeout(timer));
   }
 
-  async function runWithConcurrency(jobs, maxConcurrent, workerFn) {
+  // v1.10.46(批次 2-4):改收 signal 參數,不再讀全域 STATE.abortController——
+  // 全域那顆只屬於「當前主翻譯 run」,rescan run 讀它等於跨輪耦合(主 run 結束後
+  // 為 null,rescan 永遠不會停;新主 run 開跑時 rescan 又誤讀新輪的 controller)。
+  async function runWithConcurrency(jobs, maxConcurrent, workerFn, signal) {
     const n = Math.min(maxConcurrent, jobs.length);
     if (n === 0) return;
     let cursor = 0;
@@ -232,7 +278,7 @@
       workers.push((async () => {
         // eslint-disable-next-line no-constant-condition
         while (true) {
-          if (STATE.abortController?.signal.aborted) return;
+          if (signal?.aborted) return;
           const idx = cursor++;
           if (idx >= jobs.length) return;
           await workerFn(jobs[idx]);
@@ -292,9 +338,8 @@
   // ─── translateUnits ──────────────────────────────────
 
   SK.translateUnits = async function translateUnits(units, { onProgress, glossary, signal, modelOverride, engine, ignorePartialMode } = {}) {
-    const total = units.length;
     const tu_entry = Date.now();
-    const serialized = units.map(unit => {
+    let serialized = units.map(unit => {
       if (unit.kind === 'fragment') {
         return SK.serializeFragmentWithPlaceholders(unit);
       }
@@ -307,6 +352,29 @@
       }
       return SK.serializeWithPlaceholders(el);
     });
+    // ─── 空字串 unit 防護（v1.10.50，協定層通則）──────────────
+    // 候選元素序列化後可能是空字串（典型：textContent 全來自 HARD_EXCLUDE 子樹的
+    // <li><script>，isCandidateText 看 textContent 通過、serializer 卻全數排除）。
+    // 空段送 LLM 沒有任何可譯內容，模型會自由發揮編出無關長文注入回頁面，且
+    // cache key = sha1('') 是固定值，幻覺譯文會跨頁汙染所有空段。一律送 API 前
+    // 丟棄：不送、不注入、不標 translated（元素維持原樣）。
+    // 本 guard 驗「協定層不送空 payload」這一層；偵測端另有 hardExcludeInflated
+    // REJECT（content-detect.js）在收集時就擋，雙層各自獨立（工作流原則 §3）。
+    {
+      const _preFilter = units.length;
+      const _kept = [];
+      for (let i = 0; i < serialized.length; i++) {
+        if ((serialized[i].text || '').trim()) _kept.push(i);
+      }
+      if (_kept.length < _preFilter) {
+        units = _kept.map(i => units[i]);
+        serialized = _kept.map(i => serialized[i]);
+        SK.sendLog('warn', 'translate', 'empty-text units dropped before API', {
+          dropped: _preFilter - _kept.length, kept: _kept.length,
+        });
+      }
+    }
+    const total = units.length;
     const texts = serialized.map(s => s.text);
     const slotsList = serialized.map(s => s.slots);
     SK.sendLog('info', 'translate', 'milestone:tu_serialize_done', { t: Date.now() - tu_entry, units: total });
@@ -422,7 +490,7 @@
         const cacheHit = response?.usage?.cacheHits || 0;
         const apiCalls = job.texts.length - cacheHit;
         SK.sendLog('info', 'translate', `batch ${batchIdx + 1}/${jobs.length} done`, { elapsed, cacheHits: cacheHit, apiCalls });
-        if (!response?.ok) throw new Error(response?.error || '未知錯誤');
+        if (!response?.ok) throw new Error(SK.i18n.bgErrorMessage(response) || SK.t('common.errorUnknown'));
         const translations = response.result;
         if (response.usage) {
           pageUsage.inputTokens += response.usage.inputTokens || 0;
@@ -442,14 +510,37 @@
         // SK.ensureFirstInjectIdle 註解)。本路徑是 non-streaming retry / fallback,
         // 整批一次性 inject,只需在進入 forEach 前 await 一次 gate。
         const performBatchInject = () => {
+          // v1.10.20: 取消已立即還原原文，晚到的批次回應不得再注入（會把譯文注回乾淨頁面）
+          if (signal?.aborted) return;
           let injectedThisBatch = 0;
+          // v1.10.46: 同輪同 el 去重——收集層若混入「同 el 雙 unit」(補抓 pass 漏
+          // seen.add / fragment+element 雙收),broadcast 會對同 el 注入兩次,第二次
+          // _preText 已是譯文 → echo 判定誤判 → 沖回原文。規則:
+          //   element unit:同 el 已注入過(element 或 fragment)→ skip
+          //   fragment unit:同 el 已整顆 element 注入過 → skip;
+          //                  其他 fragment 注入過不擋(同 el 多 run 是合法的)
+          const injectedEls = new Set();          // element unit 注入過的 el
+          const fragmentInjectedEls = new Set();  // fragment unit 注入過的容器 el
+          const shouldSkipDupInject = (u) => {
+            if (!u?.el) return false;
+            if (u.kind === 'element') {
+              if (injectedEls.has(u.el) || fragmentInjectedEls.has(u.el)) return true;
+              injectedEls.add(u.el);
+            } else if (u.kind === 'fragment') {
+              if (injectedEls.has(u.el)) return true;
+              fragmentInjectedEls.add(u.el);
+            }
+            return false;
+          };
           translations.forEach((tr, j) => {
             const sanitized = SK.sanitizeMarkers(tr);
             const uniqueText = job.texts[j];
             const allOrigIndices = origIndicesByText.get(uniqueText);
             if (allOrigIndices && allOrigIndices.length > 0) {
               for (const origIdx of allOrigIndices) {
-                SK.injectTranslation(units[origIdx], sanitized, slotsList[origIdx]);
+                const u = units[origIdx];
+                if (shouldSkipDupInject(u)) { injectedThisBatch++; continue; }  // 跳過注入但計入進度
+                SK.injectTranslation(u, sanitized, slotsList[origIdx]);
                 injectedThisBatch++;
               }
             } else {
@@ -498,6 +589,29 @@
       // 不影響真正在某處 await + try/catch 接到 reject 的路徑。
       donePromise.catch(() => {});
 
+      // v1.10.53: streaming idle watchdog —— 網頁路徑補上 YT _runBatch0Streaming 同款守衛
+      // (v1.10.46 只加在字幕路徑,網頁主翻譯路徑漏掉,正是 Christie's 拍品專文「最後一段
+      // 無法結束」的成因之一)。first_chunk 之後 `await stream.donePromise` 沒有任何 timeout:
+      // Gemini 中途 stall(flash-lite 在長 segment runaway / 靜默)或 SW 中途死亡時,
+      // STREAMING_DONE / ERROR 永不到 → donePromise 永久 pending → 整頁卡在「翻譯中」結束不了。
+      // 每收到本 stream 任何訊息重置計時;逾時 → 通知 SW abort(止血 + 省 token)+ reject
+      // donePromise 讓呼叫端走既有 mid-failure non-streaming fallback。
+      // 20s:健康串流 chunk 間距 < 1s,20s 無動靜視為卡死。SK._streamIdleTimeoutMs 為
+      // regression spec 縮短逾時的 override seam(與 YT 共用同一 seam)。
+      const STREAM_IDLE_TIMEOUT_MS = 20000;
+      let _idleTimer = null;
+      const _resetIdleWatchdog = () => {
+        clearTimeout(_idleTimer);
+        _idleTimer = setTimeout(() => {
+          try { browser.runtime.onMessage.removeListener(onMessage); } catch (_) {}
+          SK.sendLog('warn', 'translate', `batch 1/${jobs.length} streaming idle watchdog fired (stall / SW dead mid-stream?)`, { streamId });
+          SK.safeSendMessage({ type: 'STREAMING_ABORT', payload: { streamId } }).catch(() => {});
+          firstChunkResolve(false);
+          doneReject(new Error('streaming idle timeout'));
+        }, SK._streamIdleTimeoutMs || STREAM_IDLE_TIMEOUT_MS);
+      };
+      const _clearIdleWatchdog = () => { clearTimeout(_idleTimer); _idleTimer = null; };
+
       // v1.8.0 instrumentation：第一個 segment inject 時間（對應使用者首字延遲）
       let firstSegmentInjectedT = null;
       // v1.9.29-DEV instrument(Finding 4 streaming inject 段拆解):量 firstChunk → first inject 2.5s gap 內部組成
@@ -507,6 +621,7 @@
       // v1.8.0: abort 傳播 — 使用者按 Option+S 取消 → 通知 SW 中斷 streaming + 清理 listener
       const abortHandler = () => {
         SK.sendLog('info', 'translate', `batch 1/${jobs.length} stream abort triggered`, { streamId });
+        _clearIdleWatchdog();
         SK.safeSendMessage({ type: 'STREAMING_ABORT', payload: { streamId } }).catch(() => {});
         // 解開 main 流程的 await(SW 端會回傳 STREAMING_ABORTED 但本地 listener 已移除，
         // 為防卡死直接在這裡 resolve)
@@ -516,15 +631,19 @@
       };
       if (signal) {
         if (signal.aborted) {
-          // 進入 streaming 之前就已 aborted，直接走 abort path
+          // 進入 streaming 之前就已 aborted，直接走 abort path。
+          // v1.10.20: 並且 early return 不 dispatch——原本沒 return 會照樣往下送
+          // TRANSLATE_BATCH_STREAM，SW 端白跑一整個 batch 0 的 LLM 請求
+          // （取消當下落在 pre-try await 區間時就會踩到，真實環境白花 token）。
           abortHandler();
-        } else {
-          signal.addEventListener('abort', abortHandler, { once: true });
+          return { firstChunkOrTimeout: Promise.resolve({ kind: 'failed' }), donePromise, streamId, cleanup: () => {} };
         }
+        signal.addEventListener('abort', abortHandler, { once: true });
       }
 
       const onMessage = (message) => {
         if (!message || message.payload?.streamId !== streamId) return;
+        _resetIdleWatchdog(); // 本 stream 有任何動靜 = SW 還活著、串流還在進
         if (message.type === 'STREAMING_FIRST_CHUNK') {
           firstChunkResolve(true);
         } else if (message.type === 'STREAMING_SEGMENT') {
@@ -542,13 +661,31 @@
             // 後續 segments 不再等。translate API call 與 hydration 並行跑,通常
             // API 比 hydration 慢 → 等 API 回來時 gate 早已 reach,wall-time 不變。
             const performInject = () => {
+              // v1.10.20: abort 後 listener 已移除，但 idle gate 排隊中的 .then(performInject)
+              // 仍可能在「取消已立即還原」之後才執行——注入前再檢查一次
+              if (signal?.aborted) return;
               try {
                 // v1.8.39: dedup broadcast(streaming 路徑）— 同 text 翻譯結果 broadcast 到所有 dup unit
                 const uniqueText = job.texts[idx];
                 const allOrigIndices = origIndicesByText.get(uniqueText);
                 if (allOrigIndices && allOrigIndices.length > 0) {
+                  // v1.10.46: 同 segment broadcast 範圍內同 el 去重(規則同非 streaming
+                  // 路徑 shouldSkipDupInject——同 el 注入兩次會被 echo 判定沖回原文;
+                  // fragment 同 el 多 run 合法不擋,element vs fragment 互斥)
+                  const injectedEls = new Set();
+                  const fragmentInjectedEls = new Set();
                   for (const origIdx of allOrigIndices) {
-                    SK.injectTranslation(units[origIdx], tr, slotsList[origIdx]);
+                    const u = units[origIdx];
+                    if (u?.el) {
+                      if (u.kind === 'element') {
+                        if (injectedEls.has(u.el) || fragmentInjectedEls.has(u.el)) { done += 1; continue; }
+                        injectedEls.add(u.el);
+                      } else if (u.kind === 'fragment') {
+                        if (injectedEls.has(u.el)) { done += 1; continue; }
+                        fragmentInjectedEls.add(u.el);
+                      }
+                    }
+                    SK.injectTranslation(u, tr, slotsList[origIdx]);
                     done += 1;
                   }
                 } else {
@@ -591,6 +728,7 @@
           // segment 0 可能已被 streaming 注入合併譯文（A 已 sanitize),retry 會用乾淨版本覆蓋。
           if (message.payload.hadMismatch) {
             SK.sendLog('warn', 'translate', `batch 1/${jobs.length} stream DONE with hadMismatch, triggering retry`, { elapsed, totalSegments: message.payload.totalSegments });
+            _clearIdleWatchdog();
             browser.runtime.onMessage.removeListener(onMessage);
             firstChunkResolve(true);
             doneReject(new Error('streaming hadMismatch'));
@@ -606,23 +744,27 @@
           // 純 cache hit,SPA rescan toast 一律跳「已翻 N 段新內容」誤導使用者以為又花了 token。
           pageUsage.cacheHits += usage.cacheHits || 0;
           SK.sendLog('info', 'translate', `batch 1/${jobs.length} stream done`, { elapsed, totalSegments: message.payload.totalSegments, hadMismatch: false });
+          _clearIdleWatchdog();
           browser.runtime.onMessage.removeListener(onMessage);
           firstChunkResolve(true);  // 防 first_chunk 漏訊息卡死主流程
           doneResolve({ ok: true });
         } else if (message.type === 'STREAMING_ERROR') {
           const elapsed = Date.now() - t0;
           SK.sendLog('error', 'translate', `batch 1/${jobs.length} stream FAILED`, { elapsed, error: message.payload.error });
+          _clearIdleWatchdog();
           browser.runtime.onMessage.removeListener(onMessage);
           firstChunkResolve(false);
-          doneReject(new Error(message.payload.error || 'streaming failed'));
+          doneReject(new Error(SK.i18n.bgErrorMessage(message.payload) || 'streaming failed'));
         } else if (message.type === 'STREAMING_ABORTED') {
           SK.sendLog('info', 'translate', `batch 1/${jobs.length} stream aborted`, { streamId });
+          _clearIdleWatchdog();
           browser.runtime.onMessage.removeListener(onMessage);
           firstChunkResolve(false);
           doneResolve({ ok: false, aborted: true });
         }
       };
       browser.runtime.onMessage.addListener(onMessage);
+      _resetIdleWatchdog(); // listener 掛上即開始計時(涵蓋 first_chunk 已到但 SEGMENT 永不到的情境)
 
       // 觸發 streaming(SW 內 fire-and-forget,sendMessage 立刻 resolve)
       SK.safeSendMessage({
@@ -630,11 +772,13 @@
         payload: { texts: job.texts, glossary: glossary || null, modelOverride: modelOverride || null, streamId },
       }).then((resp) => {
         if (!resp?.started) {
+          _clearIdleWatchdog();
           browser.runtime.onMessage.removeListener(onMessage);
           firstChunkResolve(false);
           doneReject(new Error(resp?.error || 'streaming failed to start'));
         }
       }).catch((err) => {
+        _clearIdleWatchdog();
         browser.runtime.onMessage.removeListener(onMessage);
         firstChunkResolve(false);
         doneReject(err);
@@ -646,7 +790,7 @@
         new Promise((r) => setTimeout(() => r({ kind: 'timeout' }), FIRST_CHUNK_TIMEOUT_MS)),
       ]);
 
-      return { firstChunkOrTimeout, donePromise, streamId, cleanup: () => { try { browser.runtime.onMessage.removeListener(onMessage); } catch (_) {} } };
+      return { firstChunkOrTimeout, donePromise, streamId, cleanup: () => { _clearIdleWatchdog(); try { browser.runtime.onMessage.removeListener(onMessage); } catch (_) {} } };
     };
 
     // v1.8.0: streaming 適用範圍——僅 Gemini 文章翻譯路徑。OpenAI-compat / 其他 engine 仍走 v1.7.x 序列 batch 0 路徑。
@@ -673,7 +817,7 @@
           const willParallel = jobs.length > 1 && !signal?.aborted && !skipBatch1Plus;
           SK.sendLog('info', 'translate', 'parallel batches dispatch decision', { willParallel, count: willParallel ? jobs.length - 1 : 0 });
           const parallelP = willParallel
-            ? runWithConcurrency(jobs.slice(1), maxConcurrent, runBatch)
+            ? runWithConcurrency(jobs.slice(1), maxConcurrent, runBatch, signal)
             : Promise.resolve();
           try {
             await stream.donePromise;
@@ -703,7 +847,7 @@
         // v1.7.1 行為：序列跑 batch 0 → 並行 batch 1+(partialMode 啟用時跳過 batch 1+)
         await runBatch(jobs[0]);
         if (jobs.length > 1 && !signal?.aborted && !skipBatch1Plus) {
-          await runWithConcurrency(jobs.slice(1), maxConcurrent, runBatch);
+          await runWithConcurrency(jobs.slice(1), maxConcurrent, runBatch, signal);
         }
       }
     }
@@ -776,16 +920,31 @@
     }
 
     if (STATE.translating) {
-      SK.sendLog('info', 'translate', 'aborting in-progress translation');
-      STATE.abortController?.abort();
-      SK.showToast('loading', SK.t('toast.cancelling'));
-      return;
+      // v1.10.20: controller 未 aborted 才是真正「翻譯中」→ 取消。
+      // 已 aborted = 上一輪取消還在等 in-flight 批次收尾（unwind 中），此時使用者
+      // 再按 = 想重新翻譯 → 放行往下開新一輪（identity-guarded releaseRunState
+      // 確保舊輪收尾不會清掉新一輪的 state，舊輪注入已被自己的 signal guard 擋住）。
+      // 否則快速反復按會卡死在「每按都跳已取消、永遠不能重翻」。
+      if (STATE.abortController && !STATE.abortController.signal.aborted) {
+        abortInProgressTranslation();
+        return;
+      }
     }
 
     if (!navigator.onLine) {
       SK.showToast('error', SK.t('toast.offline'), { autoHideMs: 5000 });
       return;
     }
+
+    // v1.10.20: run state（translating + abortController）必須在第一個 await 之前
+    // 同步設定——否則兩次快速按鍵會雙雙通過上方 translating 檢查，spawn 兩條並行
+    // 翻譯（zombie run：取消只 abort 最後寫入 STATE 的 controller，另一條殺不掉，
+    // 且多條 run 的 finally 互踩共用 state）。實測 probe：rapid toggle 下卡死。
+    STATE.translating = true;
+    const myAbortController = new AbortController();
+    STATE.abortController = myAbortController;
+    const abortSignal = myAbortController.signal;
+    SK.safeSendMessage({ type: 'SET_BADGE_TRANSLATED' }).catch(() => {});
 
     // v1.7.x instrumentation: 用 entryTime 量化 translatePage 各階段相對時間
     const entryTime = Date.now();
@@ -832,7 +991,7 @@
     // (background.js 每天 fetch 一次寫進去），失敗則用 fallback 31.6。
     {
       const currency = settings.displayCurrency === 'USD' ? 'USD' : 'TWD';
-      let rate = 31.6;
+      let rate = window.__SKFormat.FALLBACK_USD_TWD_RATE;
       try {
         const { exchangeRate } = await browser.storage.local.get('exchangeRate');
         if (exchangeRate && Number.isFinite(exchangeRate.rate) && exchangeRate.rate > 0) {
@@ -842,20 +1001,23 @@
       SK.currencyState = { currency, rate };
     }
 
-    STATE.translating = true;
-    STATE.abortController = new AbortController();
     const translateStartTime = Date.now();
-    const abortSignal = STATE.abortController.signal;
 
     const t_collect_start = Date.now();
     let units = SK.collectParagraphs();
     if (units.length === 0) {
       SK.showToast('error', SK.t('toast.noContent'), { autoHideMs: 3000 });
-      STATE.translating = false;
-      STATE.abortController = null;
+      releaseRunState(myAbortController);
       return;
     }
     SK.sendLog('info', 'translate', 'milestone:collect_done', { t: Date.now() - entryTime, dt: Date.now() - t_collect_start, segments: units.length });
+
+    // dual mode:把共用同一 block ancestor 的 inline element unit 合併成一個
+    // element unit(用 block ancestor 當 el),讓 LLM 拿到完整上下文、inject 只
+    // 產一個 wrapper。single mode 逐 SPAN nodeValue mutate 不碎片,不需合併。
+    if (STATE.translatedMode === 'dual' && SK.consolidateDualInlineUnits) {
+      units = SK.consolidateDualInlineUnits(units);
+    }
 
     // v1.8.6: partialMode 啟用時跳過 prioritizeUnits，走純 DOM 順序。
     // 為什麼：partialMode 對使用者語意是「翻頁面 DOM 前 N 段」（視覺上連續中文，
@@ -927,7 +1089,8 @@
 
     const t_preser_start = Date.now();
     const preSerialized = units.map(unit => {
-      if (unit.kind === 'fragment') return { text: (unit.parent?.innerText || '').trim() };
+      // v1.10.46: fragment unit 沒有 parent 欄位,讀 unit.el(之前 unit.parent 永遠
+      // undefined → fragment 估 0 字,批次數估算失真)
       return { text: (unit.el?.innerText || '').trim() };
     });
     const preTexts = preSerialized.map(s => s.text);
@@ -1049,9 +1212,20 @@
       _progressClosed = true;
 
       if (abortSignal.aborted) {
-        SK.sendLog('info', 'translate', 'translation aborted', { done, total });
-        restoreOriginalHTMLAndReset();
-        SK.showToast('success', SK.t('toast.cancelled'), { progress: 1, stopTimer: true, autoHideMs: 2000 });
+        const restoredEarly = _earlyRestoredAborts.has(myAbortController);
+        // v1.10.46: identity guard——SPA 導航 reset 會 abort 舊輪並清掉（或換掉）
+        // STATE.abortController；舊輪 in-flight 批次最長 90s 後才 settle 回來,此時
+        // STATE.originalHTML 裡已是新頁備份,無條件還原會把新頁譯文整批沖回原文
+        // + 跳莫名「已取消」toast。只有「STATE.abortController 還是自己這輪的
+        // controller」（= abort 來源沒接手頁面 state）才允許 unwind 還原。
+        const stillOwnsRun = STATE.abortController === myAbortController;
+        SK.sendLog('info', 'translate', 'translation aborted', { done, total, restoredEarly, stillOwnsRun });
+        // v1.10.20: 快速鍵取消已在按下當下立即還原 + 跳「已取消」toast
+        // (abortInProgressTranslation)，unwind 只收尾不重複。
+        if (!restoredEarly && stillOwnsRun) {
+          restoreOriginalHTMLAndReset();
+          SK.showToast('success', SK.t('toast.cancelled'), { progress: 1, stopTimer: true, autoHideMs: 2000 });
+        }
         return;
       }
 
@@ -1077,7 +1251,6 @@
       };
       STATE.stickyTranslate = true;
       STATE.stickySlot = options.slot ?? null;  // v1.4.12: 記錄 preset slot 供 SPA 續翻 + 跨 tab 繼承
-      SK.safeSendMessage({ type: 'SET_BADGE_TRANSLATED' }).catch(() => {});
       // v1.4.11 跨 tab sticky（v1.4.12 改存 preset slot）：opener 鏈中新開的 tab 繼承同 slot
       if (options.slot != null) {
         SK.safeSendMessage({ type: 'STICKY_SET', payload: { slot: options.slot } }).catch(() => {});
@@ -1088,11 +1261,11 @@
         // v1.8.7: partialMode + 有剩餘未翻段落 → 訊息對齊「節省模式」語意
         let successMsg;
         if (pmActive && pmSkippedCount > 0) {
-          successMsg = `已翻譯前 ${total} 段（共 ${total + pmSkippedCount} 段）`;
+          successMsg = SK.t('toast.donePartial', { total, all: total + pmSkippedCount });
         } else if (truncatedCount > 0) {
-          successMsg = `翻譯完成 （${total} 段，另有 ${truncatedCount} 段因頁面過長被略過）`;
+          successMsg = SK.t('toast.doneTruncated', { total, truncated: truncatedCount });
         } else {
-          successMsg = `翻譯完成 （${total} 段）`;
+          successMsg = SK.t('toast.done', { total });
         }
         let detail;
         if (totalTokens > 0) {
@@ -1109,7 +1282,7 @@
           }
           detail = `${line1}\n${line2}`;
         } else if (pageUsage.cacheHits === total) {
-          detail = '全部快取命中 · 本次未計費';
+          detail = SK.t('toast.allCacheHit');
         }
         SK.sendLog('info', 'translate', 'page translation usage', {
           segments: total,
@@ -1133,7 +1306,7 @@
         // 點按 → 觸發 ignorePartialMode 路徑（忽略 toggle 一次，但不改 toggle 設定）,
         // 前面已翻好的 N 段從 cache fast path 命中，只後段打 API。toast 常駐直到使用者點按或關閉。
         const action = (pmActive && pmSkippedCount > 0) ? {
-          label: '翻譯剩餘段落',
+          label: SK.t('toast.translateRemaining'),
           onClick: () => {
             SK.translatePage({
               ...options,
@@ -1186,7 +1359,7 @@
       if (rpdWarning) {
         setTimeout(() => {
           SK.showToast('error', SK.t('toast.budgetWarning'), {
-            detail: '翻譯仍可正常使用，但請留意用量。每日計數於太平洋時間午夜重置（約台灣時間下午 3 點）',
+            detail: SK.t('toast.budgetWarningDetail'),
             autoHideMs: 6000,
           });
         }, 1500);
@@ -1202,8 +1375,7 @@
       }
     } finally {
       _progressClosed = true;
-      STATE.translating = false;
-      STATE.abortController = null;
+      releaseRunState(myAbortController);
     }
   };
 
@@ -1212,6 +1384,8 @@
   // SPA reset(content-spa.js:resetForSpaNavigation）語意不同（頁面已變不需還原
   // 舊頁 innerHTML)，不抽進這條 helper。
   function restoreOriginalHTMLAndReset() {
+    // v1.10.46(批次 2-4):還原時 abort in-flight 的 rescan 批次(同 restorePage)
+    SK.abortRescanRuns();
     if (STATE.originalHTML.size > 0) {
       // v1.8.20: SPA framework rerender 後 el 可能已 detached，直接寫 innerHTML 不會報錯
       // 但對使用者頁面零作用。記下 detached 數量讓 Jimmy 從 Debug 分頁能看出原因。
@@ -1235,13 +1409,72 @@
     STATE.originalLang?.clear?.();
     STATE.originalFontFamily?.clear?.();
     STATE.translated = false;
+    // v1.10.20: 翻譯開始時就會點亮 icon badge（SET_BADGE_TRANSLATED），
+    // abort 取消後頁面已還原為原文，badge 必須跟著清，否則紅點殘留
+    // （popup 顯示「就緒」但 icon 仍顯示翻譯中）。restorePage 路徑本就有清，
+    // 這條 abort 共用 helper 先前漏掉。
+    SK.safeSendMessage({ type: 'CLEAR_BADGE' }).catch(() => {});
+  }
+
+  // v1.10.20: 快速鍵取消翻譯改為「按下當下立即還原原文」，不等 in-flight 批次 unwind。
+  // 原行為：取消分支只 abort() + 跳「取消中」toast，真正還原要等主流程
+  // `await translateUnits` 自己 unwind 回來（非 streaming 批次沒有網路層取消機制，
+  // 大批次 + 慢模型可能等數秒～十幾秒），與使用者「按了就該馬上恢復原文」的期待不符。
+  // 三個取消入口（translatePage / translatePageGoogle / handleTranslatePreset）共用本 helper。
+  // 配套：三條注入路徑（Gemini performBatchInject / Google forEach / streaming performInject）
+  // 注入前都檢查 signal.aborted，擋掉「還原後晚到的批次回應把譯文注回乾淨頁面」。
+  // _earlyRestoredAborts 讓主流程 unwind 後的 abort 分支知道「已還原 + 已跳 toast」不重複做。
+  // 用 per-controller WeakSet 而非 boolean flag：取消後使用者可立刻開新一輪
+  // （舊輪還在 unwind），boolean 會被錯的 run 消費；WeakSet 各輪認自己的 controller。
+  const _earlyRestoredAborts = new WeakSet();
+
+  function abortInProgressTranslation() {
+    SK.sendLog('info', 'translate', 'aborting in-progress translation (immediate restore)');
+    const ac = STATE.abortController;
+    if (ac) {
+      _earlyRestoredAborts.add(ac);
+      ac.abort();
+    }
+    restoreOriginalHTMLAndReset();
+    SK.showToast('success', SK.t('toast.cancelled'), { progress: 1, stopTimer: true, autoHideMs: 2000 });
+  }
+
+  // v1.10.20: run state 釋放走 identity guard——只有「STATE.abortController 還是
+  // 自己這輪的 controller」才能清 translating / abortController。取消後使用者立刻
+  // 開新一輪時，舊輪的 finally / 早退路徑不得踩掉新一輪的 state。
+  function releaseRunState(myAC) {
+    if (STATE.abortController === myAC) {
+      STATE.translating = false;
+      STATE.abortController = null;
+    }
   }
 
   // ─── restorePage ─────────────────────────────────────
 
   function restorePage() {
+    // v1.10.57: 殭屍頁保底 —— DOM 有 marker 但所有還原資料 Map 已空,代表頁面顯示著
+    // 我們已無素材還原的孤兒譯文(Part B 後 SPA nav 不該再產生此狀態,留作其他未知路徑的
+    // belt-and-suspenders)。innerHTML 還原無素材可用,唯一乾淨回到原文的方式是重載頁面。
+    const _noRestoreData = STATE.originalHTML.size === 0
+      && (!STATE.translationCache || STATE.translationCache.size === 0)
+      && (!STATE.nodeValueMutateBackup || STATE.nodeValueMutateBackup.size === 0);
+    if (_noRestoreData && SK.isPageTranslated()) {
+      SK.sendLog?.('warn', 'system', 'restorePage: markers present but no restore data, reloading to original');
+      // reload 前先清 marker,避免重載前的瞬間 isPageTranslated 仍判為已翻譯
+      document.querySelectorAll('[data-shinkansen-translated], [data-shinkansen-nodevalue-mutated]')
+        .forEach((el) => {
+          el.removeAttribute('data-shinkansen-translated');
+          el.removeAttribute('data-shinkansen-nodevalue-mutated');
+        });
+      STATE.translated = false;
+      SK.safeSendMessage({ type: 'CLEAR_BADGE' }).catch(() => {});
+      location.reload();
+      return;
+    }
     if (editModeActive) toggleEditMode(false);
     SK.cancelRescan();
+    // v1.10.46(批次 2-4):還原時 abort in-flight 的 rescan 批次,擋掉晚到回應再注入
+    SK.abortRescanRuns();
     SK.stopSpaObserver();
 
     // v1.5.0: dual 模式還原——只移除 wrapper，原文未動所以不需 innerHTML 還原。
@@ -1350,7 +1583,7 @@
           type: 'TRANSLATE_BATCH_GOOGLE',
           payload: { texts: job.texts },
         }, BATCH_TIMEOUT_MS);
-        if (!response?.ok) throw new Error(response?.error || '未知錯誤');
+        if (!response?.ok) throw new Error(SK.i18n.bgErrorMessage(response) || SK.t('common.errorUnknown'));
         totalChars += response.usage?.chars || 0;
         totalCacheHits += response.usage?.cacheHits || 0;
         const translations = response.result;
@@ -1359,14 +1592,24 @@
         if (!SK._idleGateReached) {
           await SK.ensureFirstInjectIdle();
         }
+        // v1.10.20: 取消已立即還原原文，晚到的批次回應不得再注入（同 Gemini 路徑）
+        if (signal?.aborted) return;
         translations.forEach((tr, j) => {
           const unit = job.units[j];
           if (!tr) return;
           const slots = job.slots[j];
           // 【N】/【/N】/【*N】 換回 ⟦N⟧/⟦/N⟧/⟦*N⟧，走現有 deserializeWithPlaceholders
-          const restored = slots?.length
+          let restored = slots?.length
             ? SK.restoreGoogleTranslateMarkers(tr)
             : tr;
+          // CJK↔slot 空格補齊:Google MT 翻成 CJK 時常吃掉 marker 前後空格,
+          // 導致譯文跟 URL/mention 視覺黏在一起(「傳聞如下https://…透過@user」)。
+          // 只對 opening ⟦N⟧ / ⟦*N⟧ 前(CJK→slot 邊界)和
+          // closing ⟦/N⟧ / atomic ⟦*N⟧ 後(slot→CJK 邊界)補空格;
+          // 不動 ⟦N⟧ 後(slot 內容起始)與 ⟦/N⟧ 前(slot 內容結尾)。
+          if (slots?.length && SK.ensureCJKSlotSpacing) {
+            restored = SK.ensureCJKSlotSpacing(restored);
+          }
           SK.injectTranslation(unit, restored, slots || []);
         });
         done += job.texts.length;
@@ -1381,7 +1624,7 @@
     if (jobs.length > 0) {
       await runBatch(jobs[0]);
       if (jobs.length > 1 && !signal?.aborted) {
-        await runWithConcurrency(jobs.slice(1), 5, runBatch);
+        await runWithConcurrency(jobs.slice(1), 5, runBatch, signal);
       }
     }
 
@@ -1405,6 +1648,11 @@
   // 都跳「已翻譯 N 段新內容」success toast,在 X / Threads 等不斷 lazy-load 的
   // 站滑動時被使用者體感為「不斷彈 toast 干擾」。
   SK.translateUnitsByProvider = async function translateUnitsByProvider(units, opts = {}) {
+    // v1.10.46(批次 2-4):rescan 呼叫端(rescanTick / spaObserverRescan / SPA nav
+    // fallback)都不自帶 signal——統一在這個 router 掛 rescan AbortController,
+    // restorePage / SPA reset abort 它之後,晚到批次的注入前 `signal?.aborted` guard
+    // 才真的擋得住(原本 signal=undefined 全放行,還原後零星段落又變回譯文)。
+    if (!opts.signal) opts = { ...opts, signal: SK.getRescanSignal() };
     const ctx = STATE.translationContext;
     if (!ctx) {
       // 防禦性:理論上 rescan 一定在 translated=true 之後觸發,context 應已 set;
@@ -1452,11 +1700,13 @@
       STATE.translated = false;
     }
 
-    // 若正在翻譯中（任何引擎）→ 中止
+    // 若正在翻譯中（任何引擎）→ 中止（立即還原原文，不等 in-flight 批次）
+    // v1.10.20: controller 已 aborted = 上一輪取消收尾中 → 放行開新一輪（同 Gemini 路徑）
     if (STATE.translating) {
-      STATE.abortController?.abort();
-      SK.showToast('loading', SK.t('toast.cancelling'));
-      return;
+      if (STATE.abortController && !STATE.abortController.signal.aborted) {
+        abortInProgressTranslation();
+        return;
+      }
     }
 
     // 若 Gemini 翻譯已完成 → 先還原，再用 Google 翻
@@ -1468,6 +1718,13 @@
       SK.showToast('error', SK.t('toast.offline'), { autoHideMs: 5000 });
       return;
     }
+
+    // v1.10.20: run state 在第一個 await 之前同步設定（同 Gemini 路徑，防雙重進入）
+    STATE.translating = true;
+    const myAbortController = new AbortController();
+    STATE.abortController = myAbortController;
+    const abortSignal = myAbortController.signal;
+    SK.safeSendMessage({ type: 'SET_BADGE_TRANSLATED' }).catch(() => {});
 
     // 繁中偵測（與 Gemini 相同邏輯）
     let settings = {};
@@ -1489,16 +1746,15 @@
       if (STATE.translatedMode === 'dual') SK.ensureDualWrapperStyle?.();
     }
 
-    STATE.translating = true;
-    STATE.abortController = new AbortController();
     const translateStartTime = Date.now();
-    const abortSignal = STATE.abortController.signal;
 
     let units = SK.collectParagraphs();
+    if (STATE.translatedMode === 'dual' && SK.consolidateDualInlineUnits) {
+      units = SK.consolidateDualInlineUnits(units);
+    }
     if (units.length === 0) {
       SK.showToast('error', SK.t('toast.noContent'), { autoHideMs: 3000 });
-      STATE.translating = false;
-      STATE.abortController = null;
+      releaseRunState(myAbortController);
       return;
     }
 
@@ -1546,8 +1802,12 @@
       _progressClosed = true;
 
       if (abortSignal.aborted) {
-        restoreOriginalHTMLAndReset();
-        SK.showToast('success', SK.t('toast.cancelled'), { progress: 1, stopTimer: true, autoHideMs: 2000 });
+        // v1.10.20: 同 Gemini 路徑——快速鍵取消已立即還原，unwind 不重複
+        // v1.10.46: identity guard 同 Gemini 路徑——SPA reset 打斷後不得還原新頁
+        if (!_earlyRestoredAborts.has(myAbortController) && STATE.abortController === myAbortController) {
+          restoreOriginalHTMLAndReset();
+          SK.showToast('success', SK.t('toast.cancelled'), { progress: 1, stopTimer: true, autoHideMs: 2000 });
+        }
         return;
       }
 
@@ -1565,7 +1825,6 @@
       STATE.translationContext = { provider: 'google' };
       STATE.stickyTranslate = true;
       STATE.stickySlot = gtOptions.slot ?? null;  // v1.4.12
-      SK.safeSendMessage({ type: 'SET_BADGE_TRANSLATED' }).catch(() => {});
       // v1.4.11 跨 tab sticky（v1.4.12 改存 preset slot）：opener 鏈中新開的 tab 繼承同 slot
       if (gtOptions.slot != null) {
         SK.safeSendMessage({ type: 'STICKY_SET', payload: { slot: gtOptions.slot } }).catch(() => {});
@@ -1573,8 +1832,8 @@
 
       if (!failures.length) {
         const successMsg = truncatedCount > 0
-          ? `Google 翻譯完成（${total} 段，另有 ${truncatedCount} 段因頁面過長被略過）`
-          : `Google 翻譯完成（${total} 段）`;
+          ? SK.t('toast.googleDoneTruncated', { total, truncated: truncatedCount })
+          : SK.t('toast.googleDone', { total });
         // v1.6.1: 同 Gemini 路徑 — 成功 toast 順帶顯示「有新版可下載」
         // v1.6.5: 同時帶 welcome notice
         const updateNotice = await SK.maybeBuildUpdateNotice();
@@ -1582,7 +1841,7 @@
         SK.showToast('success', successMsg, {
           progress: 1,
           stopTimer: true,
-          detail: `${chars.toLocaleString()} 字元 · 免費`,
+          detail: SK.t('toast.googleFreeDetail', { chars: chars.toLocaleString() }),
           updateNotice,
           welcomeNotice,
         });
@@ -1603,8 +1862,7 @@
       }
     } finally {
       _progressClosed = true;
-      STATE.translating = false;
-      STATE.abortController = null;
+      releaseRunState(myAbortController);
     }
   };
 
@@ -1645,16 +1903,21 @@
   // v1.4.12: 依 preset slot 觸發對應 engine + model 翻譯。
   // 行為：閒置 → 啟動對應 preset；翻譯中 → abort；已翻譯 → restorePage（任一 slot）。
   async function handleTranslatePreset(slot) {
-    // 已翻譯：任意 preset 快速鍵皆取消翻譯（統一還原）
-    if (STATE.translated) {
-      restorePage();
-      return;
-    }
-    // 翻譯中：abort
+    // v1.10.57: 翻譯中判斷必須在「已翻譯」之前 —— 已翻譯改以 DOM marker 為準
+    // (SK.isPageTranslated),而翻譯途中譯文是逐段注入的,marker 會提前出現,
+    // 若先判 isPageTranslated 會把「翻譯中按鍵取消」誤導成 restorePage。
+    // 翻譯中：abort（立即還原原文，不等 in-flight 批次）
+    // v1.10.20: controller 已 aborted = 上一輪取消收尾中 → 放行往下開新一輪
+    // （translatePage / translatePageGoogle 入口會同步接管 run state）
     if (STATE.translating) {
-      SK.sendLog('info', 'translate', 'aborting in-progress translation (preset key)');
-      STATE.abortController?.abort();
-      SK.showToast('loading', SK.t('toast.cancelling'));
+      if (STATE.abortController && !STATE.abortController.signal.aborted) {
+        abortInProgressTranslation();
+        return;
+      }
+    }
+    // 已翻譯（以 DOM 注入痕跡為準，不信 STATE.translated）：任意 preset 快速鍵皆還原
+    if (SK.isPageTranslated()) {
+      restorePage();
       return;
     }
     // 閒置：讀 preset 定義。若 storage 還沒寫入（例如從 v1.4.11 升級第一次按快捷鍵）
@@ -1699,8 +1962,43 @@
       return true;
     }
     if (msg?.type === 'GET_STATE') {
-      sendResponse({ ok: true, translated: STATE.translated, editing: editModeActive });
+      // v1.10.57: popup / icon 顯示狀態以 DOM 注入痕跡為準,不信記憶體 STATE.translated
+      // (SPA 子頁導航殘留 marker 時 STATE.translated 會說謊)。
+      sendResponse({ ok: true, translated: SK.isPageTranslated(), editing: editModeActive });
       return true;
+    }
+    // 送到 Instapaper:擷取當前頁面完整 HTML（含已就地替換的譯文）。
+    // popup 按鈕路徑與 Alt+I 快捷鍵（background onCommand）都透過此 action 拿 payload，
+    // 再由 popup / background 做 OAuth 簽章 + fetch（content 不持有 consumer secret）。
+    if (msg?.type === 'EXTRACT_PAGE_HTML') {
+      // 只有最上層 frame 回應。content script 以 all_frames 注入,頁內嵌入的 youtube /
+      // 廣告 iframe 也跑同一個 listener;browser.tabs.sendMessage 未指定 frameId 會廣播到
+      // 所有 frame,某個 iframe（youtube 嵌入頁）先回應就會把「影片嵌入頁的文件」當主文
+      // 送出 → Instapaper 存成影片（readtrung 實測:youtube-nocookie iframe frame 回了
+      // 它自己的影片頁,347 字 = 影片標題,整篇文章被換掉）。非頂層 frame 不回應。
+      if (window.top !== window) return false;
+      try {
+        sendResponse({ ok: true, ...SK.extractPageHtml(document) });
+      } catch (err) {
+        sendResponse({ ok: false, error: err && err.message });
+      }
+      return true;
+    }
+    // 送到 Instapaper 快捷鍵（Alt+I）路徑的回饋：background 做完 OAuth + fetch 後
+    // broadcast 狀態，由 content 用 toast 顯示（快捷鍵無 popup，回饋走 content toast）。
+    if (msg?.type === 'INSTAPAPER_TOAST') {
+      const MAP = {
+        sending:          { kind: 'loading', key: 'instapaper.sending' },
+        summarizing:      { kind: 'loading', key: 'instapaper.summarizing' },
+        sent:             { kind: 'success', key: 'instapaper.sent' },
+        'not-enabled':    { kind: 'error',   key: 'instapaper.notEnabled' },
+        'failed-auth':    { kind: 'error',   key: 'instapaper.failedAuth' },
+        'failed-network': { kind: 'error',   key: 'instapaper.failedNetwork' },
+        failed:           { kind: 'error',   key: 'instapaper.failed' },
+      };
+      const e = MAP[msg.status] || MAP.failed;
+      try { SK.showToast(e.kind, SK.t(e.key), e.kind === 'loading' ? {} : { autoHideMs: 4000 }); } catch (_) {}
+      return;
     }
     // v1.2.12: YouTube 字幕翻譯開關（popup toggle 用）
     if (msg?.type === 'GET_SUBTITLE_STATE') {
@@ -1723,7 +2021,8 @@
     if (msg?.type === 'MODE_CHANGED') {
       const mode = msg.mode === 'dual' ? 'dual' : 'single';
       if (STATE.translated) {
-        const desc = mode === 'dual' ? '雙語對照' : '單語覆蓋';
+        // 批次 5-7d：desc 改走 dict（原硬編繁中，en 使用者會看到中文夾在英文模板裡）
+        const desc = SK.t(mode === 'dual' ? 'popup.label.modeDual' : 'popup.label.modeSingle');
         SK.showToast('success', SK.t('toast.modeChanged', { desc }), {
           autoHideMs: 5000,
         });
@@ -1982,7 +2281,7 @@
           SK.handleTranslatePreset(slot);
         } else {
           // 防禦性 fallback（理論上 SK.handleTranslatePreset 永遠在 content.js 內 export)
-          SK.translatePage({ label: '自動翻譯' });
+          SK.translatePage({ label: SK.t('toast.autoTranslateLabel') });
         }
       }
     } catch (err) {

@@ -6,7 +6,7 @@
 
 名稱「新幹線」象徵快速、平穩、流暢的閱讀體驗。
 
-> [從 Chrome Web Store 安裝](https://chromewebstore.google.com/detail/shinkansen/pnhmlecoofeoofajcjenndnimhbodhlg) · [從 Firefox Add-ons 安裝](https://addons.mozilla.org/firefox/addon/shinkansen/) · [下載最新版本 zip](https://github.com/jimmysu0309/shinkansen/releases/latest) · 安裝教學與產品介紹見 [官方網頁](https://jimmysu0309.github.io/shinkansen/) · [更新紀錄](https://jimmysu0309.github.io/shinkansen/release-notes.html)
+> [從 Chrome Web Store 安裝](https://chromewebstore.google.com/detail/shinkansen/pnhmlecoofeoofajcjenndnimhbodhlg) · [從 Firefox Add-ons 安裝](https://addons.mozilla.org/firefox/addon/shinkansen/) · [從 Mac App Store 安裝](https://apps.apple.com/tw/app/shinkansen-translator/id6768586680) · [下載最新版本 zip](https://github.com/jimmysu0309/shinkansen/releases/latest) · 安裝教學與產品介紹見 [官方網頁](https://jimmysu0309.github.io/shinkansen/) · [更新紀錄](https://jimmysu0309.github.io/shinkansen/release-notes.html)
 
 ## 近期重大更新
 
@@ -105,7 +105,7 @@ Shinkansen 提供三組可自訂的翻譯預設，各綁一個快速鍵：
 | `Alt+S` / `Option+S` | Gemini | Flash（$0.50 / $3.00） | 日常閱讀，品質最佳性價比 |
 | `Alt+D` / `Option+D` | Google Translate | — | 不需 API Key、速度快、完全免費 |
 
-**可以在設定頁「翻譯快速鍵」區塊自訂**：每組 preset 的引擎（Gemini / Google Translate）、模型（Flash Lite / Flash / Pro / 自訂）、顯示標籤都可以改。鍵位本身則在 `chrome://extensions/shortcuts` 設定。
+**可以在設定頁「翻譯快速鍵」區塊自訂**：每組 preset 的引擎（Gemini / Google Translate）、模型（Flash Lite / Flash / Pro / 自訂）、顯示標籤都可以改。鍵位本身也可直接在同一區塊自訂——點該組右上方的鍵位欄位，再按下想要的組合鍵即可（Chrome 用 `⌥ Option` 或 `⌃ Control`；Safari 含 Mac／iPad／iPhone 請用 `⌃ Control`——iOS Safari 不會把 `⌥`／`⌘` 傳給網頁，設定頁會自動依瀏覽器顯示可用的鍵，按 `ESC` 取消），iPad 外接鍵盤也能改。也可在 Chrome `chrome://extensions/shortcuts`、Firefox `about:addons` 調整內建預設鍵
 
 **統一的取消/還原行為**：
 - 翻譯中按任一快速鍵 → 立即取消翻譯
@@ -140,6 +140,8 @@ Google Docs 的編輯畫面使用 Canvas 渲染文字，一般的網頁翻譯擴
 開啟有英文字幕的 YouTube 影片，確認 CC 已開啟，點工具列的 Shinkansen 圖示，會出現「YouTube 字幕翻譯」開關，打開即可。字幕會在不影響影片播放的情況下逐段替換成繁體中文，樣式與 YouTube 原生字幕完全一致。
 
 若你常看 YouTube 英文影片，可在設定頁的「YouTube 字幕」Tab 開啟自動翻譯，進入影片頁面後字幕翻譯會自動啟動，不需每次手動開關。
+
+在 YouTube 影片頁，工具列圖示彈出視窗會出現「字幕大小」選單，可放大翻譯字幕（100%～200%）。桌面與行動版通用；在 iPhone／iPad 上連進入全螢幕後由 iOS 系統播放器顯示的字幕也會跟著放大
 
 ### AI 智慧分句（自動產生字幕專用）
 
@@ -248,11 +250,13 @@ Firefox 的「**HTTPS-Only Mode**」（`about:preferences#privacy` 滑到底）�
 
 ## 禁用詞清單
 
-AI 模型翻成繁中時雖然會盡量用台灣慣用語，但偶爾還是會吐出「視頻」、「軟件」、「數據」、「網絡」、「用戶」這類非台灣慣用譯法——尤其原文是英文（video / software / data / user）時模型容易直接套用最常見的中譯。為此 Shinkansen 內建一份禁用詞對照表，明確告訴模型左欄絕對不能用、必須改用右欄。
+AI 模型翻成繁中時雖然會盡量用台灣慣用語，但偶爾還是會吐出「視頻」、「軟件」、「數據」、「網絡」、「用戶」這類非台灣慣用譯法——尤其原文是英文（video / software / data / user）時模型容易直接套用最常見的中譯。為此 Shinkansen 內建一份禁用詞清單，明確告訴模型哪些詞絕對不能出現在譯文裡。
 
-預設清單共 25 條，涵蓋常見的雷區：視頻→影片、音頻→音訊、軟件→軟體、硬件→硬體、程序→程式、進程→行程（process）、線程→執行緒（thread）、數據→資料、數據庫→資料庫、網絡→網路、信息→資訊、質量→品質、用戶→使用者、默認→預設、創建→建立、實現→實作、運行→執行、發布→發表、屏幕→螢幕、界面→介面、文檔→文件、操作系統→作業系統，另含「劍指→針對」、「痛點→要害」、「硬傷→罩門」這類風格詞。
+每條只有「禁用詞」必填，「替換詞」可留空：填了替換詞就要求模型改用指定詞；留空時則只要求模型不可使用該詞、由它自行改寫成自然的台灣慣用說法——適合「單純討厭某個詞、但一時提不出固定替換詞」的情境（例如陳腔濫調）。
 
-你可以在設定頁的「禁用詞清單」Tab 編輯這份清單——新增、修改、刪除自己常踩到的詞，或按「還原預設清單」回到預設 25 條。每條有三欄：禁用詞、替換詞、備註（備註可空）。
+預設清單共 25 條，涵蓋常見的雷區：視頻→影片、音頻→音訊、軟件→軟體、程序→程式、進程→行程（process）、線程→執行緒（thread）、數據→資料、數據庫→資料庫、網絡→網路、信息→資訊、質量→品質、用戶→使用者、默認→預設、創建→建立、實現→實作、運行→執行、發布→發表、屏幕→螢幕、文檔→文件、操作系統→作業系統，另含「劍指→針對」、「痛點→要害」、「硬傷→罩門」這類風格詞，以及兩條留空替換詞的純禁用詞（沒有之一、橫空出世）作為範例。
+
+你可以在設定頁的「禁用詞清單」Tab 編輯這份清單——新增、修改、刪除自己常踩到的詞，或按「還原預設清單」回到預設 25 條。每條有三欄：禁用詞（必填）、替換詞（可留空）、備註（可空）。
 
 此外，每次翻譯回應後 Shinkansen 會掃描譯文，若仍有禁用詞漏進譯文，會在 Debug 分頁記一筆 `forbidden-term-leak` warning（含原文片段與譯文片段），讓你能追查模型漏網案例——但**不會**自動改寫譯文，遵循「中文排版偏好交給 prompt 處理、不做事後 regex replace」的設計原則，避免誤傷譯文中合法的引述場景。
 
@@ -290,7 +294,7 @@ LLM 在翻譯長文時，前後文的人名、地名翻譯容易出現不一致�
 
 ## 目前版本
 
-v1.10.0 — 完整功能清單與規格詳見 [SPEC.md](SPEC.md)。
+v1.10.64 — 完整功能清單與規格詳見 [SPEC.md](SPEC.md)。
 
 ## 授權
 

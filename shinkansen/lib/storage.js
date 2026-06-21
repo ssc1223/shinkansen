@@ -138,16 +138,19 @@ export const DEFAULT_ASR_SUBTITLE_SYSTEM_PROMPT = `你是專業的{sourceLanguag
 4. 不要遺漏輸入片段：輸出陣列加總應涵蓋所有輸入時間範圍
 </critical_rules>`;
 
-// v1.5.6: 中國用語黑名單預設清單。使用者可在「術語表」分頁的「禁用詞清單」section 編輯。
+// v1.5.6: 禁用詞預設清單。使用者可在「術語表」分頁的「禁用詞清單」section 編輯。
 // 注入時機：buildEffectiveSystemInstruction 在所有其他規則（含 fixedGlossary）之後，
 // 以 <forbidden_terms_blacklist> 區塊放在最末端，讓 LLM 給予最高權重。
 // 與既有「進程→線程」對照（v0.83 ~ v1.5.5）相比修正：原對映把兩個都誤翻為簡中
 // （process 在台灣應為「行程」、thread 應為「執行緒」），這版分開列正確對映。
+//
+// 替換詞可留空（replacement: ''）：用於「單純不希望出現某詞、但提不出固定替換詞」
+// 的情境（例如陳腔濫調）。留空時 buildEffectiveSystemInstruction 會把該詞列入「禁用
+// （未指定替換詞）」區，請 LLM 自行改寫成自然的台灣慣用說法。
 export const DEFAULT_FORBIDDEN_TERMS = [
   { forbidden: '視頻',     replacement: '影片',     note: '' },
   { forbidden: '音頻',     replacement: '音訊',     note: '' },
   { forbidden: '軟件',     replacement: '軟體',     note: '' },
-  { forbidden: '硬件',     replacement: '硬體',     note: '' },
   { forbidden: '程序',     replacement: '程式',     note: '指 program；若原文是 procedure/process 用「程序」屬正確' },
   { forbidden: '進程',     replacement: '行程',     note: 'process（注意：不是「線程」）' },
   { forbidden: '線程',     replacement: '執行緒',   note: 'thread' },
@@ -164,11 +167,12 @@ export const DEFAULT_FORBIDDEN_TERMS = [
   { forbidden: '發布',     replacement: '發表',     note: '' },
   { forbidden: '屏幕',     replacement: '螢幕',     note: '' },
   { forbidden: '劍指',     replacement: '針對',     note: '' },
-  { forbidden: '界面',     replacement: '介面',     note: '' },
   { forbidden: '痛點',     replacement: '要害',     note: '' },
   { forbidden: '硬傷',     replacement: '罩門',     note: '' },
   { forbidden: '文檔',     replacement: '文件',     note: 'document（注意：「文件」在台灣指 document，「檔案」才是 file）' },
   { forbidden: '操作系統', replacement: '作業系統', note: '' },
+  { forbidden: '沒有之一', replacement: '',         note: '陳腔濫調，留空替換詞由 AI 自行改寫' },
+  { forbidden: '橫空出世', replacement: '',         note: '陳腔濫調，留空替換詞由 AI 自行改寫' },
 ];
 
 // ── i18n:翻譯目標語言(P1 / v1.8.59)─────────────────────────────────
@@ -381,6 +385,14 @@ export function isPromptUnchangedFromDefault(saved, defaultPrompt) {
   return _normalizePromptForComparison(saved) === _normalizePromptForComparison(defaultPrompt);
 }
 
+// v1.10.46:options.js prompt textarea 同步用的「等於任一 target effective default 即未客製」
+// 判定,原本寫在 options.js _syncPromptTextareaToTarget,下沉到這裡跟 _isAnyTargetDefault
+// 同檔維護(單一資料源)。getEffectiveFn 傳 getEffectiveSystemPrompt 等 factory。
+export function isPromptUnchangedFromAnyTargetDefault(saved, getEffectiveFn) {
+  if (!saved || !saved.trim()) return true;
+  return TARGET_LANGUAGES.some((t) => isPromptUnchangedFromDefault(saved, getEffectiveFn(t, '')));
+}
+
 // P1 (v1.8.59) hotfix:用 target language 寫的「task reinforcement」,append 到 universal
 // prompt 末尾。對應 Gemini Flash 已知 issue:「英文 prompt 內 append target language 命令」
 // 對短輸入服從度不穩(內文 batch 對,但短標題 LLM 自由發揮 echo 原文)。研究結論是
@@ -398,22 +410,41 @@ const TARGET_LANGUAGE_REINFORCEMENT = {
   'de':    'Übersetzen Sie den Eingabetext ins Deutsche. Die Ausgabe muss auf Deutsch sein, unabhängig von der Quellsprache.',
 };
 
-function _appendReinforcement(prompt, targetLang, userOverride, defaultPrompt) {
+function _appendReinforcement(prompt, targetLang, userOverride, defaultPrompt, universalTemplate) {
   // 只對「未客製 + 非 zh-TW target」append:
   //   客製化 prompt 不動(尊重使用者改的版本);zh-TW 走原 DEFAULT 已含完整繁中規則。
   if (targetLang === 'zh-TW') return prompt;
-  if (!isPromptUnchangedFromDefault(userOverride, defaultPrompt)) return prompt;
+  if (!_isAnyTargetDefault(userOverride, defaultPrompt, universalTemplate)) return prompt;
   const r = TARGET_LANGUAGE_REINFORCEMENT[targetLang];
   return r ? `${prompt}\n\n${r}` : prompt;
 }
 
+// v1.10.46:「未客製」判定擴大為「等於任一 target 的 effective default」(單一資料源,
+// 原邏輯在 options.js _syncPromptTextareaToTarget 的 TARGET_LANGUAGES.some,下沉到這裡)。
+// Why:options.js 儲存設定時把 textarea 字面值(= 當前 target 注入語言 label 後的 universal
+// prompt,SYSTEM/DOC 還含 reinforcement 尾段)寫進 storage——只比對 zh-TW DEFAULT 會把這種
+// saved 誤判成「使用者客製」,之後切 target 永遠翻成舊語言(直到重開 options 再存)。
+function _isAnyTargetDefault(userOverride, defaultPrompt, universalTemplate) {
+  if (isPromptUnchangedFromDefault(userOverride, defaultPrompt)) return true;
+  const norm = _normalizePromptForComparison(userOverride);
+  for (const t of TARGET_LANGUAGES) {
+    if (t === 'zh-TW') continue;  // zh-TW 走 defaultPrompt,上面比過了
+    const candidate = universalTemplate.replaceAll('{targetLanguage}', LANG_LABELS[t] || LANG_LABELS.en);
+    if (norm === _normalizePromptForComparison(candidate)) return true;
+    // SYSTEM / DOC 的 effective default 末尾還有 target language reinforcement,一併比對
+    const r = TARGET_LANGUAGE_REINFORCEMENT[t];
+    if (r && norm === _normalizePromptForComparison(`${candidate}\n\n${r}`)) return true;
+  }
+  return false;
+}
+
 // effective prompt factory:
-//   userOverride 為空 / normalize 後等於舊版預設 → 視為「未客製化」,走 target 對應預設
-//   非空且 normalize 後非舊版預設              → 直接用 saved(尊重使用者客製化)
+//   userOverride 為空 / normalize 後等於任一 target 的 effective default → 視為「未客製化」,
+//   走 target 對應預設;否則直接用 saved(尊重使用者客製化)
 // 這個設計自動處理舊使用者升級——saved 經 normalize 後等於當前 DEFAULT_*_PROMPT 視為未客製,
 // target 切換立刻反映,不需 storage 層 migration(零寫入,零風險)。
 function _buildEffective(targetLang, userOverride, defaultPrompt, universalTemplate) {
-  const treatedAsUnchanged = isPromptUnchangedFromDefault(userOverride, defaultPrompt);
+  const treatedAsUnchanged = _isAnyTargetDefault(userOverride, defaultPrompt, universalTemplate);
   if (treatedAsUnchanged) {
     if (targetLang === 'zh-TW') return defaultPrompt;
     // replaceAll(不是 replace)── universal prompt 內可能含多個 {targetLanguage} 占位
@@ -425,11 +456,11 @@ function _buildEffective(targetLang, userOverride, defaultPrompt, universalTempl
 
 export function getEffectiveSystemPrompt(targetLang, userOverride) {
   const prompt = _buildEffective(targetLang, userOverride, DEFAULT_SYSTEM_PROMPT, UNIVERSAL_SYSTEM_PROMPT);
-  return _appendReinforcement(prompt, targetLang, userOverride, DEFAULT_SYSTEM_PROMPT);
+  return _appendReinforcement(prompt, targetLang, userOverride, DEFAULT_SYSTEM_PROMPT, UNIVERSAL_SYSTEM_PROMPT);
 }
 export function getEffectiveDocSystemPrompt(targetLang, userOverride) {
   const prompt = _buildEffective(targetLang, userOverride, DEFAULT_DOC_SYSTEM_PROMPT, UNIVERSAL_DOC_SYSTEM_PROMPT);
-  return _appendReinforcement(prompt, targetLang, userOverride, DEFAULT_DOC_SYSTEM_PROMPT);
+  return _appendReinforcement(prompt, targetLang, userOverride, DEFAULT_DOC_SYSTEM_PROMPT, UNIVERSAL_DOC_SYSTEM_PROMPT);
 }
 export function getEffectiveGlossaryPrompt(targetLang, userOverride) {
   return _buildEffective(targetLang, userOverride, DEFAULT_GLOSSARY_PROMPT, UNIVERSAL_GLOSSARY_PROMPT);
@@ -458,9 +489,15 @@ export const DEFAULT_SETTINGS = {
   geminiConfig: {
     model: 'gemini-3-flash-preview',       // v0.83: 預設模型升級至 Gemini 3 Flash
     serviceTier: 'DEFAULT',
-    temperature: 1.0,     // Gemini 3 Flash 原廠預設值
+    // v1.10.18:Gemini 3 官方強烈建議維持 temperature=1.0,設低於 1.0 可能引發
+    // 無限思考迴圈 / 推理退化(舊世代「降溫求穩定」思維對 Gemini 3 失效)。
+    temperature: 1.0,
+    // topP / topK:v1.10.19 起 options UI 已移除(Gemini 3 不使用 top-k sampling、官方
+    // 建議勿設,lib/gemini.js buildSamplingFields() 對 Gemini 3 一律略過不送)。此處欄位
+    // 保留供「非 Gemini 3 模型」fallback 用(buildSamplingFields 非 G3 才帶),避免 migration;
+    // 使用者不再能編輯,options 儲存時從 storage 拉現存值寫回。
     topP: 0.95,
-    topK: 40,             // Gemini 3 Flash 原廠預設值（Pro 系列為 64）
+    topK: 40,
     maxOutputTokens: 8192,
     systemInstruction: DEFAULT_SYSTEM_PROMPT,
   },
@@ -476,7 +513,10 @@ export const DEFAULT_SETTINGS = {
   glossary: {
     enabled: false,
     prompt: DEFAULT_GLOSSARY_PROMPT,
-    temperature: 0.1,                  // 術語表要穩定，不要有創意
+    // v1.10.18:從 0.1 改 1.0。glossary 跑在 Gemini 3 模型(預設 gemini-3.1-flash-lite),
+    // 官方明載 Gemini 3 設 temperature<1.0 可能引發迴圈 / 退化——對「結構化 JSON + 推理」
+    // 的術語抽取尤其危險,且迴圈會狂燒被計費的思考 token。維持 1.0 是 Gemini 3 正解。
+    temperature: 1.0,
     skipThreshold: 1,                  // ≤ 此批次數完全不建術語表
     // v1.7.3: 預設從 5 提高到 10 — 中等長度頁面（6-10 批）走 fire-and-forget 不阻塞，
     // 省下 EXTRACT_GLOSSARY 1.5-7.4 秒 blocking 等待；短頁本就跳過、長頁（>10 批）
@@ -501,10 +541,11 @@ export const DEFAULT_SETTINGS = {
   translateDoc: {
     systemPrompt: DEFAULT_DOC_SYSTEM_PROMPT,
     applyGlossary: false, // 預設術語表一致化(stage-result modal 內每次仍可 override)
-    // 獨立 temperature,跟主 geminiConfig.temperature 區隔。文件翻譯多為合約 / 技術文件,
-    // 預設 0.5 偏保守(穩定譯名、用詞不亂跑);散文 / 文章可調到 1.0+。改變後 cache key
-    // 也會跟著變(suffix 加 _t<temp>),立即生效。
-    temperature: 0.5,
+    // 獨立 temperature,跟主 geminiConfig.temperature 區隔。
+    // v1.10.18:從 0.5 改 1.0。文件翻譯也跑在 Gemini 3 模型,官方建議維持 1.0(設低於
+    // 1.0 可能引發迴圈 / 推理退化);舊註解「0.5 偏保守求穩定」是 Gemini 3 失效的舊思維。
+    // 改變後 cache key 跟著變(suffix _t<temp>),舊 0.5 快取不命中、新譯文走 1.0,不主動清。
+    temperature: 1.0,
     // v1.8.49: 是否套用使用者級「固定術語表」(settings.fixedGlossary.global) 到文件翻譯。
     // 跟主功能共用同一份術語表(術語表分頁編輯),這裡只是「文件翻譯路徑要不要套用」開關。
     // 預設 true(沿用 v1.8.48 之前的隱含行為——TRANSLATE_DOC_BATCH 走 handleTranslate
@@ -550,6 +591,10 @@ export const DEFAULT_SETTINGS = {
     // 主要解 YT 帳號 auto-translate 偏好被套用到所有影片時，Shinkansen 拿到的是 YT 已翻譯後的
     // 字幕 text 而非原始 ASR，導致 prompt mismatch + timing 提前等下游問題。
     preferOriginalTrack: true,
+    // YouTube 字幕字級 scale（%,全平台統一）。一個值套兩條渲染路徑：桌面／macOS／iOS 視窗內
+    // 的 overlay（原生字級 × scale/100）+ iPhone／iPad 原生全螢幕的 video::cue font-size。
+    // 預設 100 = 跟隨各平台原生字幕大小（桌面零改變）。設定在 popup,只在 YouTube 影片頁顯示。
+    captionScale: 100,
   },
   // v0.35 新增：並行翻譯 rate limiter 設定
   // tier 對應 Gemini API 付費層級（free / tier1 / tier2)，決定 RPM/TPM/RPD 上限
@@ -619,6 +664,20 @@ export const DEFAULT_SETTINGS = {
     { slot: 2, engine: 'gemini', model: 'gemini-3-flash-preview', label: 'Flash' },
     { slot: 3, engine: 'google', model: null, label: 'Google MT' },
   ],
+  // 自訂快速鍵：三組 preset 各自的使用者自訂鍵組合（null = 沿用 manifest 內建預設）。
+  // 由 options 的 recorder 錄製、content-shortcuts.js 在頁面 keydown capture 比對。
+  // 值形狀 { code, alt, shift, ctrl, meta }；slot key 為 2 / 1 / 3（與 translatePresets 同編號）。
+  // Why：Safari（含 iOS / iPadOS）沒有瀏覽器層快速鍵設定入口，自訂鍵走 content script
+  // 層攔截；桌面（Chrome / Firefox / macOS Safari）manifest 預設鍵仍並存有效。
+  customShortcuts: { 2: null, 1: null, 3: null },
+  // 送到 Instapaper:enable/disable 開關。預設關——避免沒申請金鑰 / 沒連結的
+  // 使用者看到無作用按鈕。連結後寫入的 token / tokenSecret / username 不放
+  // DEFAULT_SETTINGS（連結時才寫 storage.sync,密碼用完即丟不存,見 lib/instapaper.js）。
+  instapaperEnabled: false,
+  // 送到 Instapaper 時一併上傳文章摘要(用翻譯目標語言,固定走 Gemini Flash Lite)。
+  // 預設開:只要有 Gemini API key,送出時自動附摘要;沒 key / 摘要失敗則靜默略過、
+  // 書籤照常送。摘要每次會多一筆 flash-lite 用量(極微小),使用者可在此關閉。
+  instapaperSummaryEnabled: true,
   // v1.5.6: 中國用語黑名單。使用者自訂時整個陣列覆蓋（不做 per-entry merge）。
   // 內容會以 <forbidden_terms_blacklist> 區塊注入到 systemInstruction 末端，
   // 且修改清單後快取 key 會帶 _b<hash> 後綴讓既有快取自動失效。
@@ -630,6 +689,19 @@ export const DEFAULT_SETTINGS = {
   // 預設 slot 2 = Flash（與 v1.4.12 開始 popup 按鈕硬碼映射的行為一致）。
   // 使用者可在一般設定改成其他 preset，按 popup 按鈕等同按該 slot 的快速鍵。
   popupButtonSlot: 2,
+  // 懸浮翻譯控制按鈕（floating action button）。
+  // floatingIcon：enable 開關。預設 null = 平台分流（content / options 端都把非 boolean
+  //   解析成 IS_IOS_BUILD：iOS / iPadOS build 預設開、桌面 build 預設關）。使用者在 options
+  //   明確切過就寫入 boolean，之後尊重該值。
+  // floatingIconOpacity：0.1–1，預設 0.7（與 toast 一致）。
+  // floatingIconPos：吸附邊緣位置。edge='left'|'right'，offsetY=0(頂)…1(底) 垂直比例。
+  //   預設右緣中段；視窗縮放後按比例還原。
+  floatingIcon: null,
+  floatingIconOpacity: 0.7,
+  floatingIconPos: { edge: 'right', offsetY: 0.5 },
+  // 四指觸控手勢 enable（iOS / iPadOS）。預設 true（沿用一直以來的 always-on 行為）。
+  // content-touch.js isEnabled() 額外 gate 此旗標；桌面 build 無此手勢，旗標無作用。
+  fourFingerGesture: true,
   // v1.6.13: 自動翻譯網站（白名單）觸發時要用哪一組 preset。預設 slot 2 = Flash。
   // 修法前自動翻譯路徑直接 SK.translatePage() 不帶 slot,fallback 全域 geminiConfig.model;
   // 使用者改 preset model 後 Alt+S 走新 model，但白名單路徑仍走全域 → UX 不一致。
@@ -686,6 +758,9 @@ export const DEFAULT_SETTINGS = {
     // 預設 true 對本機 LLM 使用者開箱即用;商用 API 使用者可關閉省 token。
     // 既有使用者升級後 undefined,lib/openai-compat.js 用 `=== false` 判斷,等同預設 true。
     useStrongSegMarker: true,
+    // API 請求逾時（秒）。預設 15 對齊 Gemini 路徑;本機 LLM(Ollama 等)冷啟動
+    // 載入模型到 VRAM 可能需 60-300 秒,使用者可自行調高
+    fetchTimeoutSec: 15,
   },
 };
 
@@ -769,13 +844,18 @@ export async function migrateGeminiFlashLiteModelIfNeeded(syncSaved) {
     });
     if (touched) patch.translatePresets = updated;
   }
-  if (syncSaved.pricing && Object.prototype.hasOwnProperty.call(syncSaved.pricing, OLD)) {
-    const mergedPricing = { ...syncSaved.pricing };
-    if (!Object.prototype.hasOwnProperty.call(mergedPricing, NEW)) {
-      mergedPricing[NEW] = mergedPricing[OLD];
+  // 批次 5-4（v1.10.46）：model ID 為 key 的計價覆蓋存在 modelPricingOverrides
+  //（model-pricing.js getPricingForModel 讀的那份）。原本誤檢查 syncSaved.pricing——
+  // pricing 的 shape 是 {inputPerMTok, outputPerMTok, cachedDiscount}，key 永遠不是
+  // model ID（dead code）→ 舊版設過 preview ID 計價覆蓋的使用者升級後覆蓋默默失效。
+  if (syncSaved.modelPricingOverrides
+      && Object.prototype.hasOwnProperty.call(syncSaved.modelPricingOverrides, OLD)) {
+    const mergedOverrides = { ...syncSaved.modelPricingOverrides };
+    if (!Object.prototype.hasOwnProperty.call(mergedOverrides, NEW)) {
+      mergedOverrides[NEW] = mergedOverrides[OLD];
     }
-    delete mergedPricing[OLD];
-    patch.pricing = mergedPricing;
+    delete mergedOverrides[OLD];
+    patch.modelPricingOverrides = mergedOverrides;
   }
 
   if (Object.keys(patch).length === 0) return;
@@ -794,8 +874,14 @@ let _settingsCacheListenerBound = false;
 function _bindSettingsCacheInvalidator() {
   if (_settingsCacheListenerBound) return;
   _settingsCacheListenerBound = true;
-  // sync 改動（設定頁存設定）或 local 改動（apiKey）都要 invalidate
-  browser.storage.onChanged.addListener(() => {
+  // sync 改動（設定頁存設定）或 local 的 API key 改動才 invalidate。
+  // v1.10.46(批次 2-6):過濾掉與 settings 無關的 local 高頻寫入——翻譯期間 logger
+  // persistLog(yt_debug_log)與 tc_* 快取 flush 都寫 storage.local,原本任何變動都
+  // invalidate → cache 在翻譯熱路徑的實際命中率近零(v1.8.14 的初衷整個失效)。
+  // getSettings 的資料來源只有:sync 全部 key + local 的 apiKey / customProviderApiKey。
+  browser.storage.onChanged.addListener((changes, area) => {
+    if (area !== 'sync' && !(area === 'local' && changes
+      && (API_KEY_STORAGE_KEY in changes || CUSTOM_PROVIDER_API_KEY in changes))) return;
     _settingsCachePromise = null;
   });
 }

@@ -2,11 +2,13 @@
 // v1.0.4: 改為 ES module，從 lib/ 匯入共用常數與工具函式，消除重複程式碼。
 
 import { browser } from '../lib/compat.js';
-import { DEFAULT_SETTINGS, DEFAULT_SYSTEM_PROMPT, DEFAULT_GLOSSARY_PROMPT, DEFAULT_SUBTITLE_SYSTEM_PROMPT, DEFAULT_FORBIDDEN_TERMS, TARGET_LANGUAGES, UI_LANGUAGES, getEffectiveSystemPrompt, getEffectiveSubtitleSystemPrompt, getEffectiveGlossaryPrompt, isPromptUnchangedFromDefault } from '../lib/storage.js';
+import { DEFAULT_SETTINGS, DEFAULT_SYSTEM_PROMPT, DEFAULT_GLOSSARY_PROMPT, DEFAULT_SUBTITLE_SYSTEM_PROMPT, DEFAULT_FORBIDDEN_TERMS, TARGET_LANGUAGES, UI_LANGUAGES, getEffectiveSystemPrompt, getEffectiveSubtitleSystemPrompt, getEffectiveGlossaryPrompt, isPromptUnchangedFromDefault, isPromptUnchangedFromAnyTargetDefault } from '../lib/storage.js';
 import { TIER_LIMITS } from '../lib/tier-limits.js';
-import { formatTokens, formatUSD, formatMoney, parseUserNum, buildUsageCsvFilename } from '../lib/format.js';
+import { formatTokens, formatUSD, formatMoney, parseUserNum, buildUsageCsvFilename, formatYmdHms } from '../lib/format.js';
 import { isWorthNotifying } from '../lib/update-check.js'; // v1.6.5
-import { IS_MAS_BUILD } from '../lib/distribution.js';
+import { IS_MAS_BUILD, IS_IOS_BUILD } from '../lib/distribution.js';
+import { isTouchScreenDevice } from '../lib/platform.js';
+import { instapaperXAuth, hasInstapaperConsumerKeys } from '../lib/instapaper.js'; // 送到 Instapaper
 
 // 向下相容：舊程式碼大量使用 DEFAULTS，保留別名避免大範圍搜尋取代
 const DEFAULTS = DEFAULT_SETTINGS;
@@ -14,7 +16,7 @@ const DEFAULTS = DEFAULT_SETTINGS;
 // v1.4.12: 模型參考價統一由 lib/model-pricing.js 提供，與 background.js 共用同一份，
 // 避免兩邊不同步（以前 background 用 settings.pricing 單一值，options 用 local 表，
 // preset 切換 model 時 toast 會算錯）。此處做 input/output key 轉換保留原 options.js 介面。
-import { MODEL_PRICING as LIB_MODEL_PRICING } from '../lib/model-pricing.js';
+import { MODEL_PRICING as LIB_MODEL_PRICING, DEFAULT_GEMINI_CACHED_DISCOUNT } from '../lib/model-pricing.js';
 const MODEL_PRICING = Object.fromEntries(
   Object.entries(LIB_MODEL_PRICING).map(([model, p]) => [model, { input: p.inputPerMTok, output: p.outputPerMTok }])
 );
@@ -65,6 +67,10 @@ const $ = (id) => document.getElementById(id);
 // 禁用詞表預設。改成 module-level cache:load() 從 storage 讀進來,storage.onChanged
 // listener 監聽 popup 寫入後同步更新並 reapply refresher。
 let _currentTargetLang = DEFAULT_SETTINGS.targetLanguage;
+// load() 會被多次呼叫(init / 回復預設 / 匯入設定);UI 語系變動訂閱只能註冊一次,
+// 否則每次 load() 疊一個 storage.onChanged listener → 切語言 callback 跑 N 次
+// (連帶 refreshExchangeRateDisplay 的 sendMessage 放大)。此旗標確保只訂閱一次。
+let _uiLangChangeSubscribed = false;
 
 async function load() {
   const saved = await browser.storage.sync.get(null);
@@ -87,8 +93,6 @@ async function load() {
   // settings.geminiConfig.model 仍保留 storage 結構（避免 migration）但 UI 不顯示。
   $('serviceTier').value = s.geminiConfig.serviceTier;
   $('temperature').value = s.geminiConfig.temperature;
-  $('topP').value = s.geminiConfig.topP;
-  $('topK').value = s.geminiConfig.topK;
   $('maxOutputTokens').value = s.geminiConfig.maxOutputTokens;
   $('systemInstruction').value = s.geminiConfig.systemInstruction;
   // v1.6.16: 後備路徑單價 UI 已移除（對應 input element 不存在），不再從 settings 載入到 UI。
@@ -163,6 +167,23 @@ async function load() {
   // v1.6.8: Toast master switch
   $('showProgressToast').checked = s.showProgressToast !== false;
 
+  // 懸浮翻譯按鈕：enable（null = 平台預設，桌面 false / iOS true）+ 透明度
+  $('floatingIcon').checked = typeof s.floatingIcon === 'boolean' ? s.floatingIcon : IS_IOS_BUILD;
+  const floatingOpacityPct = Math.round((s.floatingIconOpacity ?? 0.7) * 100);
+  $('floatingIconOpacity').value = floatingOpacityPct;
+  _renderFloatingOpacityLabel(floatingOpacityPct);
+
+  // 四指觸控手勢：只在 iOS / iPadOS build 顯示（桌面無此手勢，隱藏整個 section）。
+  // 預設開（!== false）；桌面隱藏的 checkbox 仍維持 true，存檔不會誤寫 false。
+  $('four-finger-section').hidden = !IS_IOS_BUILD;
+  $('fourFingerGesture').checked = s.fourFingerGesture !== false;
+
+  // 送到 Instapaper：enable 開關 + 連結狀態（已連結時顯示帳號 + 解除連結）
+  $('instapaperEnabled').checked = s.instapaperEnabled === true;
+  // 摘要開關預設開（!== false）：既有使用者沒此 key 時也視為開
+  $('instapaperSummaryEnabled').checked = s.instapaperSummaryEnabled !== false;
+  renderInstapaperLinkState(saved);
+
   // v1.0.21: 頁面層級繁中偵測開關
 
   // v1.5.0: 雙語對照視覺標記
@@ -218,6 +239,7 @@ async function load() {
   $('cp-model').value = cp.model || '';
   $('cp-systemPrompt').value = cp.systemPrompt || '';
   $('cp-temperature').value = (typeof cp.temperature === 'number') ? cp.temperature : 0.7;
+  $('cp-fetchTimeout').value = (typeof cp.fetchTimeoutSec === 'number') ? cp.fetchTimeoutSec : 15;
   $('cp-inputPerMTok').value = cp.inputPerMTok != null ? cp.inputPerMTok : '';
   $('cp-outputPerMTok').value = cp.outputPerMTok != null ? cp.outputPerMTok : '';
   // v1.9.2: cache 命中折扣 — UI 顯示百分比(0-100),儲存仍為比例(0-1);null/undefined → 空白
@@ -284,7 +306,9 @@ async function load() {
     }
     updatePresetModelVisibility(slot);
   }
-  refreshPresetKeyBindings();
+  // 自訂快速鍵：storage 讀回值消毒後渲染 recorder 顯示
+  shortcutTable = SC ? SC.sanitizeTable(s.customShortcuts) : shortcutTable;
+  renderShortcutRecorders();
 
   // v1.6.6: 工具列「翻譯本頁」按鈕的 preset slot dropdown
   // v1.6.13: 自動翻譯網站使用的 preset slot
@@ -354,6 +378,8 @@ async function load() {
   if (I18N) {
     const dictLang = I18N.getUiLanguage($('uiLanguage')?.value || s.uiLanguage || 'auto');
     I18N.applyI18n(document, dictLang);
+    { const _vEl = $('options-version');
+      if (_vEl) _vEl.textContent = 'v' + browser.runtime.getManifest().version; }
     // refreshSlotDropdownLabels 在 load() 較早處(line ~273)已跑過一次,但當時
     // $('uiLanguage').value 還沒從 storage 同步進去,_t() 會用 HTML 預設 'auto'
     // → 跑到 en dict。現在 picker value 已 sync,重做一次拿到正確 dict。
@@ -362,14 +388,23 @@ async function load() {
     _updateCurrencySectionVisibility();
     // v1.8.61:Toast opacity label 動態 i18n 字串
     _renderToastOpacityLabel($('toastOpacity')?.value || 70);
-    // v1.8.61:字幕 prompt token hint 重 render — load() line 293 已呼叫過一次,但當時
+    // 懸浮按鈕 opacity label 動態 i18n 字串
+    _renderFloatingOpacityLabel($('floatingIconOpacity')?.value || 70);
+    // v1.8.61:字幕 prompt hint 重 render — load() line 293 已呼叫過一次,但當時
     // picker.value 還沒從 storage sync(走 navigator.language 推 auto),Jimmy 機器是
     // 繁中環境就拿到繁中,即使 stored uiLanguage='en' 也無效。picker.value sync 後重 render 一次。
     updateYtPromptCostHint();
+    // 只訂閱一次(load() 多次呼叫,見 _uiLangChangeSubscribed 宣告處註解)
+    if (!_uiLangChangeSubscribed) {
+    _uiLangChangeSubscribed = true;
     I18N.subscribeUiLanguageChange((newUi /* , newPref */) => {
       I18N.applyI18n(document, newUi);
+      { const _vEl = $('options-version');
+        if (_vEl) _vEl.textContent = 'v' + browser.runtime.getManifest().version; }
       // 動態 dropdown(refreshSlotDropdownLabels)用 _t() 取 prefix,UI 語系切換要重組
       refreshSlotDropdownLabels();
+      // 自訂快速鍵 recorder:「（預設）」後綴 / 「未設定」文案要跟上新語言
+      renderShortcutRecorders();
       // v1.8.61:#currency-rate-display 不掛 data-i18n,applyI18n 不會碰它,
       // UI 語系切換要主動重 render 才會看到新語言的「目前匯率: ...」字串
       refreshExchangeRateDisplay();
@@ -377,10 +412,13 @@ async function load() {
       _updateCurrencySectionVisibility();
       // v1.8.61:Toast opacity label 跟著 UI 語系重 render
       _renderToastOpacityLabel($('toastOpacity')?.value || 70);
+      // 懸浮按鈕 opacity label 跟著 UI 語系重 render
+      _renderFloatingOpacityLabel($('floatingIconOpacity')?.value || 70);
       // v1.8.61:字幕 prompt token 開銷 hint 是純動態 _t() 計算,applyI18n 不碰,
       // 主動 reapply 才會看到新語言的 dict 字串
       updateYtPromptCostHint();
     });
+    }
   }
 }
 
@@ -391,6 +429,130 @@ const _t = (key, params) => {
   const dictLang = I18N.getUiLanguage($('uiLanguage')?.value || 'auto');
   return I18N.t(key, params, dictLang);
 };
+
+// ── 自訂快速鍵 recorder ────────────────────────────────────
+// 比對 / 驗證 / 格式化邏輯共用 lib/shortcut-utils.js（window.__SKShortcuts，由
+// options.html 的 plain <script> 在本 module 前載入），與 content-shortcuts.js 的
+// keydown 比對單一資料源。錄好的組合寫回 storage.sync.customShortcuts,
+// content-shortcuts.js 的 onChanged listener 即時生效(不必 reload)。
+const SC = window.__SKShortcuts;
+let shortcutTable = SC ? SC.sanitizeTable(null) : { 2: null, 1: null, 3: null }; // 三 slot 全 null
+let recordingSlot = null; // 錄製中的 slot（null = 沒在錄）
+
+// 依瀏覽器引擎（非 OS / build）決定可用修飾鍵：Safari（Mac / iPad / iPhone，extension URL
+// 前綴 safari-web-extension://）的 ⌥ Option 與 ⌘ Command 不傳給網頁 content script，
+// 自訂鍵必含 ⌃ Control；Chrome / Firefox 無此限，⌥ / ⌘ 皆可。統一一份規則，不再依 iOS build 切。
+let _isSafariRuntime = false;
+try { _isSafariRuntime = browser.runtime.getURL('').startsWith('safari-web-extension://'); } catch (_) {}
+
+// validate() / 衝突回傳的 reason key → 在地化訊息
+function shortcutReasonText(v) {
+  if (v.reason === 'shortcut.invalid.isDefault') return _t('shortcut.invalid.isDefault', { key: v.detail });
+  return _t(v.reason);
+}
+
+// 明顯提示：⚠ 前綴 + amber（CSS）。空字串不撐空間。
+function shortcutHint(text) {
+  const el = $('shortcut-hint');
+  if (el) el.textContent = text ? '⚠ ' + text : '';
+}
+
+// 錄製被拒時讓該 recorder 紅框閃一下（明顯提示，不只靠下方 hint 文字）
+function flashRecorderInvalid(slot) {
+  const btn = $(`sc-${slot}`);
+  if (!btn) return;
+  btn.classList.add('invalid');
+  setTimeout(() => btn.classList.remove('invalid'), 1200);
+}
+
+function renderShortcutRecorders() {
+  if (!SC) return;
+  for (const slot of SC.SLOTS) {
+    const btn = $(`sc-${slot}`);
+    const clearBtn = $(`sc-clear-${slot}`);
+    if (!btn) continue;
+    const custom = shortcutTable[slot];
+    const def = SC.MANIFEST_DEFAULTS[slot];
+    if (recordingSlot === slot) {
+      btn.textContent = _t('shortcut.recording');
+    } else if (custom) {
+      btn.textContent = SC.format(custom);
+    } else {
+      btn.textContent = def ? _t('shortcut.defaultSuffix', { key: SC.format(def) }) : _t('common.unset');
+    }
+    btn.classList.toggle('recording', recordingSlot === slot);
+    btn.classList.toggle('is-default', !custom && recordingSlot !== slot);
+    if (clearBtn) clearBtn.disabled = !custom;
+  }
+}
+
+function saveShortcutTable() {
+  browser.storage.sync.set({ customShortcuts: shortcutTable }).then(() => {
+    $('save-status').textContent = _t('options.action.saved');
+    setTimeout(() => { $('save-status').textContent = ''; }, 2000);
+  }).catch(() => {});
+}
+
+// recorder 點擊（進 / 出錄製）+ 清除（還原預設）。按鈕在靜態 HTML,module
+// deferred 執行時 DOM 已就緒，直接綁。
+if (SC) {
+  for (const slot of SC.SLOTS) {
+    $(`sc-${slot}`)?.addEventListener('click', () => {
+      recordingSlot = recordingSlot === slot ? null : slot; // 再點同顆 = 取消
+      shortcutHint('');
+      renderShortcutRecorders();
+    });
+    $(`sc-clear-${slot}`)?.addEventListener('click', () => {
+      shortcutTable[slot] = null;
+      recordingSlot = null;
+      shortcutHint('');
+      saveShortcutTable();
+      renderShortcutRecorders();
+    });
+  }
+  // 錄製用 keydown:capture phase 搶在頁面其他 handler 前
+  window.addEventListener('keydown', (e) => {
+    if (recordingSlot == null) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.code === 'Escape') { // 取消錄製
+      recordingSlot = null;
+      renderShortcutRecorders();
+      return;
+    }
+    const s = SC.eventToShortcut(e);
+    if (!s) return; // 純 modifier 鍵——組合未完成，等下一鍵
+    // Safari（Mac / iPad / iPhone）強制 ⌃ Control —— Safari 把 ⌥／⌘ 攔在系統指令層，
+    // 不傳給網頁 content script（真機 probe 實證）。Chrome / Firefox 不限。
+    const v = SC.validate(s, { requireCtrl: _isSafariRuntime });
+    if (!v.ok) {
+      const failedSlot = recordingSlot;
+      shortcutHint(shortcutReasonText(v));
+      recordingSlot = null;
+      renderShortcutRecorders();
+      flashRecorderInvalid(failedSlot);
+      return;
+    }
+    // 與其他 slot 的「生效鍵」（自訂值 || 內建預設）衝突檢查
+    for (const other of SC.SLOTS) {
+      if (other === recordingSlot) continue;
+      const effective = shortcutTable[other] || SC.MANIFEST_DEFAULTS[other];
+      if (effective && SC.shortcutEquals(s, effective)) {
+        const failedSlot = recordingSlot;
+        shortcutHint(_t('shortcut.invalid.assigned', { key: SC.format(s) }));
+        recordingSlot = null;
+        renderShortcutRecorders();
+        flashRecorderInvalid(failedSlot);
+        return;
+      }
+    }
+    shortcutTable[recordingSlot] = s;
+    recordingSlot = null;
+    shortcutHint('');
+    saveShortcutTable();
+    renderShortcutRecorders();
+  }, true);
+}
 
 // v1.6.1: 「不再提示」按鈕——寫 disableUpdateNotice=true 立即生效
 $('update-banner-dismiss')?.addEventListener('click', async (e) => {
@@ -557,8 +719,19 @@ function fmtMoneyOpts() {
 // en / zh-CN UI 漏翻)。每次 slider 拖動 / init / UI 語系切換都重 render。
 function _renderToastOpacityLabel(value) {
   const wrap = document.getElementById('toastOpacityLabelWrap');
-  if (!wrap) return;
-  wrap.textContent = _t('options.toast.opacity', { value });
+  if (wrap) wrap.textContent = _t('options.toast.opacity', { value });
+  // 即時範例：迷你通知框跟著 slider 套用同透明度
+  const demo = document.getElementById('toastOpacityDemo');
+  if (demo) demo.style.opacity = String(Math.max(0, Math.min(1, Number(value) / 100)));
+}
+
+// 懸浮按鈕透明度 label 走 i18n 動態字串（與 toast opacity 同模式）
+function _renderFloatingOpacityLabel(value) {
+  const wrap = document.getElementById('floatingOpacityLabelWrap');
+  if (wrap) wrap.textContent = _t('options.floating.opacity', { value });
+  // 即時範例：「新」icon 跟著 slider 套用同透明度
+  const demo = document.getElementById('floatingOpacityDemo');
+  if (demo) demo.style.opacity = String(Math.max(0, Math.min(1, Number(value) / 100)));
 }
 
 // v1.8.61:「金額顯示幣值」section 只在繁中 UI 顯示。
@@ -722,40 +895,23 @@ function updateYtPromptCostHint() {
   // AMO source review: 模型名稱經 escapeHtml,其他 ${...} 是純數字計算結果,無 user input;
   // dict 字串本身在 i18n.js 中,t() 內部 _interp 不做 escape,但 params 來源都是
   // 計算結果或預先 escape 過的字串,符合 AMO 要求。
+  // 批次 5-5（v1.10.46）：cache 命中費率改引用 model-pricing 單一資料源——原本寫死
+  // 0.25（Gemini 舊制 75% off），現制 DEFAULT_GEMINI_CACHED_DISCOUNT=0.90（命中付 10%），
+  // 顯示高估 2.5 倍。footer 文案的百分比同步帶 {pct} placeholder。
+  const cachedRate = 1 - DEFAULT_GEMINI_CACHED_DISCOUNT;
+  const cachedPct = Math.round(cachedRate * 100);
   hintEl.innerHTML =
     _t('options.gemini.cost.estimateHeader.html', {
       model: escapeHtml(modelDisplay),
       inputPrice,
     }) + '<br>' +
     `<span style="display:inline-block; margin-left: 12px;">${_t('options.gemini.cost.estimateGlossary.html', {
-      count: fgCount, tok: fgTok, usd: fmtUSD(fgTok), usdCache: fmtUSD(fgTok, 0.25),
+      count: fgCount, tok: fgTok, usd: fmtUSD(fgTok), usdCache: fmtUSD(fgTok, cachedRate),
     })}</span><br>` +
     `<span style="display:inline-block; margin-left: 12px;">${_t('options.gemini.cost.estimateForbidden.html', {
-      count: fbCount, tok: fbTok, usd: fmtUSD(fbTok), usdCache: fmtUSD(fbTok, 0.25),
+      count: fbCount, tok: fbTok, usd: fmtUSD(fbTok), usdCache: fmtUSD(fbTok, cachedRate),
     })}</span><br>` +
-    `<span style="font-size: 11px; color: #999;">${_t('options.gemini.cost.estimateFooter.html')}</span>`;
-}
-
-// v1.4.13: 從 chrome.commands.getAll() 讀取實際綁定鍵位顯示在每張 card 右上角
-// v1.8.19: command id 主要預設（slot 2）從 translate-preset-2 改為 translate-preset-0
-//          （字典序保證 chrome://extensions/shortcuts 顯示順序「主要 → 預設 2 → 預設 3」)
-async function refreshPresetKeyBindings() {
-  const SLOT_TO_COMMAND_ID = { 1: 'translate-preset-1', 2: 'translate-preset-0', 3: 'translate-preset-3' };
-  try {
-    const cmds = await browser.commands.getAll();
-    for (const slot of [1, 2, 3]) {
-      const cmd = cmds.find(c => c.name === SLOT_TO_COMMAND_ID[slot]);
-      const keyEl = $(`preset-key-${slot}`);
-      if (!keyEl) continue;
-      if (cmd?.shortcut) {
-        keyEl.textContent = cmd.shortcut;
-        keyEl.removeAttribute('data-unset');
-      } else {
-        keyEl.textContent = _t('common.unset');
-        keyEl.setAttribute('data-unset', '1');
-      }
-    }
-  } catch { /* Safari / 舊瀏覽器不支援 commands API，欄位維持 '—' */ }
+    `<span style="font-size: 11px; color: #999;">${_t('options.gemini.cost.estimateFooter.html', { pct: cachedPct })}</span>`;
 }
 
 // v1.8.14: 並發 save 防護
@@ -781,7 +937,7 @@ async function _saveImpl() {
   // v1.6.15: 讀回現存的 geminiConfig.model 不從 UI 取（全域 dropdown 已移除）。
   // 保留 storage 欄位避免 migration，且 testGeminiKey 已改走「主要預設」的 model。
   // v1.6.16: 同樣讀回 settings.pricing（後備路徑單價 UI 也移除了）。
-  const existing = await browser.storage.sync.get(['geminiConfig', 'pricing']);
+  const existing = await browser.storage.sync.get(['geminiConfig', 'pricing', 'ytSubtitle']);
   const existingModel = existing.geminiConfig?.model || DEFAULTS.geminiConfig.model;
   // v1.9.16:targetLanguage 已搬到 popup,由 popup 的 change handler 直接寫 storage,
   // options「儲存設定」不寫此欄位避免回灌 stale 值(使用者在 options 開著時於 popup 改 target,
@@ -792,8 +948,11 @@ async function _saveImpl() {
       serviceTier: $('serviceTier').value,
       // v1.8.20: 改用 parseUserNum——空字串/非法字元走 default，避免 NaN 寫進 storage 後送 API 拒絕。
       temperature: parseUserNum($('temperature').value, DEFAULTS.geminiConfig.temperature),
-      topP: parseUserNum($('topP').value, DEFAULTS.geminiConfig.topP),
-      topK: parseUserNum($('topK').value, DEFAULTS.geminiConfig.topK),
+      // v1.10.19: topP/topK UI 已移除(Gemini 3 不使用 top-k sampling、官方建議勿設,
+      // buildSamplingFields 對 Gemini 3 一律略過)。沿用 v1.6.15/v1.6.16 pattern:從 storage
+      // 拉現存值寫回(保留欄位作非 Gemini-3 模型的 fallback,避免 migration)。
+      topP: existing.geminiConfig?.topP ?? DEFAULTS.geminiConfig.topP,
+      topK: existing.geminiConfig?.topK ?? DEFAULTS.geminiConfig.topK,
       maxOutputTokens: parseUserNum($('maxOutputTokens').value, DEFAULTS.geminiConfig.maxOutputTokens),
       systemInstruction: $('systemInstruction').value,
     },
@@ -807,15 +966,17 @@ async function _saveImpl() {
     // v1.6.19: 改用 parseUserNum——空字串/非法字元走 default，合法數字（含 0）保留。
     // 沿用 `|| default` 會把使用者明確打的 0 一律當 falsy 改回預設，造成 UI 不一致。
     // v1.8.19: safetyMargin 從 UI 移除，save() 不再寫，維持 storage 既有值（0.1)
-    maxRetries: parseUserNum($('maxRetries').value, 3),
-    maxConcurrentBatches: parseUserNum($('maxConcurrentBatches').value, 10),
-    maxUnitsPerBatch: parseUserNum($('maxUnitsPerBatch').value, 20),
-    maxCharsPerBatch: parseUserNum($('maxCharsPerBatch').value, 3500),
-    maxTranslateUnits: parseUserNum($('maxTranslateUnits').value, 1000),
+    // 批次 5-6（v1.10.46）：fallback 全改引用 DEFAULTS 單一資料源——原本字面值手抄，
+    // maxConcurrentBatches 已 drift（寫死 10 vs DEFAULTS 30，空欄存檔會悄悄掉到 10）。
+    maxRetries: parseUserNum($('maxRetries').value, DEFAULTS.maxRetries),
+    maxConcurrentBatches: parseUserNum($('maxConcurrentBatches').value, DEFAULTS.maxConcurrentBatches),
+    maxUnitsPerBatch: parseUserNum($('maxUnitsPerBatch').value, DEFAULTS.maxUnitsPerBatch),
+    maxCharsPerBatch: parseUserNum($('maxCharsPerBatch').value, DEFAULTS.maxCharsPerBatch),
+    maxTranslateUnits: parseUserNum($('maxTranslateUnits').value, DEFAULTS.maxTranslateUnits),
     // v1.8.3: 只翻文章開頭（節省費用）
     partialMode: {
       enabled: $('partialModeEnabled').checked,
-      maxUnits: parseUserNum($('partialModeMaxUnits').value, 25),
+      maxUnits: parseUserNum($('partialModeMaxUnits').value, DEFAULTS.partialMode.maxUnits),
     },
     // 只有 custom tier 才寫入 override（其他 tier 的數字從對照表讀，不存）
     rpmOverride: $('tier').value === 'custom' ? (Number($('rpm').value) || null) : null,
@@ -833,7 +994,7 @@ async function _saveImpl() {
       // v1.7.3: blockingThreshold 使用者可調（0 = 永遠 fire-and-forget，大值 = 幾乎都 blocking)
       blockingThreshold: parseUserNum($('glossaryBlockingThreshold').value, DEFAULTS.glossary.blockingThreshold),
       // v1.8.61:UI 是秒,儲存前 × 1000 換算成 ms(storage schema 仍 timeoutMs)
-      timeoutMs: parseUserNum($('glossaryTimeout').value, 60) * 1000,
+      timeoutMs: parseUserNum($('glossaryTimeout').value, (DEFAULTS.glossary.timeoutMs ?? 60000) / 1000) * 1000,
       maxTerms: DEFAULTS.glossary.maxTerms,
     },
     // v1.0.17: Toast 透明度 / v1.0.31: Toast 位置
@@ -844,6 +1005,11 @@ async function _saveImpl() {
     toastAutoHide: $('toastAutoHide').checked,
     // v1.6.8: Toast master switch（false 完全不顯示，連訊息都不發）
     showProgressToast: $('showProgressToast').checked,
+    // 懸浮翻譯按鈕：使用者明確切過 → 一律寫 boolean（之後不再走平台預設）
+    floatingIcon: $('floatingIcon').checked,
+    floatingIconOpacity: parseUserNum($('floatingIconOpacity').value, (DEFAULTS.floatingIconOpacity ?? 0.7) * 100) / 100,
+    // 四指觸控手勢 enable（iOS only；桌面 checkbox 隱藏但維持 loaded 值，不誤寫）
+    fourFingerGesture: $('fourFingerGesture').checked,
     // v1.5.0: 雙語對照視覺標記
     translationMarkStyle: getSelectedMarkStyle(),
     // v1.8.52: 雙語強調色（已在 setDualAccent 時 sanitize 過,直接寫）
@@ -852,7 +1018,10 @@ async function _saveImpl() {
     displayCurrency: getSelectedCurrency(),
     // v1.0.21: 頁面層級繁中偵測開關
     // v1.2.11: YouTube 字幕設定
+    // 先 spread 現有 ytSubtitle,保留「不在本表單」的 popup-managed 欄位
+    //（captionScale / bilingualMode / preferOriginalTrack）——否則整顆 set 會洗掉它們。
     ytSubtitle: {
+      ...(existing.ytSubtitle || {}),
       engine: ($('ytEngine')?.value || 'gemini'),  // v1.4.0
       autoTranslate:      $('ytAutoTranslate').checked,
       // v1.6.23: ASR 分句單一 toggle——checked=progressive（混合）、unchecked=heuristic
@@ -902,6 +1071,10 @@ async function _saveImpl() {
       const v = Number($('auto-translate-slot')?.value);
       return [1, 2, 3].includes(v) ? v : 2;
     })(),
+    // 送到 Instapaper enable/disable 開關（email/密碼/權杖不在此存，連結流程另寫 storage.sync）
+    instapaperEnabled: $('instapaperEnabled')?.checked === true,
+    // 送出時附文章摘要（用翻譯目標語言、Gemini Flash Lite）。預設開
+    instapaperSummaryEnabled: $('instapaperSummaryEnabled')?.checked !== false,
     // v1.6.14: per-model 計價覆蓋（Google 改價時使用者自填）。
     // v1.9.2: cachedDiscount 獨立欄位,可單獨覆蓋(只填折扣不填價格也合法)。
     //   input/output 兩欄都是合法數字才寫入 input/output entry,任一欄空白 → 走內建表;
@@ -971,6 +1144,9 @@ async function _saveImpl() {
       systemPrompt: $('cp-systemPrompt').value || '',
       // v1.8.20: temperature 改 parseUserNum 避免 0 被當 falsy；單價 0 是合法值改 parseUserNum 0
       temperature: parseUserNum($('cp-temperature').value, DEFAULTS.customProvider?.temperature ?? 0.7),
+      fetchTimeoutSec: parseUserNum($('cp-fetchTimeout').value, DEFAULTS.customProvider?.fetchTimeoutSec ?? 15),
+      // 單價空欄 fallback 0 是刻意 sentinel（空 = 無計價，費用顯示 $0），不引 DEFAULTS 的
+      // OpenRouter 校準單價——清空欄位不該悄悄用別人的價格估費
       inputPerMTok: parseUserNum($('cp-inputPerMTok').value, 0),
       outputPerMTok: parseUserNum($('cp-outputPerMTok').value, 0),
       // v1.9.2: UI 0-100% → 儲存比例 0-1;空白 → null(讓 background 走 baseUrl 自動推導)
@@ -1052,11 +1228,11 @@ function _syncPromptTextareaToTarget(textareaId, hintId, getEffectiveFn) {
   if (!textarea) return;
   const tl = _currentTargetLang;
   const cur = textarea.value || '';
-  // 所有 target 各自的 effective default 對 cur 跑 isPromptUnchangedFromDefault(走 storage.js
-  // normalize 邏輯,容忍歷史小幅修字,例如 v1.8.59 的「中國大陸」→「中國」)。
+  // 所有 target 各自的 effective default 對 cur 跑比對(走 storage.js normalize 邏輯,
+  // 容忍歷史小幅修字,例如 v1.8.59 的「中國大陸」→「中國」)。
   // 任一命中 → 視為「未客製」,自動覆蓋為新 target 的 default;否則保留 + show hint。
-  const treatedAsUnchanged = TARGET_LANGUAGES
-    .some(t => isPromptUnchangedFromDefault(cur, getEffectiveFn(t, '')));
+  // v1.10.46:判定下沉到 lib/storage.js 共用(跟 _buildEffective 的未客製判定同源)。
+  const treatedAsUnchanged = isPromptUnchangedFromAnyTargetDefault(cur, getEffectiveFn);
   if (treatedAsUnchanged) {
     textarea.value = getEffectiveFn(tl, '');
     if (hint) hint.hidden = true;
@@ -1107,12 +1283,16 @@ $('uiLanguage')?.addEventListener('change', async () => {
     const dictLang = window.__SK.i18n.getUiLanguage(ul);
     window.__SK.i18n.applyI18n(document, dictLang);
     refreshSlotDropdownLabels();
+    // 自訂快速鍵 recorder:「（預設）」後綴 / 「未設定」文案要跟上新語言
+    renderShortcutRecorders();
     // v1.8.61:#currency-rate-display 不掛 data-i18n,主動重 render 拿新語言匯率字串
     refreshExchangeRateDisplay();
     // v1.8.61:幣值 section 隨 UI 語言切換顯示 / 隱藏
     _updateCurrencySectionVisibility();
     // v1.8.61:Toast opacity label 跟著 UI 語系重 render
     _renderToastOpacityLabel($('toastOpacity')?.value || 70);
+    // 懸浮按鈕 opacity label 跟著 UI 語系重 render
+    _renderFloatingOpacityLabel($('floatingIconOpacity')?.value || 70);
     // v1.8.61:字幕 prompt token 開銷 hint 是純動態 _t() 計算,主動 reapply
     updateYtPromptCostHint();
   }
@@ -1176,8 +1356,6 @@ $('gemini-reset-all')?.addEventListener('click', () => {
   $('serviceTier').value = D.geminiConfig.serviceTier;
   // LLM 參數
   $('temperature').value     = D.geminiConfig.temperature;
-  $('topP').value            = D.geminiConfig.topP;
-  $('topK').value            = D.geminiConfig.topK;
   $('maxOutputTokens').value = D.geminiConfig.maxOutputTokens;
   // P1: 依當前 target 給對應 effective default(zh-TW 走原 DEFAULT,其他走 UNIVERSAL 注入後)
   {
@@ -1406,6 +1584,81 @@ $('test-api-key').addEventListener('click', async () => {
   });
 });
 
+// ── 送到 Instapaper：連結 / 解除連結 ──────────────────────
+// 連結走 instapaperXAuth（email + 密碼 → OAuth token），成功後只存 token /
+// tokenSecret / username 到 storage.sync，密碼欄即時清空（用完即丟）。
+// xAuth fetch 由 options 頁直接發（extension origin，host_permissions 已含
+// instapaper.com）——對齊 popup 路徑，避開 iOS 背景 event page 掛起。
+function renderInstapaperLinkState(saved) {
+  const linked = !!(saved && saved.instapaperToken && saved.instapaperUsername);
+  const form = $('instapaper-link-form');
+  const linkedBox = $('instapaper-linked');
+  if (form) form.hidden = linked;
+  if (linkedBox) linkedBox.hidden = !linked;
+  if (linked) $('instapaper-linked-user').textContent = saved.instapaperUsername;
+}
+
+function instapaperErrorText(error) {
+  switch (error) {
+    case 'AUTH': return _t('options.instapaper.errAuth');
+    case 'CONFIG': return _t('options.instapaper.errConfig');
+    case 'NETWORK': return _t('options.instapaper.errNetwork');
+    default: return _t('options.instapaper.errHttp');
+  }
+}
+
+$('instapaper-connect')?.addEventListener('click', async () => {
+  const btn = $('instapaper-connect');
+  const resultEl = $('instapaper-connect-result');
+  const email = $('instapaper-email').value.trim();
+  const password = $('instapaper-password').value;
+  resultEl.hidden = false;
+  if (!hasInstapaperConsumerKeys()) {
+    resultEl.dataset.state = 'fail';
+    resultEl.textContent = '✗ ' + _t('options.instapaper.errConfig');
+    return;
+  }
+  if (!email || !password) {
+    resultEl.dataset.state = 'fail';
+    resultEl.textContent = '✗ ' + _t('options.instapaper.needCredentials');
+    return;
+  }
+  btn.disabled = true;
+  btn.dataset.state = 'loading';
+  resultEl.dataset.state = 'loading';
+  resultEl.textContent = _t('options.instapaper.connecting');
+  try {
+    const r = await instapaperXAuth({ email, password });
+    if (r.ok) {
+      await browser.storage.sync.set({
+        instapaperToken: r.token,
+        instapaperTokenSecret: r.tokenSecret,
+        instapaperUsername: email,
+      });
+      $('instapaper-password').value = ''; // 密碼用完即丟，不存
+      resultEl.dataset.state = 'ok';
+      resultEl.textContent = '✓ ' + _t('options.instapaper.connectOk');
+      renderInstapaperLinkState({ instapaperToken: r.token, instapaperUsername: email });
+    } else {
+      resultEl.dataset.state = 'fail';
+      resultEl.textContent = '✗ ' + instapaperErrorText(r.error);
+    }
+  } catch (err) {
+    resultEl.dataset.state = 'fail';
+    resultEl.textContent = '✗ ' + (err?.message || String(err));
+  } finally {
+    btn.disabled = false;
+    btn.dataset.state = '';
+  }
+});
+
+$('instapaper-unlink')?.addEventListener('click', async () => {
+  await browser.storage.sync.remove(['instapaperToken', 'instapaperTokenSecret', 'instapaperUsername']);
+  renderInstapaperLinkState({});
+  const resultEl = $('instapaper-connect-result');
+  if (resultEl) resultEl.hidden = true;
+});
+
 // Tier 變更 → 自動更新 RPM/TPM/RPD 顯示
 // v1.6.15: 全域 model dropdown 已移除，Service Tier 已搬到 LLM 參數微調 section。
 // applyModelPricing(model) 在這裡也失去意義（model 不再從 UI 變，計價走 v1.6.14 per-model
@@ -1416,6 +1669,9 @@ $('tier').addEventListener('change', () => {
 // v1.8.19: safetyMargin slider UI 已移除，程式碼內部維持 storage default 0.1
 $('toastOpacity').addEventListener('input', () => {
   _renderToastOpacityLabel($('toastOpacity').value);
+});
+$('floatingIconOpacity').addEventListener('input', () => {
+  _renderFloatingOpacityLabel($('floatingIconOpacity').value);
 });
 $('toastPosition').addEventListener('change', markDirty);
 
@@ -1476,7 +1732,7 @@ $('export-settings').addEventListener('click', async () => {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   // 檔名含時間到秒，避免同一天多次匯出檔名重複
-  const ts = new Date().toISOString().slice(0, 19).replace(/[-:]/g, '').replace('T', '-');
+  const ts = formatYmdHms(Date.now());
   a.href = url;
   a.download = `shinkansen-settings-${ts}.json`;
   a.click();
@@ -1509,6 +1765,10 @@ function sanitizeImport(raw) {
     autoTranslateSlot:   { type: 'number', min: 1, max: 3, int: true }, // v1.6.13
     modelPricingOverrides: { type: 'object' }, // v1.6.14
     showProgressToast:   { type: 'boolean' }, // v1.6.8
+    floatingIcon:        { type: 'boolean', nullable: true }, // 懸浮按鈕 enable（null = 平台預設）
+    floatingIconOpacity: { type: 'number', min: 0.1, max: 1 },
+    floatingIconPos:     { type: 'object' }, // { edge, offsetY }，content script 拖移後寫入
+    fourFingerGesture:   { type: 'boolean' }, // 四指觸控手勢 enable（iOS）
     // issue #48 fix：之前漏列導致匯入時這些 key 默默丟掉
     targetLanguage:      { type: 'string', oneOf: TARGET_LANGUAGES },
     uiLanguage:          { type: 'string', oneOf: UI_LANGUAGES },
@@ -1577,6 +1837,9 @@ function sanitizeImport(raw) {
     else if ('systemPrompt' in td) warnings.push(_t('options.import.warningTransDocPrompt'));
     if (typeof td.applyGlossary === 'boolean') tdClean.applyGlossary = td.applyGlossary;
     else if ('applyGlossary' in td) warnings.push(_t('options.import.warningTransDocApply'));
+    // 批次 5-2：applyFixedGlossary（文件翻譯是否套用固定術語表）原本漏列，匯入被默默丟掉
+    if (typeof td.applyFixedGlossary === 'boolean') tdClean.applyFixedGlossary = td.applyFixedGlossary;
+    else if ('applyFixedGlossary' in td) warnings.push(_t('options.import.warningSkipType', { key: 'translateDoc.applyFixedGlossary' }));
     if (typeof td.temperature === 'number' && Number.isFinite(td.temperature)
         && td.temperature >= 0 && td.temperature <= 2) {
       tdClean.temperature = td.temperature;
@@ -1619,6 +1882,8 @@ function sanitizeImport(raw) {
     if (typeof gl.skipThreshold === 'number' && Number.isInteger(gl.skipThreshold) && gl.skipThreshold >= 0) glClean.skipThreshold = gl.skipThreshold;
     if (typeof gl.blockingThreshold === 'number' && Number.isInteger(gl.blockingThreshold) && gl.blockingThreshold >= 0) glClean.blockingThreshold = gl.blockingThreshold;
     if (typeof gl.maxTerms === 'number' && Number.isInteger(gl.maxTerms) && gl.maxTerms >= 1 && gl.maxTerms <= 500) glClean.maxTerms = gl.maxTerms;
+    // 術語表獨立模型(save 在 saveSettings 的 glossary.model)。空字串代表跟隨主翻譯模型,也合法
+    if (typeof gl.model === 'string') glClean.model = gl.model.trim();
     if (Object.keys(glClean).length > 0) clean.glossary = glClean;
   }
 
@@ -1650,6 +1915,7 @@ function sanitizeImport(raw) {
     if (typeof cp.temperature === 'number' && cp.temperature >= 0 && cp.temperature <= 2) {
       cpClean.temperature = cp.temperature;
     }
+    if (typeof cp.fetchTimeoutSec === 'number' && cp.fetchTimeoutSec >= 5 && cp.fetchTimeoutSec <= 600) cpClean.fetchTimeoutSec = cp.fetchTimeoutSec;
     if (typeof cp.inputPerMTok === 'number' && cp.inputPerMTok >= 0) cpClean.inputPerMTok = cp.inputPerMTok;
     if (typeof cp.outputPerMTok === 'number' && cp.outputPerMTok >= 0) cpClean.outputPerMTok = cp.outputPerMTok;
     // v1.9.2: cachedDiscount 0-1,null 表示走 baseUrl 自動推導
@@ -1659,6 +1925,15 @@ function sanitizeImport(raw) {
         && cp.cachedDiscount >= 0 && cp.cachedDiscount <= 1) {
       cpClean.cachedDiscount = cp.cachedDiscount;
     }
+    // thinkingLevel:enum,非法值落回 'auto'(對齊 saveSettings 的 fallback)
+    if (typeof cp.thinkingLevel === 'string'
+        && ['auto', 'off', 'low', 'medium', 'high'].includes(cp.thinkingLevel)) {
+      cpClean.thinkingLevel = cp.thinkingLevel;
+    }
+    // extraBodyJson:自由字串(save 端只 trim,不在此驗 JSON 合法性,維持與 saveSettings 一致)
+    if (typeof cp.extraBodyJson === 'string') cpClean.extraBodyJson = cp.extraBodyJson.trim();
+    // useStrongSegMarker:boolean(預設 true,讀取走 !== false)
+    if (typeof cp.useStrongSegMarker === 'boolean') cpClean.useStrongSegMarker = cp.useStrongSegMarker;
     if (Object.prototype.hasOwnProperty.call(cp, 'apiKey')) {
       warnings.push(_t('options.import.warningCpApiKey'));
     }
@@ -1751,6 +2026,7 @@ function sanitizeImport(raw) {
       asrMode:             { type: 'string', oneOf: ['heuristic', 'progressive', 'llm'] },
       bilingualMode:       { type: 'boolean' },
       preferOriginalTrack: { type: 'boolean' },
+      captionScale:        { type: 'number', min: 50, max: 400 },
     };
     for (const [key, rule] of Object.entries(ytRules)) {
       if (!(key in yt)) continue;
@@ -1791,6 +2067,18 @@ function sanitizeImport(raw) {
       pmClean.maxUnits = pm.maxUnits;
     }
     if (Object.keys(pmClean).length > 0) clean.partialMode = pmClean;
+  }
+
+  // 批次 5-2：customShortcuts（自訂快速鍵三 slot 表）。匯出是 sync.get(null) 全量，
+  // 匯入原本漏列 → 還原備份後自訂快速鍵整個消失且無警告。
+  // 走 shortcut-utils sanitizeTable 消毒（保證三 slot key 都在、value 是合法 shortcut 或 null）。
+  if ('customShortcuts' in raw) {
+    const cs = raw.customShortcuts;
+    if (SC && cs && typeof cs === 'object' && !Array.isArray(cs)) {
+      clean.customShortcuts = SC.sanitizeTable(cs);
+    } else {
+      warnings.push(_t('options.import.warningSkipType', { key: 'customShortcuts' }));
+    }
   }
 
   return { clean, warnings };
@@ -1840,6 +2128,16 @@ let _shortcutsPlatform = 'safari'; // fallback:無法 deep-link 到內建設定 
 if (_extUrl.startsWith('chrome-extension://')) _shortcutsPlatform = 'chrome';
 else if (_extUrl.startsWith('moz-extension://')) _shortcutsPlatform = 'firefox';
 document.body.classList.add(`runtime-${_shortcutsPlatform}`);
+// iOS build（SPEC-PRIVATE §26）再疊一層（與 runtime-safari 並存）。build 屬性 vs
+// 平台屬性分離見 lib/platform.js：
+//   - runtime-ios（build 屬性，不論 host OS）：PDF 入口隱藏等 build-strip 相關
+//   - runtime-ios-touch（平台屬性，只在真觸控裝置）：快速鍵 section 的四指 tap
+//     說明（.ios-only）。iOS build 跑在 macOS（無觸控）時不加 → 不顯示四指 tap
+//     說明，尊重 macOS 特性（intro-safari 的 ⌃ Control 說明照常顯示）。
+if (IS_IOS_BUILD) {
+  document.body.classList.add('runtime-ios');
+  if (isTouchScreenDevice()) document.body.classList.add('runtime-ios-touch');
+}
 
 // Event delegation:綁 document,anchor 被 data-i18n-html replace 重建後仍有效
 document.addEventListener('click', (e) => {
@@ -2924,7 +3222,7 @@ $('log-export').addEventListener('click', () => {
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
-  const ts = new Date().toISOString().slice(0, 19).replace(/[-:]/g, '').replace('T', '-');
+  const ts = formatYmdHms(Date.now());
   a.href = url;
   a.download = `shinkansen-log-${ts}.json`;
   a.click();

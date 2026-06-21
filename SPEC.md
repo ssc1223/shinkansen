@@ -4,10 +4,10 @@
 
 - 文件版本：v1.1
 - 建立日期：2026-04-08
-- 最後更新：2026-05-18（v1.9.26）
+- 最後更新：2026-06-09（v1.10.44）
 - 目標平台：Chrome（Manifest V3）
 - 作業系統：macOS 26
-- 目前 Extension 版本：1.10.0
+- 目前 Extension 版本：1.10.64
 
 ---
 
@@ -31,7 +31,7 @@ Shinkansen 是一款 Chrome 擴充功能，將英文（或其他外語）網頁�
 
 ## 2. 功能範圍
 
-### 2.1 已實作（v1.10.0 為止）
+### 2.1 已實作（v1.10.64 為止）
 
 詳細版本歷史見 [`CHANGELOG.md`](CHANGELOG.md)。
 
@@ -39,7 +39,7 @@ Shinkansen 是一款 Chrome 擴充功能，將英文（或其他外語）網頁�
 |---------|------|------|
 | 網頁翻譯 | ✅ | Option+S（Gemini）/ Option+G（Google Translate）切換；單語覆蓋 / 雙語對照雙模式；漸進分批注入；還原原文 |
 | 雙語對照模式 | ✅ | v1.5.0 新增；popup toggle 切換；譯文以 `<shinkansen-translation>` wrapper 形式 append 在原段落後/內；4 種視覺標記 |
-| YouTube 字幕翻譯 | ✅ | XHR 預翻 + on-the-fly 備援；時間視窗批次；seek/rate 補償；字幕框展開置中；SPA 導航自動重啟；ASR（自動字幕）走獨立合句路徑（v1.6.20） |
+| YouTube 字幕翻譯 | ✅ | XHR 預翻 + on-the-fly 備援；時間視窗批次；seek/rate 補償；字幕框展開置中；SPA 導航自動重啟；ASR（自動字幕）走獨立合句路徑（v1.6.20）；行動版 `m.youtube.com` 同樣支援（auto-CC 走 `#movie_player` captions module API、SPA 用 `state-navigateend` 事件） |
 | SPA 支援 | ✅ | History API 攔截 + URL 輪詢；MutationObserver rescan；Content Guard；stickyTranslate 續翻 |
 | 段落偵測 | ✅ | walker + mixed-content fragment；PRE 條件排除；leaf DIV / grid cell 補抓；nav 放行 |
 | 佔位符序列化 | ✅ | 配對型 ⟦N⟧…⟦/N⟧ + 原子型 ⟦*N⟧；媒體保留；含圖連結重建 |
@@ -49,13 +49,15 @@ Shinkansen 是一款 Chrome 擴充功能，將英文（或其他外語）網頁�
 | 翻譯快取 | ✅ | `chrome.storage.local`；SHA-1 key；版本變更自動清空 |
 | 設定頁 | ✅ | 5 Tab：一般設定 / Gemini / 術語表 / 用量紀錄 / Debug；匯入匯出 |
 | Popup 面板 | ✅ | 翻譯/還原；快取/費用統計；自動翻譯開關；YouTube 字幕 toggle |
-| Toast 提示 | ✅ | 進度條 + 計時器；可調透明度與位置；`toastAutoHide` 自動關閉選項 |
+| Toast 提示 | ✅ | 進度條 + 計時器；可調透明度與位置（設定頁透明度旁附即時範例預覽）；`toastAutoHide` 自動關閉選項 |
+| 懸浮翻譯按鈕 | ✅ | 頁面邊緣可拖移方形「新」icon（`content-floating-icon.js`）；短按走 `popupButtonSlot` 預設翻譯、長按選三組 preset、拖移吸附左右緣（`floatingIconPos` 位置記憶）；手機／平板預設開、桌面預設關（`floatingIcon`）；可調透明度（`floatingIconOpacity`）；視覺 16px／可點 32px；closed Shadow DOM，不注入文章內容 |
 | 用量紀錄 | ✅ | IndexedDB + 折線圖 + CSV 匯出；日期/模型/網域/文字搜尋篩選 |
 | Debug 工具 | ✅ | Debug Bridge（CustomEvent）；Log buffer 1000 筆 + 持久化 100 筆（`youtube` / `api` / `rate-limit` / `translate` 跨 SW 重啟）；YouTube `GET_YT_DEBUG` action |
 | Google Docs 支援 | ✅ | 偵測編輯頁自動導向 `/mobilebasic` 閱讀版再翻譯 |
 | 自動語言偵測 | ✅ | 跳過已是目標語言的頁面（可設定關閉）；比例制偵測；日韓文排除；v1.8.59 起 target-aware（zh-TW/zh-CN/en 各自跳對應源語言） |
 | 翻譯目標語言 | ✅ | v1.8.59 新增；可選 zh-TW（台灣繁中）/ zh-CN（中國簡中）/ en（英文）；非 zh-TW 走 universal prompt 注入 `{targetLanguage}`；詳見 §3.9 |
-| 自動翻譯網站 | ✅ | 網域白名單（支援萬用字元）；`autoTranslate` 總開關 |
+| 自動翻譯網站 | ✅ | 網域白名單（支援萬用字元；填裸網域或整段網址皆可，比對前正規化成主機名）；`autoTranslate` 總開關 |
+| iOS／iPadOS Safari | 🚧 | TestFlight 階段（未上架）；四指輕點觸發（= 主要預設快速鍵完整 toggle，`content-touch.js`；可在設定頁關閉 `fourFingerGesture`）；popup／options iOS 調整（popup viewport 依機型動態放大撐滿、popup 快速鍵提示改顯示四指輕點、options 窄版 RWD＋16px 輸入框防 focus 自動 zoom、隱藏 PDF 入口）；build 期 strip `translate-doc/`（不做 PDF 翻譯）；m.youtube.com 字幕翻譯完整支援（行動版 Safari 不需切電腦版） |
 
 ### 2.3 明確不做
 
@@ -116,17 +118,17 @@ POST https://generativelanguage.googleapis.com/v1beta/models/{model}:generateCon
 
 **對齊失敗 fallback**：回傳段數不符時退回逐段單獨呼叫模式。
 
-**實作位置**：`content.js` 的 `packBatches()` 為主要打包層，`lib/gemini.js` 的 `packChunks()` 為雙重保險層。
+**實作位置**：`content.js` 的 `packBatches()` 為主要打包層，`lib/system-instruction.js` 的 `packChunks()` 為 adapter 端雙重保險層（Gemini / OpenAI-compat 共用）。v1.10.46 起 `packChunks` 由呼叫端帶入 `settings.maxUnitsPerBatch` / `maxCharsPerBatch`——原本寫死預設值，使用者調高設定後在 adapter 端被重切蓋掉（>20 段無效且無提示）。
 
 ### 3.5 Rate Limiter
 
 三維滑動視窗（RPM / TPM / RPD），實作於 `lib/rate-limiter.js`。
 
 - **RPM**：60 秒滑動視窗，時間戳環形緩衝區
-- **TPM**：60 秒滑動視窗，token 估算 `Math.ceil(text.length / 3.5)`
+- **TPM**：60 秒滑動視窗，token 估算 `Math.ceil(text.length / 3.5)`。單次請求估算 ≥ tpmCap 時改為「等視窗清空即放行 + warn log」（否則永遠湊不出足夠空間會無限等待），超量交由 API 端 429 把關
 - **RPD**：太平洋時間午夜重置，持久化至 `chrome.storage.local`（key `rateLimit_rpd_<YYYYMMDD>`）
 - **安全邊際**：每個上限乘以 `(1 - safetyMargin)`，預設 10%
-- **429 處理**：尊重 `Retry-After` header，否則指數退避 `2^n * 500ms`（上限 8 秒）。RPD 爆則不重試
+- **429 處理**：尊重 `Retry-After` header（等待上限 `RETRY_AFTER_CAP_MS` 30 秒，Gemini / OpenAI-compat 兩路皆同），否則指數退避 `2^n * 500ms`（上限 8 秒）。RPD 爆則不重試
 
 Tier 對照表在 `lib/tier-limits.js`，涵蓋 Free / Tier 1 / Tier 2 各模型的 RPM / TPM / RPD。設定頁可選 Tier 或自訂覆寫。
 
@@ -147,18 +149,20 @@ Tier 對照表在 `lib/tier-limits.js`，涵蓋 Free / Tier 1 / Tier 2 各模型
 - 輸入壓縮：只送 heading、每段第一句、caption、頁面標題（約原文 20–30%）
 - 術語表快取於 `chrome.storage.local`（key `gloss_<sha1>`），版本變更時清空
 - 術語表請求走 rate limiter priority 0 插隊
-- 逾時 `glossary.timeoutMs`（預設 60000ms），`gemini.js` 內部 fetch 層另有 `fetchTimeoutMs`（預設 55000ms）
+- 逾時 `glossary.timeoutMs`（預設 60000ms），`gemini.js` 內部 fetch 層另有 `fetchTimeoutMs`（預設 15000ms，對齊主翻譯）
 - 失敗或逾時 → fallback 成不帶術語表的一般翻譯
 - 術語表 temperature 獨立設定（預設 0.1，要穩定不要有創意）
 - 預設停用（`glossary.enabled` 預設 `false`），使用者可在設定頁或 Popup 開啟
 
 ### 3.7 禁用詞清單
 
-v1.5.6 新增。針對 AI 模型容易漏網的非台灣慣用譯法建立可由使用者編輯的禁用對照表，作為純 prompt 注入機制——遵循硬規則 §7（中文排版偏好交給 system prompt 處理），content 端不做事後 regex replace。
+v1.5.6 新增。針對 AI 模型容易漏網的非台灣慣用譯法、或使用者單純不希望出現在譯文中的詞彙，建立可由使用者編輯的禁用清單，作為純 prompt 注入機制——遵循硬規則 §7（中文排版偏好交給 system prompt 處理），content 端不做事後 regex replace。
 
-**預設清單**：25 條，定義在 `lib/storage.js` 的 `DEFAULT_FORBIDDEN_TERMS`，涵蓋常見的視頻/軟件/數據/網絡/質量/用戶/默認/創建/實現/運行/發布/屏幕/界面/文檔/操作系統等對映。v1.5.6 同步修正了 v0.83 起 `DEFAULT_SYSTEM_PROMPT` 內錯誤的「進程→線程」對映（兩者都是非台灣譯法：process 在台灣應為「行程」、thread 應為「執行緒」），改在禁用詞清單分開列出兩條正確對映。
+**替換詞可留空**：每條只有「禁用詞」為必填，「替換詞」可留空。填了替換詞 → 要求模型改用指定詞；留空 → 只要求模型不可使用該詞，由模型自行改寫成自然的台灣慣用說法（用於「單純討厭某詞、但提不出固定替換詞」的情境，例如陳腔濫調）。
 
-**注入位置**：`lib/gemini.js` 的 `buildEffectiveSystemInstruction()` 在所有其他規則（含 `fixedGlossary`）之後、systemInstruction 的最末端，以 `<forbidden_terms_blacklist>` XML tag 包起來注入。文字明確指示模型「即使原文是英文（如 video / software / data），譯文也只能使用右欄」、「優先級高於任何 stylistic 考量」，並交代「若該詞為文章本身討論的主題請使用引號保留原詞」的合理 escape hatch。
+**預設清單**：25 條，定義在 `lib/storage.js` 的 `DEFAULT_FORBIDDEN_TERMS`，涵蓋常見的視頻/軟件/數據/網絡/質量/用戶/默認/創建/實現/運行/發布/屏幕/文檔/操作系統等對映，並含兩條留空替換詞的純禁用詞（沒有之一 / 橫空出世）作為範例。v1.5.6 同步修正了 v0.83 起 `DEFAULT_SYSTEM_PROMPT` 內錯誤的「進程→線程」對映（兩者都是非台灣譯法：process 在台灣應為「行程」、thread 應為「執行緒」），改在禁用詞清單分開列出兩條正確對映。
+
+**注入位置**：`lib/system-instruction.js` 的 `buildEffectiveSystemInstruction()` 在所有其他規則（含 `fixedGlossary`）之後、systemInstruction 的最末端，以 `<forbidden_terms_blacklist>` XML tag 包起來注入。區塊內拆兩段：有替換詞的列成「禁用 → 必須改用」對照（明確指示「即使原文是英文如 video / software / data，譯文也只能使用右欄」），留空替換詞的列成「禁用（未指定替換詞）」清單（要求模型不可使用、自行改寫）。並交代「優先級高於任何 stylistic 考量」與「若該詞為文章本身討論的主題請使用引號保留原詞」的合理 escape hatch。
 
 **Debug 偵測層**：實作於 `lib/forbidden-terms.js` 的 `detectForbiddenTermLeaks()`。`background.js` 的 `handleTranslate` 在 `translateBatch` 成功 resolve 後、回傳給 content script 之前，逐段掃描譯文是否含有禁用詞，命中時用 `debugLog('warn', 'forbidden-term-leak', ...)` 寫一筆診斷訊息（含 forbidden / replacement / sourceSnippet / translationSnippet），方便使用者從 Debug 分頁追查模型漏網案例。**純記錄、不修改譯文**。
 
@@ -177,6 +181,8 @@ v1.5.7 新增。除了 Gemini 與 Google Translate 兩條既有引擎，使用�
 **共用模組** `lib/system-instruction.js`（v1.5.7 從 `lib/gemini.js` 抽出）：`DELIMITER` / `packChunks` / `buildEffectiveSystemInstruction` 三個 helper 由 Gemini 與 OpenAI-compat 兩條 adapter 共用，確保「禁用詞清單 + 固定術語表 + 自動 glossary + 多段分隔符 / 段內換行 / 佔位符」等規則只實作一次、未來新規則只改一處。
 
 **systemPrompt 行為**：使用者可在「自訂 Provider」分頁填獨立 `systemPrompt`，作為 `buildEffectiveSystemInstruction` 的 base（不繼承 Gemini 分頁的 `geminiConfig.systemInstruction`）。但 `fixedGlossary` 與 `forbiddenTerms` 仍由共用注入機制處理，自訂 Provider 自動享有兩者 — 改一處（術語表 / 禁用詞清單分頁）兩邊同步生效。
+
+**API 逾時 `fetchTimeoutSec`（預設 15）**：每次 API 請求等待回應的最長秒數。本機 LLM（Ollama 等）冷啟動從硬碟載入模型到 VRAM 可能需要 120–300 秒，使用者可在「自訂模型」分頁自行調高。`lib/openai-compat.js` 的 `fetchWithRetry` 讀取此值乘以 1000 作為 `AbortController` timeout（ms）。範圍 5–600 秒。
 
 **不走項目**：rate limiter（OpenRouter 等 provider 自己處理配額；既有 `fetchWithRetry` 的 429 退避重試已能應付）。
 
@@ -349,6 +355,28 @@ userOverride trim 為空 OR userOverride.trim() === DEFAULT_*_PROMPT.trim()
 
 **禁用詞清單 UI 與 storage 對齊**（v1.8.60 P2 附帶修補）：之前 options.js 用 `s.forbiddenTerms`（已 spread DEFAULTS）→ 永遠 25 條，UI 跟 storage.js getSettings() 的 target-aware fallback drift。修法改用 `saved.forbiddenTerms`（只看 storage 實際寫入）+ target-aware fallback（zh-TW → DEFAULT、其他 → 空），對齊 §3.9「禁用詞清單依 target 預設」。切 target picker 時透過 `_isForbiddenTermsUnchangedFromDefault()` 判斷是否「視為未客製」，自動切；已客製化保留使用者編輯。
 
+### 3.11 送到 Instapaper（下游 reader 整合）
+
+把目前（已就地翻譯）的整頁送進使用者自己的 Instapaper 帳號。選用功能，**預設關**。
+
+- **引擎**：Instapaper Full API（OAuth 1.0a + xAuth），`lib/instapaper.js`。走 Full API（非 Simple `/api/add`）是因為要把我們用 Readability 抽好的乾淨譯文正文，經 `bookmarks/add` 的 `content` 參數送出 → 存進去的是譯文版文章；Simple API 只吃網址會讓 Instapaper 重抓原文（未翻譯）。**不設** `is_private_from_source`：影片綁架的真因是 frame 廣播（見訊息協定），不是 Instapaper re-crawl；實測帶 content、不帶該參數，Instapaper 即用我們的 content 且保留原始 source URL 連結（設了會變 private 且失去連結）。
+- **consumer 金鑰**：app 層 consumer key/secret 放 gitignored 的 `lib/instapaper-keys.js`（掛 `globalThis.__SK.INSTAPAPER_KEYS`，popup/options 以 classic `<script>` 載入、background 用 dynamic `import()` 載入並容忍缺檔）。public repo 不 commit 金鑰。
+- **連結（xAuth）**：options 頁填 Instapaper email + 密碼一次，`instapaperXAuth` 換取 OAuth token；**只存** `instapaperToken` / `instapaperTokenSecret` / `instapaperUsername` 到 `storage.sync`，密碼用完即丟。連結的 fetch 由 options 頁直接發。
+- **設定欄位**：`DEFAULT_SETTINGS.instapaperEnabled`（boolean，預設 false）。token 三鍵不在 DEFAULT_SETTINGS，連結後才寫 `storage.sync`。
+- **訊息協定**：
+  - content `EXTRACT_PAGE_HTML` → 回 `{ ok, url, title, html }`（`SK.extractPageHtml`）。**只由最上層 frame 回應**：content script 以 `all_frames` 注入，頁內嵌入的 iframe（youtube-nocookie 等）也跑同一份 content script；`browser.tabs.sendMessage` 未指定 frameId 會廣播到所有 frame，內嵌影片 iframe frame 搶先回應會把「影片嵌入頁的文件」當主文送出（存成影片）→ 子 frame（`window.top !== window`）一律不回應。擷取用 vendored Readability（`lib/readability.js`，`@mozilla/readability` Apache-2.0 + 中文頓號 `、` 評分 patch）在 `document` 的 clone 上抽正文：先剝擴充注入 UI（`#shinkansen-toast-host`/`#shinkansen-dual-style`）與媒體嵌入（`iframe/video/audio/object/embed/lite-youtube`——避免中文譯文字元數少時、被保留的影片 iframe 反超整篇被選成正文）再跑 Readability，輸出再套硬化（剝註解／去重標題／段落 `div`→`p`／空殼修剪）並包成完整 HTML 文件。Readability 抽不到的罕見頁面退回 `SK.extractPageHtmlLegacy`（舊整頁 `documentElement` 剝除）。
+    - **標題**（`SK.pickExtractTitle`）：取譯文標題而非 `document.title`——single mode 不動 `<head><title>`/og:title，譯文標題在已就地翻譯的主 `<h1>`（優先 `main`/`article`/第一個 `<h1>`，沒 h1 退回 `document.title`）。同時改寫 clone 的 `<head><title>` 為譯文標題（雙保險）。
+    - **去重複標題**：移除 content 內與 title 同字的主 `<h1>`——下游 reader 用 title 參數另渲染一行標題，body 再留同字 h1 會出現重複標題。只移除「正規化文字 === title」的那個主 h1。
+  - background → content `INSTAPAPER_TOAST`（`status`: `sending`/`sent`/`not-enabled`/`failed-auth`/`failed-network`/`failed`）供快捷鍵路徑回饋（無 popup → 走 content toast）。
+- **兩條觸發路徑**（共用 `lib/instapaper.js` 的 `saveToInstapaper`）：
+  - **popup 按鈕** `#send-to-instapaper-btn`（`instapaperEnabled && 已連結` 才顯示）→ popup 直接 `saveToInstapaper`（避開 iOS 背景 event page 掛起）。
+  - **快捷鍵 Alt+I**（`commands.send-to-instapaper`）→ background `onCommand` → 取 active tab `EXTRACT_PAGE_HTML` → 背景 `saveToInstapaper`，enable gate 未連結時 `not-enabled` toast no-op。
+- **host_permissions**：`https://www.instapaper.com/*`。
+- **i18n**：`options.instapaper.*` / `popup.action.sendToInstapaper` / `instapaper.*`（toast）八語齊備。
+- **回歸測試**：`test/unit/instapaper-oauth.spec.js`（RFC 5849 §3.4.1 base string 向量 + OAuth 1.0 A.5.2 HMAC-SHA1 簽章向量 + payload / parse / mock fetch 分支）、`test/regression/extract-readability-instapaper.spec.js`（Readability 路徑：縮到正文、剝影片嵌入、標題取譯文 h1、去重標題）、`test/regression/extract-page-html.spec.js`（legacy fallback 路徑剝除 / 保留斷言）。frame 廣播搶答路徑需真實多 frame + 訊息廣播時序、harness 測不到，記入 `PENDING_REGRESSION`。
+
+> OAuth 簽章細節、Readability 選型與 frame 廣播根因、is_private_from_source 取捨、human review 卡關等設計脈絡見 SPEC-PRIVATE / `PLAN-send-to-instapaper.md`（本機）。
+
 ---
 
 ## 4. 翻譯顯示規格
@@ -386,6 +414,8 @@ userOverride trim 為空 OR userOverride.trim() === DEFAULT_*_PROMPT.trim()
 **Content Guard dual 分支**：`STATE.translationCache: Map<originalEl, { wrapper, insertMode }>` 追蹤每個 wrapper 的當初插入位置。若 SPA framework 把 wrapper 從 DOM 拔掉，Content Guard 依 `insertMode`（`afterend` / `append` / `afterend-block-ancestor`）把同一個 wrapper element re-append 回去，不重新呼叫 LLM。
 
 **YouTube 字幕**：`content-youtube.js` 維持單語字幕替換路徑，不支援 dual。
+
+**YouTube 字幕字級 scale**（`ytSubtitle.captionScale`，%，預設 100 = 跟隨各平台原生字幕大小）：全平台統一旋鈕，一個值套**三條渲染路徑**——(1) overlay（ASR／雙語,桌面／macOS／iOS 視窗內）：乘到 `--sk-cue-size`（原生字級 px × scale／100，`_scaledCueSizePx`）；(2) YouTube 視窗內原生字幕 `.ytp-caption-segment`（內建字幕單語譯文 **以及** YouTube 自家字幕／帳號層級自動翻譯——後者 Shinkansen 沒接手寫字幕,光靠 `_setSegmentText` hook 接不到）：scale≠100 時啟動 `_captionScaleObserver`（觀察 `#movie_player` subtree,rAF 合併）持續把畫面上任何 segment 套成設定大小（`_applyScaleToSegment`：`dataset.skBaseFs` 捕捉 YouTube 原始基準避免回授、值相同不重設不自觸發迴圈）;scale=100 停掉 observer + 還原 base（零殘留）。`_setSegmentText` 寫譯文時也順手套一次（Shinkansen-active 即時生效）；(3) iPhone／iPad 原生全螢幕（`webkitEnterFullscreen`，overlay 被系統播放器取代）：注入 `video::cue { font-size: <captionScale>% }`（真機驗證 iOS 原生全螢幕套用網頁 `::cue`；Safari 18.2 起系統預設字幕樣式可被網頁覆寫）。設定位於 **popup**，僅在 YouTube 影片頁（`youtube.com/watch`）顯示；change handler 寫 `ytSubtitle.captionScale`，content-youtube.js `onChanged` 即時套用（`_applyYtCaptionScale`：重套 overlay `--sk-cue-size` + 逐個原生 segment + iOS `::cue`）。預設 100 = 三條路徑全零改變（`_applyScaleToSegment` 在 scale=100 且未套過時完全不碰 segment）。
 
 **模式切換時機**：popup 切換 displayMode 時若已翻譯，content script 收到 `MODE_CHANGED` 訊息會顯示提示 toast，要求使用者按快速鍵重新翻譯以套用；當前頁面不動（避免半翻半改）。下次 `translatePage` 進入時讀取最新 `displayMode` 寫進 `STATE.translatedMode` 鎖定本次模式。
 
@@ -474,38 +504,80 @@ PRE, FOOTER
 ```
 shinkansen/
 ├── manifest.json
-├── content-ns.js         # 命名空間、共用狀態 STATE、常數、工具函式
-├── content-toast.js      # Toast 提示系統（Shadow DOM 隔離）
-├── content-detect.js     # 段落偵測（語言偵測、容器排除、collectParagraphs）
-├── content-serialize.js  # 佔位符序列化/反序列化（⟦N⟧…⟦/N⟧ 協定）
-├── content-inject.js     # DOM 注入（resolveWriteTarget、injectIntoTarget）
-├── content-spa.js        # SPA 導航偵測 + Content Guard + MutationObserver
-├── content-youtube-main.js  # YouTube XHR 攔截（MAIN world, document_start, v1.2.8）
-├── content-youtube.js    # YouTube 字幕翻譯（isolated world, v1.2.11）
-├── content.js            # 主協調層（translatePage、Debug API、初始化）
+├── content-ns.js             # 命名空間、共用狀態 STATE、常數、工具函式
+├── content-toast.js          # Toast 提示系統（Shadow DOM 隔離）
+├── content-detect.js         # 段落偵測（語言偵測、容器排除、collectParagraphs）
+├── content-serialize.js      # 佔位符序列化/反序列化（⟦N⟧…⟦/N⟧ 協定）
+├── content-inject.js         # DOM 注入（resolveWriteTarget、injectIntoTarget）
+├── content-spa.js            # SPA 導航偵測 + Content Guard + MutationObserver
+├── content-youtube-main.js   # YouTube XHR 攔截（MAIN world，document_start）
+├── content-youtube.js        # YouTube 字幕翻譯（isolated world）
+├── content-fw-detect-main.js # main world framework 偵測 bridge（isolated world 看不到 React expando，CustomEvent 橋接，MAIN world）
+├── content-drive.js          # Google Drive 影片 ASR 字幕翻譯（top frame 浮層 overlay）
+├── content-drive-iframe.js   # Drive ASR 字幕 URL 偵測（youtube.googleapis.com/embed iframe）
+├── content-touch.js          # iOS 四指 tap 手勢（IS_IOS_BUILD gate，桌面 build 為 no-op）
+├── content.js                # 主協調層（translatePage、Debug API、初始化）
+├── content-shortcuts.js      # 自訂快速鍵 keydown capture 比對 → 本地 dispatch（§10.1）
 ├── content.css
-├── background.js         # Service Worker（ES module）
+├── background.js             # Service Worker（ES module）
+├── privacy-policy.html       # 隱私權政策（繁中）
+├── privacy-policy.en.html    # 隱私權政策（英文）
+├── LICENSE                   # ELv2
+├── THIRD-PARTY-NOTICES.md    # 第三方授權聲明
 ├── lib/
-│   ├── gemini.js         # Gemini API 呼叫、分批、重試
-│   ├── cache.js          # 翻譯快取（LRU + debounced flush）
-│   ├── storage.js        # 設定讀寫、預設值
-│   ├── rate-limiter.js   # 三維 Rate Limiter
-│   ├── tier-limits.js    # Tier 對照表
-│   ├── logger.js         # 結構化 Log 系統
-│   ├── usage-db.js       # 用量追蹤（IndexedDB）
-│   ├── format.js         # 共用格式化函式（formatBytes/formatTokens/formatUSD）
-│   └── vendor/           # 第三方程式庫
+│   ├── gemini.js             # Gemini API 呼叫、分批、重試
+│   ├── openai-compat.js      # 自訂 OpenAI-compatible Chat Completions adapter（§3.8）
+│   ├── openai-compat-thinking.js # 自訂模型 thinking 控制 mapping（thinkingLevel → 各家 provider schema）
+│   ├── google-translate.js   # Google Translate 非官方 API 封裝（translate_a/single，免 API Key）
+│   ├── system-instruction.js # 跨 provider 共用的翻譯 batch 構建 helper（DELIMITER／packChunks）
+│   ├── bg-error.js           # 背景端錯誤 error code 協定（codedError，§14.1）
+│   ├── cache.js              # 翻譯快取（LRU + debounced flush）
+│   ├── storage.js            # 設定讀寫、預設值
+│   ├── constants.js          # lib/ 與 content script 共用的批次翻譯數值常數
+│   ├── rate-limiter.js       # 三維 Rate Limiter
+│   ├── tier-limits.js        # Tier 對照表
+│   ├── rate-limit-init-log-dedup.js # 「rate limiter initialized」log 去重判斷
+│   ├── logger.js             # 結構化 Log 系統
+│   ├── usage-db.js           # 用量追蹤（IndexedDB）
+│   ├── model-pricing.js      # Gemini 模型計價表（USD per 1M tokens）
+│   ├── exchange-rate.js      # USD ↔ TWD 匯率抓取 + 快取
+│   ├── format.js             # 共用格式化函式（formatBytes/formatTokens/formatUSD）
+│   ├── format-currency.js    # 金額格式化 + fallback 匯率常數（content script 與 Node 測試共用）
+│   ├── forbidden-terms.js    # 中國用語黑名單 Debug 偵測層
+│   ├── i18n.js               # Extension UI 字串 i18n 字典（8 語，§3.10）
+│   ├── compat.js             # Safari／Firefox 相容性 shim（chrome.* ↔ browser.*）
+│   ├── platform.js           # runtime 平台偵測（iOS build 跑在 macOS 的辨別）
+│   ├── distribution.js       # 編譯期注入的 MAS build flag（ES module 版）
+│   ├── distribution-cs.js    # 同上的 content script 版（與 distribution.js 同步）
+│   ├── update-check.js       # GitHub Releases 更新檢查
+│   ├── welcome-notice.js     # 更新後「歡迎升級」提示寫入邏輯
+│   ├── release-highlights.js # 近期重大更新文字單一來源
+│   ├── shortcut-utils.js     # 自訂快速鍵 helper（UMD，content/options/spec 共用，§10.1）
+│   ├── domain-utils.js       # 自動翻譯網站名單的網域正規化 + 比對（UMD，content/spec 共用）
+│   └── vendor/               # 第三方程式庫（pdfjs／pdf-lib + fontkit／chart.min.js／Noto Sans TC 字型）
+├── translate-doc/            # PDF 文件翻譯（§17，web_accessible_resources）
+│   ├── index.html            # 翻譯文件頁（含 index.js 主協調層、index.css）
+│   ├── index.js
+│   ├── index.css
+│   ├── settings.html         # 文件翻譯獨立設定頁（含 settings.js）
+│   ├── settings.js
+│   ├── block-types.js        # block type 共用常數（單一資料源）
+│   ├── layout-analyzer.js    # raw text run → 版面 IR（§17.4.2／§17.4.3）
+│   ├── pdf-engine.js         # PDF.js wrapper（解析 pipeline）
+│   ├── pdf-renderer.js       # 譯文 PDF 下載（pdf-lib，§17.8）
+│   ├── reader.js             # 線上閱讀器（雙頁並排，§17.6）
+│   └── translate.js          # 文件翻譯 pipeline 協調（chunk、重試、引擎選擇）
 ├── popup/
 │   ├── popup.html
-│   ├── popup.js          # ES module
+│   ├── popup.js              # ES module
 │   └── popup.css
 ├── options/
 │   ├── options.html
-│   ├── options.js        # ES module
+│   ├── options.js            # ES module
 │   └── options.css
-├── _locales/
-│   └── zh_TW/
-│       └── messages.json # Chrome i18n 繁體中文語系檔
+├── _locales/                 # Chrome i18n 語系檔（manifest name／description），8 語
+│   ├── zh_TW/messages.json
+│   └── zh_CN/  en/  ja/  ko/  es/  fr/  de/   # 各含 messages.json
 └── icons/
 ```
 
@@ -578,7 +650,8 @@ shinkansen/
     "debugToast": false,
     "onTheFly": false,
     "model": "",
-    "pricing": null
+    "pricing": null,
+    "captionScale": 100
   },
   "forbiddenTerms": "（見 §3.7 / DEFAULT_FORBIDDEN_TERMS，25 條預設）",
   "customProvider": {
@@ -588,7 +661,8 @@ shinkansen/
     "temperature": 0.7,
     "inputPerMTok": 0.75,
     "outputPerMTok": 4.5,
-    "thinkingLevel": "off"
+    "thinkingLevel": "off",
+    "fetchTimeoutSec": 15
   }
 }
 ```
@@ -621,16 +695,17 @@ shinkansen/
 
 `tc_` + SHA-1（原文十六進位）= 43 字元。同一段原文跨頁面共用同一 key。key 只 hash 原文，不含模型/prompt；換模型改 prompt 時以版本自動清空處理。
 
-依呼叫情境額外附加後綴（依固定順序，由 `lib/cache.js` 的 `resolveKeySuffix()` 組合）：
+依呼叫情境額外附加後綴（依固定順序，由 `background.js` 的 `buildCacheKeySuffix()` 統一組裝——v1.10.46 起 `handleTranslate` / `handleTranslateStream` / `handleTranslateCustom` 三條路徑共用單一資料源；最終 key 由 `lib/cache.js` 的 `resolveKeySuffix()` 接上）：
 
 - **base tag**：`'_yt'` = 字幕模式 / `'_gt'` = Google Translate 網頁 / `'_gt_yt'` = Google Translate 字幕 / `'_oc'` = 自訂 OpenAI-compat（v1.5.7）/ `''` = 一般 Gemini 網頁翻譯（含 preset 快速鍵）
-- **`_g<hash>`**：有術語表時加（自動擷取 + 使用者固定術語的合併 hash，前 12 字元 SHA-1）
+- **`_g<hash>`**：有術語表時加（自動擷取 + 使用者固定術語的合併 hash，前 12 字元 SHA-1）。固定術語表合併走 `buildFixedGlossaryEntries`（global + domain 同 source 以 Map dedup，domain 蓋 global）——v1.10.46 起 streaming 路徑同走此函式（原手抄版無 dedup，global+domain 重疊時 batch 0 與 batch 1+ 的 `_g` hash 不一致，同頁裂成兩個 cache namespace）
 - **`_b<hash>`**（v1.5.6 新增）：使用者啟用禁用詞清單時加（依 `forbidden` 排序後 JSON.stringify 的前 12 字元 SHA-1）。空清單時不附加，向下相容 v1.5.5 之前的快取
 - **`_m<model>`**（v1.4.12 起）：把 model 字串納入 key（替換非安全字元為 `_`），避免不同 preset 切換時共用快取
 - **`_m<baseUrlHash6>_<safeModel>`**（v1.5.7，自訂 Provider 路徑）：baseUrl SHA-1 前 6 字元 + safe model — 避免不同 provider（OpenRouter vs Together vs 自架 Ollama）的同 model name 共用快取
 - **`_lang<targetLang>`**（v1.8.59 新增）：非 zh-TW target 加此 suffix（如 `_langzhcn` / `_langen`），避免不同目標語言撞 cache。zh-TW target **不加**此 suffix，向下相容 v1.8.58 之前的 cache（既有 zh-TW 使用者升級 cache 仍 hit）
+- **`_t<n.nn>`**（W7 起，文件翻譯路徑 `_doc` / `_oc_doc` 限定）：文件翻譯獨立 temperature 以 `toFixed(2)` 納入 key，改設定後立即生效不吃舊 temp 快取。網頁／字幕路徑不加（避免 cache 多分裂）
 
-完整可能形式範例：`tc_<sha1>_g<g>_b<b>_m<m>_lang<x>`，部分後綴可省略。
+完整可能形式範例：`tc_<sha1>_g<g>_b<b>_m<m>_lang<x>_t<t>`，部分後綴可省略。
 
 **Glossary cache（`gloss_` prefix）同款區隔**：v1.8.59 起 `cache.getGlossary(inputHash, suffix)` / `setGlossary(inputHash, glossary, suffix)` 接 suffix 參數，background.js 的 `handleExtractGlossary*` 兩條入口傳 `_lang<x>`（非 zh-TW target）。
 
@@ -653,18 +728,41 @@ shinkansen/
 
 ## 10. 快捷鍵
 
-**Option + S**（macOS）/ **Alt + S**（其他 OS）—— 切換翻譯狀態。
+三組 preset 快速鍵（v1.4.12 起），每組對應 options「翻譯快速鍵」一張 preset card（slot 1／2／3，可自訂 label／engine／model）：
 
-```json
-"commands": {
-  "toggle-translate": {
-    "suggested_key": { "default": "Alt+S", "mac": "Alt+S" },
-    "description": "切換目前分頁的翻譯"
-  }
-}
-```
+| command id | 預設鍵位 | 對應 storage slot | card 名稱 |
+|---|---|---|---|
+| `translate-preset-0` | Alt+S（macOS 為 Option+S） | 2 | 主要預設 |
+| `translate-preset-1` | Alt+A | 1 | 預設 2 |
+| `translate-preset-3` | Alt+D | 3 | 預設 3 |
 
-使用者可至 `chrome://extensions/shortcuts` 調整。
+- command id 字典序決定 `chrome://extensions/shortcuts` 的顯示順序，故「主要預設」用 id `0` 對應 storage slot `2`（`COMMAND_ID_TO_SLOT` 寫死在 `background.js`）
+- Toggle 語意：未翻譯 → 翻譯；翻譯中 → 取消並立即還原原文；已翻譯 → 還原原文
+
+### 10.1 自訂快速鍵（in-page recorder）
+
+manifest `commands` 的預設鍵位（Alt+S／A／D）由瀏覽器層管理，但只有 Chrome 走 `chrome://extensions/shortcuts`、Firefox 走 `about:addons` 能改；Safari（含 iOS／iPadOS）沒有瀏覽器層快速鍵設定入口，且不支援 `commands.update()`。為讓全平台（特別是 iPad 外接鍵盤）都能改鍵，options「翻譯快速鍵」每張 preset card 提供 in-page recorder，自訂鍵走 content script 層攔截，與 manifest 預設鍵並存：
+
+- **資料源**：`lib/shortcut-utils.js`（UMD，掛 `window.__SKShortcuts` + Node `module.exports`），content script／options／regression spec 共用同一份「比對 / 驗證 / 格式化」邏輯
+- **儲存**：`storage.sync.customShortcuts`，slot key `2`／`1`／`3`，值形狀 `{ code, alt, shift, ctrl, meta }`（`null` = 沿用內建預設）。`code` 用 `e.code`（實體鍵位）不用 `e.key`（避免 macOS ⌥+字母 dead-key 變換）
+- **攔截**：`content-shortcuts.js` 在頁面 `keydown` capture phase 比對命中後，直接呼叫 `SK.handleTranslatePreset(slot)`（與 onCommand Alt+S、四指 tap 同一條本地 dispatch 入口，零訊息往返，避開 iOS Safari background 被回收的問題）。`storage.onChanged` 監聽讓 options 改鍵即時生效
+- **驗證規則**（`shortcut-utils.validate(s, opts)`，皆為結構性通則）：必含一個修飾鍵（⌥／⌃／⌘，避免打字誤觸）、拒 ESC（保留作取消錄製）、拒與三組內建預設鍵相同（browser 層停不掉，雙觸發 = toggle 兩次）；options 另檢查與其他 slot 生效鍵衝突
+- **依瀏覽器引擎統一的修飾鍵規則（`opts.requireCtrl`）**：規則依**瀏覽器引擎**切（非 OS / build）。options.js 以 extension URL 前綴判定 `_isSafariRuntime`（`safari-web-extension://`，涵蓋 macOS／iPadOS／iOS Safari）→ 傳 `requireCtrl: true`：
+  - **Safari（Mac／iPad／iPhone）**：自訂鍵**必含 ⌃ Control**，⌥-only／⌘-only 在錄製時即擋下（`shortcut.invalid.safariNeedCtrl`）+ recorder 紅框抖動 + `#shortcut-hint` ⚠ 提示。真機 probe 實證 iPadOS Safari 把 **⌥／⌘ 路由到系統鍵盤指令層，不以 keydown 傳給網頁**（iPad 按 ⌥+鍵／⌘+鍵 網頁收不到任何 keydown，只有 ⌃ 收得到）；macOS Safari 雖收得到 ⌥，但為「同一組自訂鍵跨 Apple 裝置都能動」一致性也統一要求 ⌃。內建預設鍵（⌥S／A／D）不受影響——走系統指令層（onCommand），那層收得到 ⌥
+  - **Chrome／Firefox**：`requireCtrl: false`，⌥／⌃／⌘ 皆可。註：Chrome 的 ⌘ 多數組合會被瀏覽器攔（⌘L／⌘R 等），允許設但不保證觸發（產品取捨）
+  - **說明文字也依瀏覽器切**：options 快速鍵 section 的操作說明有兩版 i18n（`intro.html` 桌面版「需包含 ⌥ Option 或 ⌃ Control」／`introSafari.html` Safari 版「需用 ⌃ Control」），純 CSS 依 `body.runtime-{chrome,firefox,safari}` 顯示對應版本（無額外 JS）；錄製被拒時 recorder 紅框抖動 + `#shortcut-hint` ⚠ amber box「Safari 請用 ⌃ Control 組合」
+- **與預設鍵的關係**：manifest 預設鍵在 browser 層停不掉，自訂鍵是疊加。位址列／devtools focus、content script 未注入的頁（`chrome://` 等）收不到 keydown，這些情境桌面 manifest 預設鍵仍作 fallback
+- 鍵位也可在 Chrome `chrome://extensions/shortcuts`、Firefox `about:addons` 改 manifest 預設鍵本身（options 對應連結以 `body.runtime-safari` 在 Safari 隱藏）
+
+### 10.2 iOS／iPadOS 四指手勢
+
+- **四指輕點**（壓住 < 600ms 即抬起）= 主要預設完整 toggle——`content-touch.js` 偵測手勢後送 `FOUR_FINGER_TAP` 給 background，轉發 `TRANSLATE_PRESET` slot 2，與快速鍵共用同一條派送路徑
+- **四指長按**（四指同時壓住、不移動且持續達 600ms）= 第一組預設（slot 1，預設 Flash Lite）——計時器在門檻當下送 `FOUR_FINGER_LONGPRESS` 給 background，轉發 `TRANSLATE_PRESET` slot 1；抬起時以 `longPressFired` 旗標擋住，不重複觸發 slot 2。輕點 / 長按以「壓住時長」單一門檻區分，主要動作（輕點）於抬起當下零延遲觸發
+- 以 `IS_IOS_BUILD`（`lib/distribution.js`，iOS build script override 為 true）gate，桌面 build 為 no-op。外接硬體鍵盤時三組快速鍵照常可用，也可用上述 recorder 自訂
+
+### 10.3 iOS background keep-alive
+
+iOS build 在「有開著的分頁且分頁可見」時，由 `content-touch.js` 對 background 開一條長連線 port（`browser.runtime.connect({ name: 'shinkansen-keepalive' })`）並每 20 秒 ping 一次，background `onConnect` 收到後回 pong；靠「持續有 port 連著＋收訊息」把 iOS Safari 的 background event page 維持在非閒置、避免被系統回收（iOS 平台限制：background 閒置後會被永久回收且叫不醒，連帶四指／popup 翻譯失效）。分頁切到背景即 disconnect（省電），切回／斷線自動重連。以 `IS_IOS_BUILD` gate（桌面 build 不開 port，background `onConnect` 只認此 port name，桌面永不觸發）。
 
 ---
 
@@ -703,7 +801,8 @@ shinkansen/
 - **「Debug」分頁載入**（v1.8.56 起）：分頁啟動時先呼叫 `GET_PERSISTED_LOGS` 載入持久化那段（SW 重啟前的紀錄），再開始 polling 記憶體 buffer。dedup 用 `timestamp + category + message` 三元 key（SW 重啟後 logSeq 重置會撞號，純 seq 去重會漏）
 - **「清除」按鈕**（v1.8.56 起）：同時送 `CLEAR_LOGS` + `CLEAR_PERSISTED_LOGS`，兩層 buffer 都清。原本只清記憶體，persisted 還在 storage.local，下次 SW 重啟分頁載入時舊 log 又冒出來
 - **DevTools Console**：設定頁可選啟用同步輸出
-- **Debug Bridge**：content.js 透過 CustomEvent 橋接，main world 可用 `shinkansen-debug-request` / `shinkansen-debug-response` 事件讀取 log（支援 `GET_LOGS`、`CLEAR_LOGS`、`GET_PERSISTED_LOGS`、`CLEAR_PERSISTED_LOGS`、`CLEAR_CACHE`、`TRANSLATE`、`RESTORE`、`GET_STATE`、`GET_YT_DEBUG`、`CLEAR_RPD`）
+- **Debug Bridge**：content.js 透過 CustomEvent 橋接，main world 可用 `shinkansen-debug-request` / `shinkansen-debug-response` 事件讀取 log（支援 `GET_LOGS`、`CLEAR_LOGS`、`GET_PERSISTED_LOGS`、`CLEAR_PERSISTED_LOGS`、`CLEAR_CACHE`、`TRANSLATE`、`RESTORE`、`GET_STATE`、`GET_YT_DEBUG`、`CLEAR_RPD`）。僅限 Chromium：Firefox 的 main world 受 Xray 安全模型限制，讀不到 response 的 object detail，Debug Bridge 回讀不可用（消費者皆為 Chromium-only tooling，刻意不改協定）
+- **YouTube bridge 事件 detail 協定**：isolated→main 方向（`shinkansen-yt-cc-control`、`shinkansen-yt-set-caption-track`）的 detail 一律送 JSON 字串（Firefox 的 isolated→main object detail 在 main world 讀屬性會 throw，primitive 字串跨 compartment 可讀）；main 端雙格式相容讀（字串 parse、物件直收）。main→isolated 方向（`shinkansen-yt-player-response` 等）維持 object detail（content script 有 Xray vision 可讀）
 
 ---
 
@@ -762,6 +861,14 @@ shinkansen/
 
 `engine='google'` 走 Gemini 路徑會吃 `settings.apiKey`,使用者沒填時 background 回傳 `_diag` 提示;這是已知 trade-off — 主翻譯走 Google MT 但仍要 LLM 抽術語表的使用者必須額外填 Gemini Key（Google MT 本身不支援 LLM 抽術語表任務）。
 
+**錯誤回報（error code 協定）**：handler 失敗統一回 `{ ok: false, error, errorCode?, errorParams? }`；streaming 路徑為 `STREAMING_ERROR` payload 的同名欄位。
+
+- `error`：原字串（繁中 fallback 或 API 原文），舊版 UI / 未知錯誤的向下相容顯示值
+- `errorCode`：背景端可預期的使用者面對錯誤帶結構化 code（`lib/bg-error.js` `codedError()` 標注）。現有 code：`apiKeyMissing` / `baseUrlMissing` / `network` / `timeout` / `readTimeout` / `dailyQuota` / `http429` / `badResponse` / `blocked` / `emptySafety` / `emptyRecitation` / `emptyMaxTokens` / `emptyOther` / `emptyContent` / `customBadResponse` / `customEmptyContent` / `gtTimeout`
+- `errorParams`：dict 模板參數（`{ms}` / `{msg}` / `{status}` / `{preview}` / `{reason}` / `{dim}`）
+
+UI 端（content scripts / translate-doc）統一走 `lib/i18n.js` `bgErrorMessage(payload)` 查 `error.bg.<code>` dict key（8 語）組當前 uiLanguage 訊息；沒帶 `errorCode`（API 原文 ground truth 直傳 / 內部錯誤 / 舊版背景）或 dict 缺 key 時 fallback `error` 原字串原樣顯示。API 原始錯誤訊息（Gemini 英文 `error.message` 等）不被翻譯吞掉——以 params 帶進模板或不掛 code 原樣直傳，完整原文在 debugLog。背景端不翻譯（service worker 載不了 `lib/i18n.js`，也不知使用者 uiLanguage）。
+
 ### 14.2 popup / options → background
 
 | type | 回應 | 用途 |
@@ -812,10 +919,11 @@ shinkansen/
 - storage schema：`translatePresets: [{ slot, engine, model, label }]`，三組預設值內建於 `lib/storage.js` `DEFAULT_SETTINGS`。
 - 統一行為：
   - 閒置狀態按任一 preset 鍵 → 依該 slot 的 `engine` + `model` 啟動翻譯
-  - 翻譯中按任一 preset 鍵 → abort
+  - 翻譯中按任一 preset 鍵 → abort（按下當下立即還原原文 + 跳「已取消」toast，不等 in-flight 批次回應；三條注入路徑注入前檢查 `signal.aborted`，晚到的批次回應不再注入）。取消後（controller 已 aborted、舊輪還在收尾）再按 → 直接開新一輪翻譯（toggle 語意）；run state 在入口同步設定 + identity-guarded 釋放，防快速連按 spawn 並行 zombie run
   - 已翻譯完成按任一 preset 鍵 → `restorePage`（不分 slot）
 - `modelOverride` 傳輸：content.js `SK.translateUnits` 把 slot 對應的 model 放進 `TRANSLATE_BATCH` payload.modelOverride → background `handleTranslate` 透過 `geminiOverrides.model` 覆蓋 `geminiConfig.model`（與 YouTube 字幕用的同一條機制，用 `cacheTag` 參數區分快取分區避免污染）。
 - 未來 Options UI（v1.4.13 規劃）提供 engine/model/label 編輯；v1.4.12 使用者要改 preset 可暫時直接寫 `chrome.storage.sync.translatePresets`。
+- 三組 preset 的鍵位可在 options「翻譯快速鍵」card 用 in-page recorder 自訂（全平台通用，特別是 Safari／iPad 外接鍵盤無瀏覽器層改鍵入口），詳見 §10.1。
 
 background.js 使用 `messageHandlers` 物件 map 做 O(1) dispatch，統一的 listener 負責 sendResponse 包裝與錯誤處理。
 
@@ -877,6 +985,7 @@ window.__shinkansen = {
 - 純掃描 PDF（無 text run、需 OCR）→ 偵測方式：整份 PDF 可抽 text 字數 < 50 → 顯示「此 PDF 為掃描影像，本工具不支援 OCR」並終止
 - 加密 / 受保護 PDF → PDF.js 開啟失敗 → 顯示「此 PDF 受密碼保護或加密，請先解除保護」並終止
 - 無法解析的字型（custom CID font without ToUnicode map）→ 抽出的文字為亂碼 → 偵測 ASCII / 控制字元比例 > 50% → 警告「此 PDF 字型映射不完整，翻譯品質可能受影響」+ 允許繼續
+- 旋轉 / 直排文字（圖表軸標籤等）→ 偵測方式：text run 變換矩陣 |m[1]| > |m[0]|（glyph 前進方向偏垂直，水平 bbox 假設不適用，送翻會造成 mask 與譯文錯位）→ 解析時丟棄該 run 不送翻 → 警告「此 PDF 含 N 段旋轉或直排文字，該部分維持原文不翻譯」+ 允許繼續。RTL 文字為已知限制（`dir` 欄位有抽出、下游未消費，仍按 LTR 處理）
 
 ### 17.3 入口 UI
 
@@ -906,6 +1015,9 @@ translate-doc/
   pdf-engine.js       PDF.js wrapper、文字抽取、版面 IR 建構
   pdf-renderer.js     pdf-lib 譯文 PDF 重新生成
   layout-analyzer.js  版面演算法（column / block / reading-order / formula 偵測）
+  translate.js        翻譯 pipeline 協調（chunk 切批 / usage 累計 / marker 協定）
+  block-types.js      block type 共用常數（TRANSLATABLE_TYPES 單一資料源）
+  settings.html/.js   文件翻譯設定頁
 ```
 
 頁面 flow（單頁 SPA）:

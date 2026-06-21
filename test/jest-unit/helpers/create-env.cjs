@@ -32,6 +32,8 @@ const CONTENT_SCRIPT_FILES = [
   'content-ns.js',
   'lib/distribution-cs.js',
   'lib/i18n.js',
+  'lib/format-currency.js',
+  'lib/domain-utils.js',
   'content-toast.js',
   'content-detect.js',
   'content-serialize.js',
@@ -70,6 +72,9 @@ function createEnv(options = {}) {
   // 每個 mock 都用 jest.fn() 包裝，測試可以斷言呼叫次數與參數。
   const chromeMock = {
     runtime: {
+      // 有效 extension context 一定帶 runtime.id(orphan 時才變 undefined)。content-spa.js
+      // 的 URL 輪詢 interval 用 !chrome.runtime.id 偵測 orphan 自我清除,mock 要反映「活著」。
+      id: 'test-extension-id',
       sendMessage: jest.fn().mockImplementation(() => Promise.resolve({})),
       getManifest: jest.fn().mockReturnValue({ version: '1.0.26' }),
       onMessage: { addListener: jest.fn() },

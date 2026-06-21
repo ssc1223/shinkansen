@@ -97,7 +97,64 @@
   <p class="lang-switch"><a href="release-notes.html">繁體中文</a> | <strong>English</strong></p>
 
   <h1>Store Release Notes</h1>
-  <p class="subtitle">Update summary for users on Chrome Web Store and Firefox Add-ons. Lists only changes that directly affect end users; bug fixes and refactors are omitted unless user-visible. The full version history (every patch and technical detail) lives in the GitHub <a href="https://github.com/jimmysu0309/shinkansen/blob/main/CHANGELOG.md" target="_blank" rel="noopener">CHANGELOG.md</a>.</p>
+  <p class="subtitle">Update summary for users on Chrome Web Store, Firefox Add-ons, and the App Store (iOS / iPadOS Safari). Lists only changes that directly affect end users; bug fixes and refactors are omitted unless user-visible. The full version history (every patch and technical detail) lives in the GitHub <a href="https://github.com/jimmysu0309/shinkansen/blob/main/CHANGELOG.md" target="_blank" rel="noopener">CHANGELOG.md</a>.</p>
+
+  <h2>v1.10.42 <span class="release-date">Released 2026-06-09</span></h2>
+  <p class="release-meta">Compared with the previous store version v1.10.17</p>
+
+  <p class="lead">The headline of this release is the launch of Shinkansen for iOS / iPadOS Safari. Across all platforms, it also improves YouTube subtitles, adds custom translation shortcuts, makes translation cancellation restore instantly, and ships several site-translation and settings fixes.</p>
+
+  <ul>
+    <li><strong>Shinkansen for iOS / iPadOS Safari</strong>: Shinkansen now installs on Safari for iPhone / iPad. Alongside hardware keyboard shortcuts, a new "four-finger tap" gesture toggles full-page translation; a first-launch onboarding flow lets you enter your Gemini API Key and pick a default translation method, and the toolbar popup and settings page are re-adapted for phone / tablet screens (the iOS version does not include PDF document translation).</li>
+
+    <li><strong>New "custom translation shortcuts"</strong>: the shortcut keys for all three translation presets can now be recorded directly on the settings page under "Translation shortcuts" (click the field, then press the combination you want). This works on every platform and specifically solves the lack of a key-remapping entry point on Safari / iPad external keyboards.</li>
+
+    <li><strong>Canceling a translation now restores immediately</strong>: previously, canceling with a shortcut had to wait for the in-flight batch to return before the original text was actually restored (a large batch on a slow model could take several to a dozen seconds); this release restores instantly on key press and lets you re-translate right away, and rapid repeated presses no longer get stuck.</li>
+
+    <li><strong>Several YouTube subtitle improvements</strong>: (1) a new "subtitle size" setting (100%–200%, in the toolbar popup, shown only on YouTube video pages, applied on both desktop and mobile full screen); (2) mobile m.youtube.com now supports subtitle translation; (3) fixed auto-generated subtitles suddenly ballooning in size during pauses in speech; (4) fixed translated subtitles disappearing after entering native full screen on iPhone / iPad (both auto-generated and English subtitles).</li>
+
+    <li><strong>Forum main-post translation fix</strong>: on forums like vBulletin / phpBB where the entire main post is wrapped directly in bold, the whole post was previously left untranslated (while quoted blocks in the same post were translated), causing "some translated, some not" within one post; this is now fixed and the main post translates normally.</li>
+
+    <li><strong>Importing settings no longer drops fields</strong>: when exporting and re-importing settings, fields such as a custom model's thinking level, extra request parameters, and the glossary's dedicated model were previously silently discarded; this release fills them in so settings round-trip completely.</li>
+
+    <li><strong>PDF narrow cells no longer reveal source text</strong>: in very narrow PDF table cells (quantity / unit columns), the white mask was previously sized incorrectly, leaving the source uncovered with the translation overlapping it; this release covers the cell fully.</li>
+
+    <li><strong>Cost accounting aligned with Gemini 3 billing</strong>: Gemini 3 is a reasoning model, and Google bills the "thinking" process as part of output; the usage breakdown now includes thinking tokens and aligns with Gemini 3's generation parameters (Top P / Top K, which are inert on Gemini 3, are no longer sent and have been removed from the settings page). Amounts for the everyday default model (Flash Lite) are unaffected.</li>
+  </ul>
+
+  <h2>v1.10.17 <span class="release-date">Released 2026-06-02</span></h2>
+  <p class="release-meta">Compared with the previous store version v1.10.11</p>
+
+  <p class="lead">This release focuses on X (Twitter) tweet and YouTube video / comment translation stability and quality, and fixes repeated quota usage on re-translation, custom-model timeouts, and incorrect export-filename timestamps.</p>
+
+  <ul>
+    <li><strong>X tweet translation stability fixes</strong>: tweets no longer revert to English after clicking to open them; newly loaded tweets while scrolling are no longer missed, and tweets that scroll out of view and back (virtualized scrolling) are reliably re-translated.</li>
+
+    <li><strong>YouTube video translation quality fix (eliminates "second-hand translation")</strong>: foreign-language videos (e.g. Japanese) were occasionally auto-translated by YouTube into English first and then into Chinese, giving worse quality; this release now reads the original-language subtitles of the currently playing video, and switching between videos no longer picks up data from the previous one.</li>
+
+    <li><strong>YouTube comment and emoji fixes</strong>: comments containing emoji images or timestamp links are no longer skipped entirely; emoji are preserved after translation and no longer disappear or stick to adjacent Chinese text; sporadic missed comments when a large batch loads at once are also fixed.</li>
+
+    <li><strong>Re-translation no longer wastes quota</strong>: paragraphs whose translation equals the source (brand names, personal names, etc.) were previously never cached, so re-translating the same page hit the API every time; this is fixed and they now cache normally.</li>
+
+    <li><strong>Configurable custom-model API timeout</strong>: a new timeout setting under "Custom model → Advanced" (default 15 seconds, adjustable 5–600 seconds) lets you raise the limit for local LLMs (e.g. Ollama) that are slow to load a model on first use, avoiding timeout failures.</li>
+
+    <li><strong>Export filename time fix</strong>: timestamps in exported settings and log filenames used UTC, so Taiwan users saw a time 8 hours earlier than actual; this release uses the local time zone.</li>
+  </ul>
+
+  <h2>v1.10.11 <span class="release-date">Released 2026-05-26</span></h2>
+  <p class="release-meta">Compared with the previous store version v1.10.0</p>
+
+  <p class="lead">This release focuses on X (Twitter) tweet translation quality, Google Translate engine injection fixes, and improved detection coverage for Amazon and other foreign-language shopping sites.</p>
+
+  <ul>
+    <li><strong>Major X tweet translation quality improvements (single &amp; dual mode)</strong>: fixes 11 versions' worth of structural issues — complex tweets containing URLs, @mentions, #hashtags, emoji images, and multi-line paragraphs no longer suffer from missing middle paragraphs, text sticking together, or quoted tweets showing unwanted grey bilingual blocks. Clicking "Show more" to expand truncated tweets now automatically retranslates the expanded content. In dual (bilingual) mode, an entire tweet now produces a single, coherent translation block instead of 5-7 fragmented blocks in reverse order.</li>
+
+    <li><strong>Google Translate engine quality fixes</strong>: three Google MT-specific fixes — (1) review titles on Amazon and similar sites (link structure containing star icons + text) are no longer skipped; (2) CJK translation results no longer stick to adjacent URLs / @mentions (automatic spacing inserted); (3) emoji images no longer duplicated after translation.</li>
+
+    <li><strong>Improved detection coverage for Amazon and foreign-language shopping sites</strong>: (1) product recommendation carousel cards no longer lose ratings, badges, and prices after translation; (2) button text (e.g. "カートに入れる", "参考になった") is now translated; (3) short-text anchors, mixed-content labels, and comparison table buttons on foreign-language pages that were previously blocked by the detection pipeline are now broadly unblocked.</li>
+
+    <li><strong>Three YouTube subtitle fixes</strong>: (1) disabling YouTube translation no longer hides native subtitles (fix #51); (2) invalid API key or exhausted quota now shows an error message in the subtitle area instead of stalling on "Translating..."; (3) the toolbar icon translation badge now appears immediately when translation starts, rather than waiting until translation completes.</li>
+  </ul>
 
   <h2>v1.10.0 <span class="release-date">Released 2026-05-20</span></h2>
   <p class="release-meta">Compared with the previous store version v1.9.24</p>

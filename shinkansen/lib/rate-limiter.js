@@ -73,6 +73,7 @@ export class RateLimiter {
       if (nowKey !== this.rpdDateKey) {
         this.rpdDateKey = nowKey;
         this.rpdCount = 0;
+        this.clearRpdPersistTimer(); // 跨日重置:清掉殘留 timer,避免它用舊 rpdCount 多寫一次
         await this.persistRpd();
       }
       return;
@@ -128,6 +129,16 @@ export class RateLimiter {
         );
       }, 30_000);
     }
+  }
+
+  /**
+   * 清掉 pending 的 RPD persist timer + 歸零節流 counter。
+   * v1.10.39(code review 2026-06-09 M9):CLEAR_RPD / 跨日重置時呼叫,避免殘留 timer
+   * 30 秒後用「已被重置的 rpdCount」多寫一次(雖最終會收斂,但多餘寫入 + 短暫不一致)。
+   */
+  clearRpdPersistTimer() {
+    if (this.rpdPersistTimer) { clearTimeout(this.rpdPersistTimer); this.rpdPersistTimer = null; }
+    this.rpdPersistCounter = 0;
   }
 
   /** 清除 60 秒之前的舊時間戳。 */
@@ -214,6 +225,22 @@ export class RateLimiter {
     }
 
     // TPM 檢查
+    // v1.10.46(批次 2-1):estTokens 單獨就 >= tpmCap 時(使用者設了極小的 tpmOverride,
+    // 或單批估算特大),「等視窗釋放」永遠湊不出足夠空間——視窗全空仍是 0 + est > cap
+    // → 回 WINDOW_MS + 5 → 60 秒後重算結果相同 → acquire 無限等待不報錯。
+    // 改成:等視窗清空即放行(超量讓 API 端 429 把關,fetchWithRetry 有退避兜底),
+    // 放行前記一條 warn 讓使用者在 Log 分頁看得到原因。
+    if (estTokens >= this.tpmCap) {
+      if (this.tokens.length > 0) {
+        const releaseAt = this.tokens[this.tokens.length - 1].t + WINDOW_MS;
+        wait = Math.max(wait, releaseAt - now + 5);
+      } else {
+        debugLog('warn', 'rate-limit', 'estTokens exceeds tpmCap — releasing with empty window', {
+          estTokens, tpmCap: this.tpmCap,
+        });
+      }
+      return wait;
+    }
     const currentTok = this.currentTokenSum();
     if (currentTok + estTokens > this.tpmCap) {
       const needToRelease = currentTok + estTokens - this.tpmCap;
@@ -242,14 +269,19 @@ export class RateLimiter {
   snapshot() {
     const now = Date.now();
     this.pruneWindow(now);
+    // v1.10.39(code review 2026-06-09 M9):跨太平洋午夜後、下一次 acquire 觸發
+    // loadRpdIfNeeded 重置之前,snapshot 顯示的是昨天的 rpdCount / key。純讀層級在此
+    // 做跨日比對顯示今日 0(不 mutate state、不 persist——實際重置仍由 acquire 負責)。
+    const nowKey = getPacificDateKey();
+    const crossedDay = this.rpdDateKey && nowKey !== this.rpdDateKey;
     return {
       rpmUsed: this.requests.length,
       rpmCap: this.rpmCap,
       tpmUsed: this.currentTokenSum(),
       tpmCap: this.tpmCap,
-      rpdUsed: this.rpdCount,
+      rpdUsed: crossedDay ? 0 : this.rpdCount,
       rpdCap: this.rpdCap,
-      rpdDateKey: this.rpdDateKey,
+      rpdDateKey: crossedDay ? nowKey : this.rpdDateKey,
       safetyMargin: this.safetyMargin,
     };
   }

@@ -21,14 +21,12 @@ globalThis.chrome = {
 let capturedBodies = [];
 globalThis.fetch = async (_url, options) => {
   capturedBodies.push(JSON.parse(options.body));
-  return {
-    ok: true,
-    status: 200,
-    json: async () => ({
-      candidates: [{ content: { parts: [{ text: '翻譯結果' }] } }],
-      usageMetadata: { promptTokenCount: 100, candidatesTokenCount: 50 },
-    }),
-  };
+  // v1.10.53: 回真實 Response —— gemini.js fetchWithRetry 成功路徑 v1.10.46 起會
+  // await resp.text() 再 new Response 重建,手搓物件缺 .text() 會炸「resp.text is not a function」。
+  return new Response(JSON.stringify({
+    candidates: [{ content: { parts: [{ text: '翻譯結果' }] } }],
+    usageMetadata: { promptTokenCount: 100, candidatesTokenCount: 50 },
+  }), { status: 200, headers: { 'content-type': 'application/json' } });
 };
 
 const { translateBatch } = await import('../../shinkansen/lib/gemini.js');
@@ -94,6 +92,48 @@ test.describe('forbidden-terms 注入到 systemInstruction', () => {
     expect(sys).not.toContain('<forbidden_terms_blacklist>');
   });
 
+  // ── 替換詞可留空（v1.10.60）：只填禁用詞 → 列入「禁用（未指定替換詞）」區，
+  //     由 LLM 自行改寫，不可輸出「詞 → 」這種空替換對照 ──
+  test('替換詞留空 → 列入「未指定替換詞」區，不產生「→ 空字串」對照', async () => {
+    await translateBatch(
+      ['這部電影好看到沒有之一'],
+      settings,
+      null,
+      null,
+      [{ forbidden: '沒有之一', replacement: '', note: '' }],
+    );
+    const sys = lastSystemInstruction();
+
+    expect(sys).toContain('<forbidden_terms_blacklist>');
+    expect(sys).toContain('未指定替換詞');
+    expect(sys).toContain('沒有之一');
+    // 絕不可出現「沒有之一 → 」這種以空字串為替換詞的對照行
+    expect(sys).not.toContain('沒有之一 → ');
+    expect(sys).not.toMatch(/沒有之一\s*→\s*(\n|$)/);
+    // 全留空時不該出現「禁用 → 必須改用」對照段標題
+    expect(sys).not.toContain('禁用 → 必須改用');
+  });
+
+  test('混合（有替換詞 + 留空）→ 兩段同時出現，各歸各區', async () => {
+    await translateBatch(
+      ['video 沒有之一'],
+      settings,
+      null,
+      null,
+      [
+        { forbidden: '視頻', replacement: '影片', note: '' },
+        { forbidden: '沒有之一', replacement: '', note: '' },
+      ],
+    );
+    const sys = lastSystemInstruction();
+
+    expect(sys).toContain('禁用 → 必須改用');     // 對照段
+    expect(sys).toContain('視頻 → 影片');          // 有替換詞 → 對照段
+    expect(sys).toContain('未指定替換詞');         // 留空段
+    expect(sys).toContain('沒有之一');             // 留空段列出禁用詞
+    expect(sys).not.toContain('沒有之一 → ');      // 留空詞不進對照段
+  });
+
   test('黑名單區塊放在 fixedGlossary 之後（最末端，最高顯著性）', async () => {
     await translateBatch(
       ['Some text'],
@@ -118,3 +158,9 @@ test.describe('forbidden-terms 注入到 systemInstruction', () => {
 //   → test #1 fail（systemInstruction 不含 <forbidden_terms_blacklist> 標籤）
 //     test #4 fail（找不到黑名單區塊）
 //   還原後三條 pass。
+//
+// SANITY 紀錄（v1.10.60「替換詞可留空」，已在 Claude Code 端驗證）：
+//   把 system-instruction.js 留空分支 `else { bannedOnly.push(forbidden); }`
+//   改成 `else { mappedLines.push(`${forbidden} → ${replacement}`); }`（退回舊行為）
+//   → 「替換詞留空」與「混合」兩條 fail（出現「沒有之一 → 」空替換對照、缺「未指定替換詞」段）
+//   還原後全部 pass。

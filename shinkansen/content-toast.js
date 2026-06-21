@@ -8,8 +8,14 @@
   toastHost.id = 'shinkansen-toast-host';
   toastHost.style.cssText = 'all: initial; position: fixed; z-index: 2147483647;';
   const shadow = toastHost.attachShadow({ mode: 'closed' });
-  shadow.innerHTML = `
-    <style>
+  // toast 樣式用 Constructable Stylesheet(adoptedStyleSheets)注入,不用 <style>。
+  // Why:CSP 嚴格的站點(如 miniflux:style-src 'nonce-...' 無 unsafe-inline)在
+  // Safari 會把 content script 注入的 <style> 擋掉 —— Safari 的 content script 不像
+  // Chrome isolated world 免疫頁面 CSP。被擋後 toast 整段樣式失效、display:none 沒
+  // 生效 → toast 裸露顯示範本字「翻譯中…」跑到左上角(實機 + iOS 模擬器已重現)。
+  // 用 JS API 建的 CSSStyleSheet 不受 style-src 管,Chrome / Safari 都套得上;極舊
+  // 引擎無 adoptedStyleSheets 時才 fallback 回 <style>(那些引擎本就沒這個 CSP 問題)。
+  const TOAST_CSS = `
       :host, * { box-sizing: border-box; }
       .toast {
         position: fixed;
@@ -169,7 +175,8 @@
       .toast-action:hover { background: #0058b8; }
       .toast-action:active { background: #004a99; }
       .toast-action[hidden] { display: none; }
-    </style>
+  `;
+  shadow.innerHTML = `
     <div class="toast" id="toast">
       <div class="row">
         <span class="msg" id="msg">翻譯中…</span>
@@ -191,6 +198,17 @@
       <div class="bar"><div class="bar-fill" id="fill"></div></div>
     </div>
   `;
+  // CSP-safe 樣式注入(見上方 TOAST_CSS 註解)
+  try {
+    const sheet = new CSSStyleSheet();
+    sheet.replaceSync(TOAST_CSS);
+    shadow.adoptedStyleSheets = [sheet];
+  } catch (_e) {
+    // 極舊引擎 fallback：塞回 <style>（這些引擎沒有 Safari 的 content-script CSP 問題）
+    const styleEl = document.createElement('style');
+    styleEl.textContent = TOAST_CSS;
+    shadow.prepend(styleEl);
+  }
   document.documentElement.appendChild(toastHost);
 
   // Toast 透明度
@@ -274,7 +292,8 @@
   welcomeNoticeDismiss.addEventListener('click', (e) => { e.preventDefault(); dismissWelcomeNotice(); });
   const toastTimerEl = shadow.getElementById('timer');
   const toastFillEl = shadow.getElementById('fill');
-  shadow.getElementById('close').addEventListener('click', () => SK.hideToast());
+  const toastCloseBtn = shadow.getElementById('close');
+  toastCloseBtn.addEventListener('click', () => SK.hideToast());
   let toastTickHandle = null;
   let toastStartTime = 0;
   let toastHideHandle = null;
@@ -289,40 +308,29 @@
 
   SK.formatElapsed = function formatElapsed(ms) {
     const s = Math.floor(ms / 1000);
-    if (s < 60) return s + ' 秒';
+    if (s < 60) return SK.t('toast.elapsedSec', { s });
     const m = Math.floor(s / 60);
-    return m + ' 分 ' + (s % 60) + ' 秒';
+    return SK.t('toast.elapsedMinSec', { m, s: s % 60 });
   };
 
   SK.formatTokens = function formatTokens(n) {
     return n.toLocaleString('en-US');
   };
 
-  SK.formatUSD = function formatUSD(n) {
-    if (!n) return '$0';
-    if (n < 0.01)  return '$' + n.toFixed(4);
-    if (n < 1)     return '$' + n.toFixed(3);
-    return '$' + n.toFixed(2);
-  };
-
-  // v1.8.41:TWD 格式化（USD × rate → NT$，一位小數；極小值 < NT$ 0.1 用 3 位）
-  SK.formatTWD = function formatTWD(usd, rate) {
-    if (!usd) return 'NT$ 0';
-    const twd = usd * rate;
-    if (twd < 0.1) return 'NT$ ' + twd.toFixed(3);
-    return 'NT$ ' + twd.toFixed(1);
-  };
+  // 金額格式化走 lib/format-currency.js UMD 單一來源（manifest 在 content-toast.js 前載入），
+  // 不在這裡重複定義 formatUSD / formatTWD，也不再硬編 31.6。
+  const _F = window.__SKFormat;
+  SK.formatUSD = _F.formatUSD;
+  SK.formatTWD = _F.formatTWD;
 
   // v1.8.41：依 SK.currencyState 自動選擇 USD / TWD 顯示。
   // currencyState 由 content.js 從 storage 讀進來注入（預設 fallback 在這保險）。
   SK.formatMoney = function formatMoney(usd) {
-    const st = SK.currencyState || { currency: 'TWD', rate: 31.6 };
-    if (st.currency === 'TWD') return SK.formatTWD(usd, st.rate || 31.6);
-    return SK.formatUSD(usd);
+    return _F.formatMoney(usd, SK.currencyState || { currency: 'TWD', rate: _F.FALLBACK_USD_TWD_RATE });
   };
 
   // 預設值——content.js init 時會用真實值覆蓋
-  SK.currencyState = SK.currencyState || { currency: 'TWD', rate: 31.6 };
+  SK.currencyState = SK.currencyState || { currency: 'TWD', rate: _F.FALLBACK_USD_TWD_RATE };
 
   /**
    * kind: 'loading' | 'success' | 'error'
@@ -337,6 +345,10 @@
   SK.showToast = function showToast(kind, msg, opts = {}) {
     // v1.6.8: master switch 關閉時完全不顯示（不渲染 DOM、不發訊息）
     if (!SK.shouldShowToast()) return;
+    // tooltip 走 dict——模板在模組載入時建立（當時 uiLanguage 尚未就緒），改成每次顯示時刷新
+    toastCloseBtn.title = SK.t('toast.close');
+    updateNoticeDismiss.title = SK.t('toast.dismissToday');
+    welcomeNoticeDismiss.title = SK.t('toast.dismissToday');
     if (toastHideHandle) {
       clearTimeout(toastHideHandle);
       toastHideHandle = null;
@@ -370,7 +382,7 @@
 
     // v1.6.1: 更新提示——僅在 success toast 且呼叫端有判斷今日尚未顯示時傳入
     if (opts.updateNotice && opts.updateNotice.version && opts.updateNotice.releaseUrl) {
-      updateNoticeLink.textContent = `v${opts.updateNotice.version} 可下載 — 點此前往`;
+      updateNoticeLink.textContent = SK.t('toast.updateNoticeLink', { version: opts.updateNotice.version });
       updateNoticeLink.href = opts.updateNotice.releaseUrl;
       updateNoticeEl.hidden = false;
     } else {
@@ -381,7 +393,7 @@
     if (opts.welcomeNotice && opts.welcomeNotice.version) {
       // AMO source review: 靜態 template，內嵌的 version 來自 manifest 自己的 version 欄位
       // （本 extension 寫進 storage 後再讀回），格式為 semver 字串（已被 manifest 驗證），無 user input。
-      welcomeNoticeMsg.innerHTML = `<strong>已升級至 v${opts.welcomeNotice.version}</strong> — 點工具列圖示看新功能`;
+      welcomeNoticeMsg.innerHTML = SK.t('toast.welcomeNotice.html', { version: opts.welcomeNotice.version });
       welcomeNoticeEl.hidden = false;
     } else {
       welcomeNoticeEl.hidden = true;
@@ -398,7 +410,7 @@
     if (opts.startTimer) {
       toastStartTime = Date.now();
       clearInterval(toastTickHandle);
-      toastTimerEl.textContent = '0 秒';
+      toastTimerEl.textContent = SK.t('toast.elapsedSec', { s: 0 });
       toastTickHandle = setInterval(() => {
         toastTimerEl.textContent = SK.formatElapsed(Date.now() - toastStartTime);
       }, 500);

@@ -97,7 +97,64 @@
   <p class="lang-switch"><strong>繁體中文</strong> | <a href="release-notes.en.html">English</a></p>
 
   <h1>商店上架版本更新紀錄</h1>
-  <p class="subtitle">給 Chrome Web Store 與 Firefox Add-ons 使用者的更新摘要，只列出對使用者直接有感的功能變更與重要修正。完整的版本歷史（含每一個 patch 與技術細節）請見 GitHub <a href="https://github.com/jimmysu0309/shinkansen/blob/main/CHANGELOG.md" target="_blank" rel="noopener">CHANGELOG.md</a>。</p>
+  <p class="subtitle">給 Chrome Web Store、Firefox Add-ons 與 App Store（iOS / iPadOS Safari）使用者的更新摘要，只列出對使用者直接有感的功能變更與重要修正。完整的版本歷史（含每一個 patch 與技術細節）請見 GitHub <a href="https://github.com/jimmysu0309/shinkansen/blob/main/CHANGELOG.md" target="_blank" rel="noopener">CHANGELOG.md</a>。</p>
+
+  <h2>v1.10.42 <span class="release-date">2026-06-09 上架</span></h2>
+  <p class="release-meta">相對於上一個商店版本 v1.10.17</p>
+
+  <p class="lead">這版最大的變化是 Shinkansen 推出 iOS / iPadOS Safari 版；跨平台則加強了 YouTube 字幕、自訂翻譯快速鍵、翻譯取消即時還原，以及多項網站翻譯與設定修正</p>
+
+  <ul>
+    <li><strong>推出 iOS / iPadOS Safari 版</strong>：Shinkansen 現在也能裝在 iPhone / iPad 的 Safari 上。除了硬體鍵盤快速鍵，新增「四指輕點」整頁翻譯切換手勢；App 首次開啟有引導流程，可直接填入 Gemini API Key、選預設翻譯方式，工具列彈出視窗與設定頁也針對手機 / 平板螢幕重新調整（iOS 版不含 PDF 文件翻譯）</li>
+
+    <li><strong>新增「自訂翻譯快速鍵」</strong>：三組翻譯預設的快速鍵現在可以直接在設定頁「翻譯快速鍵」內錄製（點欄位後按下想要的組合鍵），全平台通用，特別解決 Safari / iPad 外接鍵盤沒有改鍵入口的問題</li>
+
+    <li><strong>取消翻譯改為「按下當下立即還原」</strong>：過去按快速鍵取消，要等正在進行的批次回完才真正還原原文（大批次加慢模型可能等數秒到十幾秒）；這版按下當下立即還原、立即可重新翻譯，快速連按也不再卡死</li>
+
+    <li><strong>YouTube 字幕多項改善</strong>：（1）新增「字幕大小」設定（100%–200%，工具列彈出視窗內，只在 YouTube 影片頁顯示，桌面與手機全螢幕都套用）；（2）行動版 m.youtube.com 現在也支援字幕翻譯；（3）修正自動字幕在人聲停頓的空檔字體突然暴增；（4）修正 iPhone / iPad 進入原生全螢幕後翻譯字幕消失（自動字幕與英文字幕都修）</li>
+
+    <li><strong>論壇主貼文漏翻修正</strong>：vBulletin / phpBB 等論壇把整段主文直接用粗體包住時，過去整段不會被翻譯（同一篇的引用區塊卻有翻），造成「同一篇有翻有沒翻」；這版修正後主文正常翻譯</li>
+
+    <li><strong>匯入設定不再遺失欄位</strong>：匯出再匯入設定時，自訂模型的思考強度、額外請求參數、術語表的獨立模型等欄位過去會被默默丟掉，這版補齊讓設定完整往返</li>
+
+    <li><strong>PDF 窄欄位譯文不再露出原文</strong>：PDF 表格中極窄的儲存格（數量 / 單位欄）過去白底遮罩尺寸算錯，導致原文沒被蓋、譯文疊在原文上；這版改為完整遮蓋</li>
+
+    <li><strong>費用計算對齊 Gemini 3 計費規則</strong>：Gemini 3 是推理模型，Google 會把「思考過程」也計入 output 費用；用量明細的費用計算同步補上思考 token，並對齊 Gemini 3 的生成參數（不再送對 Gemini 3 無效的 Top P / Top K，相關失效設定也已從設定頁移除）。日常預設模型（Flash Lite）的金額不受影響</li>
+  </ul>
+
+  <h2>v1.10.17 <span class="release-date">2026-06-02 上架</span></h2>
+  <p class="release-meta">相對於上一個商店版本 v1.10.11</p>
+
+  <p class="lead">這版集中在 X（Twitter）推文與 YouTube 影片／留言的翻譯穩定性與品質，並修正重翻時重複消耗額度、自訂模型逾時、以及匯出檔名時間錯誤等問題</p>
+
+  <ul>
+    <li><strong>X 推文翻譯穩定性修正</strong>：點開推文後譯文不再恢復成英文；捲動時新載入的推文不再漏翻，虛擬捲動把推文移出畫面再移回時也能自動接住重翻</li>
+
+    <li><strong>YouTube 影片翻譯品質修正（消除「二手翻譯」）</strong>：日文等外語影片過去偶爾被 YouTube 先自動轉成英文、再被翻成中文，品質比直接翻差；這版改為直接讀「當前正在播放」影片的原始語字幕，連續切換影片也不會抓到上一支影片的資料</li>
+
+    <li><strong>YouTube 留言漏翻與 emoji 修正</strong>：含 emoji 圖、時間戳連結的留言不再被整則跳過；emoji 翻譯後會保留、不再消失或跟中文黏在一起；留言區一次載入大量留言時零星漏翻的問題也一併修正</li>
+
+    <li><strong>重翻不再重複消耗額度</strong>：品牌名、人名等「譯文與原文相同」的段落過去不會被快取，每次重翻同一頁都要重打 API；這版修正後會正常快取，重翻更省額度</li>
+
+    <li><strong>自訂模型 API 逾時時間可調</strong>：新增「自訂模型 → 進階」的逾時設定（預設 15 秒，可調 5–600 秒），本機 LLM（如 Ollama）首次載入模型較慢時可調高，避免逾時失敗</li>
+
+    <li><strong>匯出檔名時間修正</strong>：匯出設定與匯出 Log 的檔名時間過去用世界協調時間（UTC），台灣使用者看到的時間比實際早 8 小時；這版改用本地時區</li>
+  </ul>
+
+  <h2>v1.10.11 <span class="release-date">2026-05-26 上架</span></h2>
+  <p class="release-meta">相對於上一個商店版本 v1.10.0</p>
+
+  <p class="lead">這版集中修復 X（Twitter）推文翻譯品質、Google 翻譯引擎注入問題、以及 Amazon 等外語購物網站的偵測涵蓋率</p>
+
+  <ul>
+    <li><strong>X 推文翻譯品質大幅提升（單語 + 雙語）</strong>：修復 11 個版本累積的結構性問題——推文內含 URL 連結、@mention、#hashtag、emoji 圖片、換行段落的複雜推文，譯文不再出現中間段落消失、文字黏在一起、引用推文多出灰底框等問題。點「顯示更多」展開截斷推文後，展開部分也會自動重翻。雙語對照模式下，整則推文現在只產生一個完整的翻譯區塊（之前會碎成 5-7 個小區塊且順序反轉）</li>
+
+    <li><strong>Google 翻譯引擎品質修正</strong>：兩項 Google MT 專屬修正——(1) Amazon 等網站的評論標題（含星星 icon + 文字的連結結構）不再被跳過；(2) CJK 翻譯結果跟 URL / @mention 之間不再黏在一起（自動補空格）；(3) emoji 圖片不再翻譯後重複出現兩張</li>
+
+    <li><strong>Amazon 等外語購物網站翻譯涵蓋率提升</strong>：(1) 產品推薦 carousel 卡片翻譯後，星等、徽章、價格不再消失；(2) 按鈕文字（「カートに入れる」「参考になった」等）現在也會翻譯；(3) 外語頁面的短文字 anchor、mixed-content label、比較表格按鈕等過去被偵測管線擋掉的 UI 元素，這版全面放寬</li>
+
+    <li><strong>YouTube 字幕三項修正</strong>：(1) 關閉 YouTube 翻譯功能後，原生字幕不再被隱藏（fix #51）；(2) API key 無效或額度用完時，字幕區會顯示錯誤提示（之前只停在「翻譯中⋯」）；(3) 工具列圖示的翻譯 badge 改為啟動翻譯時立即顯示，不再等翻譯完成後才出現</li>
+  </ul>
 
   <h2>v1.10.0 <span class="release-date">2026-05-20 上架</span></h2>
   <p class="release-meta">相對於上一個商店版本 v1.9.24</p>

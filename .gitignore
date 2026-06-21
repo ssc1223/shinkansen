@@ -38,12 +38,14 @@ test/regression/pdf-layout-snapshots/
 
 # 本機規劃 / 筆記檔
 PDF-TRANSLATION-PLAN.md
+PLAN-send-to-instapaper.md
 SPEC-PRIVATE.md
 DEBUG-BOARD.md
 /reports/
 
-# Claude Code ScheduleWakeup transient lock
-.claude/scheduled_tasks.lock
+# Claude Code 本機工作流(專案 skill / transient lock 等,含個人資訊,
+# 跟 CLAUDE.md 同待遇不入公開 repo)
+.claude/
 
 # macOS Safari Web Extension Xcode project — Phase 2 起 commit project 骨架,
 # 只 ignore build artifacts / per-user Xcode state / rsync 進來的 Extension Resources
@@ -52,3 +54,8 @@ safari-app/**/build/
 safari-app/**/.DS_Store
 safari-app/**/xcuserdata/
 safari-app/Shinkansen/Shinkansen Extension/Resources/
+safari-app/Shinkansen-iOS/Shinkansen/Shinkansen Extension/Resources/
+safari-app/shinkansen-ios-*.ipa
+
+# Instapaper Full API 憑證(app 層,不進 public repo)
+shinkansen/lib/instapaper-keys.js

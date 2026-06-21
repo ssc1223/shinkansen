@@ -11,8 +11,10 @@
 //   - SPEC.md 標頭與「已實作」段
 //   - CHANGELOG.md 頂部 v 條目
 //   - README.md「目前版本」段
+//   - README.en.md「Current version」段（v1.10.46 後補:之前沒驗,英文版從
+//     v1.10.35 一路漏 bump 十幾版才被文件 review 抓到——missing layer 補洞）
 //   - docs/index.html GitHub 下載按鈕（URL path / filename / 副標 v 三處）
-// CLAUDE.md §1「版本 bump 同步清單」7 項中,有 forcing 機制保護的從 1 項擴到 6 項
+// CLAUDE.md §1「版本 bump 同步清單」8 項中,有 forcing 機制保護的從 1 項擴到 7 項
 // （剩下「測試流程說明.md」是純文件、不易自動驗;Chrome Web Store 副標由 cron 自動同步,
 // 不在本檔範圍）。
 import fs from 'node:fs';
@@ -21,7 +23,7 @@ import { fileURLToPath } from 'node:url';
 import { test, expect } from './fixtures/extension.js';
 import { getShinkansenEvaluator } from './regression/helpers/run-inject.js';
 
-const EXPECTED_VERSION = '1.10.0';
+const EXPECTED_VERSION = '1.10.64';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -31,8 +33,22 @@ function readRepoFile(rel) {
   return fs.readFileSync(path.join(REPO_ROOT, rel), 'utf8');
 }
 
+// Dev tail manifest mode:CLAUDE.md §1.6 — dev 期間 manifest version 帶第 4 段
+// (例 1.10.0.1)讓 reload 後 Chrome service worker 印的版本一眼識別「載入了
+// working tree」,免去人工問「跑的是商店版還是 working tree」。bump release 時
+// manifest 還原為三段(1.10.0 → 1.10.1)再跑 full suite。
+//
+// dev tail 識別到時,本檔整批 test skip(forcing function 在 bump 時還是有效,
+// dev 期間不阻擋 spec 跑)。
+const manifestJson = JSON.parse(readRepoFile('shinkansen/manifest.json'));
+const manifestVersion = manifestJson.version;
+const isDevTail = manifestVersion.split('.').length >= 4;
+const devTailSkipMsg = `dev tail manifest 模式 (${manifestVersion}):version-check 整批 skip。` +
+  `bump release 時 manifest 還原成三段,本檔才會跑 forcing function。`;
+
 // ── 1. window.__shinkansen.version (透過 extension SW + content script) ──
 test('manifest version drift check (runtime API)', async ({ context, localServer }) => {
+  test.skip(isDevTail, devTailSkipMsg);
   const page = await context.newPage();
   await page.goto(`${localServer.baseUrl}/br-paragraph.html`, { waitUntil: 'domcontentloaded' });
   await page.waitForSelector('div#target', { timeout: 10_000 });
@@ -50,6 +66,7 @@ test('manifest version drift check (runtime API)', async ({ context, localServer
 
 // ── 2. SPEC.md 兩處版本標記 ──
 test('SPEC.md 同步檢查 (標頭 + 已實作標題)', async () => {
+  test.skip(isDevTail, devTailSkipMsg);
   const spec = readRepoFile('SPEC.md');
   expect(
     spec,
@@ -65,6 +82,7 @@ test('SPEC.md 同步檢查 (標頭 + 已實作標題)', async () => {
 
 // ── 3. CHANGELOG.md 頂部 vX.Y.Z 條目 ──
 test('CHANGELOG.md 同步檢查 (頂部新版本條目)', async () => {
+  test.skip(isDevTail, devTailSkipMsg);
   const changelog = readRepoFile('CHANGELOG.md');
   // 必須有 **vX.Y.Z** — 條目（行首為 `**v`，後接版本號）
   const pattern = new RegExp(`^\\*\\*v${EXPECTED_VERSION.replace(/\./g, '\\.')}\\*\\*`, 'm');
@@ -77,6 +95,7 @@ test('CHANGELOG.md 同步檢查 (頂部新版本條目)', async () => {
 
 // ── 4. README.md「目前版本」段 ──
 test('README.md 同步檢查 (目前版本段)', async () => {
+  test.skip(isDevTail, devTailSkipMsg);
   const readme = readRepoFile('README.md');
   expect(
     readme,
@@ -85,17 +104,22 @@ test('README.md 同步檢查 (目前版本段)', async () => {
   ).toContain(`v${EXPECTED_VERSION} — 完整功能清單`);
 });
 
-// ── 5. docs/index.html GitHub 下載按鈕（URL path + filename + 副標 v）──
-test('docs/index.html 同步檢查 (GitHub 下載按鈕三處版本號)', async () => {
-  const html = readRepoFile('docs/index.html');
-  // GitHub releases URL path 與 zip filename 都帶版本號
-  const urlFragment = `releases/download/v${EXPECTED_VERSION}/shinkansen-v${EXPECTED_VERSION}.zip`;
+// ── 4.5 README.en.md「Current version」段 ──
+test('README.en.md 同步檢查 (Current version 段)', async () => {
+  test.skip(isDevTail, devTailSkipMsg);
+  const readmeEn = readRepoFile('README.en.md');
   expect(
-    html,
-    `[DRIFT] docs/index.html 缺 GitHub 下載 URL「${urlFragment}」。\n` +
-    `提醒:bump 時必須同步更新 docs/index.html hero btn-row 內 GitHub 下載按鈕的 path 與 filename 兩處版本號。`,
-  ).toContain(urlFragment);
-  // 按鈕副標
+    readmeEn,
+    `[DRIFT] README.en.md 缺「v${EXPECTED_VERSION} — full feature list」段。\n` +
+    `提醒:bump 時必須同步更新 README.en.md「Current version」段落版本號（CLAUDE.md §16.1 多語檔同步）。`,
+  ).toContain(`v${EXPECTED_VERSION} — full feature list`);
+});
+
+// ── 5. docs/index.html GitHub 下載按鈕副標版本號 ──
+// URL 指 releases 目錄不含版本號(CLAUDE.md §1),只驗按鈕副標。
+test('docs/index.html 同步檢查 (GitHub 下載按鈕副標版本號)', async () => {
+  test.skip(isDevTail, devTailSkipMsg);
+  const html = readRepoFile('docs/index.html');
   const subtitleFragment = `>v${EXPECTED_VERSION} · beta<`;
   expect(
     html,

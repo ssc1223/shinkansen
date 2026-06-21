@@ -6,14 +6,25 @@ import { debugLog } from './logger.js';
 // v1.5.7: DELIMITER / packChunks / buildEffectiveSystemInstruction 抽到共用模組，
 // 與 lib/openai-compat.js 共用同一份「翻譯 batch 構建」邏輯。
 import { DELIMITER, SEP_RE, MARKER_COMPACT, packChunks, buildEffectiveSystemInstruction } from './system-instruction.js';
+import { codedError } from './bg-error.js'; // 使用者面對錯誤帶 error code 過協定，content 端查 dict 翻譯
 
 const MAX_BACKOFF_MS = 8000;
+// v1.10.46(批次 2-1):429 Retry-After 等待上限。provider 可能回數百秒的 Retry-After,
+// MV3 SW 等不到那麼久(30 秒 idle 即可能被回收),無上限等待等於永久卡批次。
+// cap 在 30 秒,等完仍 429 就走 maxRetries 放棄路徑回報錯誤。
+const RETRY_AFTER_CAP_MS = 30_000;
+// 「送到 Instapaper」摘要的輸入字元上限。摘要不需要全文,截斷把最壞 token 成本鎖死
+//(CLAUDE.md §4):flash-lite 下 ~12K 字元(~3-4K token)足夠抓主旨,每次摘要遠低於 $0.001。
+const MAX_SUMMARY_INPUT_CHARS = 12_000;
 
 /** 自訂錯誤:RPD 每日配額用盡,不應該被重試。 */
 export class DailyQuotaExceededError extends Error {
   constructor(message) {
     super(message);
     this.name = 'DailyQuotaExceededError';
+    // 錯誤 i18n 協定（lib/bg-error.js）：content 端查 error.bg.dailyQuota 組訊息
+    this.skCode = 'dailyQuota';
+    this.skParams = null;
   }
 }
 
@@ -21,14 +32,28 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+// 空內容 finishReason → error code（error.bg.* dict key 尾段）。
+// non-streaming / streaming 兩條路徑共用，沒列出的 finishReason 走 'emptyContent'（帶 {reason}）。
+const EMPTY_REASON_CODES = {
+  SAFETY: 'emptySafety',
+  RECITATION: 'emptyRecitation',
+  MAX_TOKENS: 'emptyMaxTokens',
+  OTHER: 'emptyOther',
+};
+
 /**
  * v1.6.12:依模型決定 thinkingConfig。Gemini 3+ 改用 thinkingLevel(舊
  * thinkingBudget Google 標 not recommended)。實測(tools/probe-gemini-pro.js):
- *   - gemini-3-pro-preview / gemini-2.5-pro 強制 thinking-only,thinkingBudget=0
+ *   - Pro 系列(gemini-3-pro-preview 等)強制 thinking-only,thinkingBudget=0
  *     會 400 "Budget 0 is invalid. This model only works in thinking mode"
  *   - gemini-3 Pro 不支援 thinkingLevel='minimal',最低支援 'low'
- *   - gemini-3 Flash / Flash Lite 用 thinkingLevel='minimal' = 舊 budget=0 的等效,
- *     thoughts=0 不額外計費
+ *   - gemini-3 Flash / Flash Lite 用 thinkingLevel='minimal'(合法範圍內最省)
+ *
+ * v1.10.18 更正:'minimal' **不保證 thoughts=0**。Google 官方明載
+ * 「`minimal` does not guarantee that thinking is off」——minimal 仍可能產生思考
+ * token,且照 output 單價計費。舊註解誤寫「thoughts=0 不額外計費」,是 v1.10.18
+ * 「漏算 thoughtsTokenCount → 費用低估 3 倍」bug 的認知根源。故 usage 解析一律
+ * 走 parseGeminiUsage() 把 thoughts 計入 output(見該函式)。
  *
  * 偵測策略:
  *   - 模型名含 "pro"(case-insensitive)→ 'low'(Pro 強制 thinking)
@@ -39,6 +64,52 @@ function sleep(ms) {
 export function pickThinkingConfig(model) {
   const isPro = /pro/i.test(String(model || ''));
   return { thinkingLevel: isPro ? 'low' : 'minimal' };
+}
+
+/**
+ * v1.10.18:統一解析 Gemini usageMetadata,三個呼叫點(translateChunk /
+ * translateBatchStream / extractGlossary)共用,避免「同一份計費事實」三套實作 drift。
+ *
+ * **計費 output = candidatesTokenCount(可見譯文)+ thoughtsTokenCount(思考過程)。**
+ * Gemini 3 是 reasoning 模型,兩者在 usageMetadata 是**獨立欄位**,Google 兩者都以
+ * output 單價計費。舊版只讀 candidatesTokenCount 漏算思考 token,而 output 單價是
+ * input 的 6 倍 → 整筆費用被低估到剩 1/2~1/3(實測使用者帳單 ≈ Shinkansen 紀錄的 3 倍)。
+ *
+ * 算術依據(2026-06 證據,因測試 key 過期未跑 live 對帳,改採文件 + 真實帳單 ground truth):
+ *   - Google 官方論壇 gemini-3-flash-preview 範例:candidates 與 thoughts 分開列
+ *   - simonw/llm-gemini #75:candidates=104 / thoughts=989 分開、未內含
+ *   - 官方 tokens 文件把 candidates / thoughts / total 列為獨立欄位
+ *   → 採「outputTokens = candidates + thoughts」。換新 key 後可用
+ *     tools/probe-thoughts-usage.js 跑 total == prompt + candidates + thoughts 再確認。
+ *
+ * 另回傳 thoughtsTokens 供 debugLog 診斷(不改 DB schema,outputTokens 已含其值)。
+ */
+export function parseGeminiUsage(meta) {
+  const m = meta || {};
+  const candidates = m.candidatesTokenCount || 0;
+  const thoughts = m.thoughtsTokenCount || 0;
+  return {
+    inputTokens: m.promptTokenCount || 0,
+    outputTokens: candidates + thoughts,
+    cachedTokens: m.cachedContentTokenCount || 0,
+    thoughtsTokens: thoughts,
+  };
+}
+
+/**
+ * v1.10.18:Gemini 3.x 的 generationConfig sampling 欄位。
+ * Gemini 3 **不使用 top-k sampling**(topK 非允許參數,送了被後端忽略),且官方建議
+ * Gemini 3 只靠 temperature=1.0、**不要設 topP/topK**(設了可能引發迴圈 / 退化)。
+ * 故 Gemini 3 模型一律不送 topP/topK;非 Gemini 3(理論上不該出現,§17 最低基準為
+ * Gemini 3 Flash Lite)才帶舊 topP/topK 參數,保留相容。
+ *
+ * @param {string} model 模型 ID
+ * @param {{topP:number, topK:number}} sampling 來自 geminiConfig 的 topP/topK
+ * @returns {object} 要 spread 進 generationConfig 的欄位(G3 為空物件)
+ */
+export function buildSamplingFields(model, { topP, topK } = {}) {
+  if (/gemini-3/i.test(String(model || ''))) return {};
+  return { topP, topK };
 }
 
 /**
@@ -76,71 +147,106 @@ async function fetchWithRetry(url, body, { maxRetries = 3 } = {}) {
   let attempt = 0;
   // eslint-disable-next-line no-constant-condition
   while (true) {
-    let resp;
+    // v1.10.46(批次 2-2):abortTimer 涵蓋範圍從「只到 headers 抵達」延伸到「body 讀完」。
+    // 原本 fetch resolve 即 clearTimeout,但 fetch resolve 只代表 headers 到,行動網路 /
+    // proxy 中途吊住時 resp.json() 可無限 pending → 該批永久卡住無錯誤。改成在 controller
+    // 還在 scope 的這裡把 body 讀完(逾時 → abort → body 讀取 reject → 走網路錯誤 retry),
+    // 成功路徑回傳以 body 文字重建的 Response,呼叫端 resp.json() / clone() 行為不變。
+    // timer 統一在 finally 清(每輪 continue / return / throw 都會經過)。
     const controller = new AbortController();
     const abortTimer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
     try {
-      resp = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      });
-    } catch (err) {
-      clearTimeout(abortTimer);
-      const isTimeout = err.name === 'AbortError';
-      const errMsg = isTimeout ? `逾時(${FETCH_TIMEOUT_MS}ms)` : err.message;
-      await debugLog('error', 'api', isTimeout ? 'gemini fetch timeout' : 'gemini fetch network error', { error: err.message, attempt, timeoutMs: isTimeout ? FETCH_TIMEOUT_MS : undefined });
-      if (attempt >= maxRetries) throw new Error('網路錯誤：' + errMsg);
-      await sleep(Math.min(MAX_BACKOFF_MS, 500 * Math.pow(2, attempt)));
-      attempt += 1;
-      continue;
-    }
-    clearTimeout(abortTimer);
-
-    // v0.84: 5xx 伺服器錯誤也重試（Gemini 偶爾回 500/503 服務暫時不可用）
-    if (resp.status >= 500 && resp.status < 600) {
-      await debugLog('warn', 'api', `gemini ${resp.status} server error`, { status: resp.status, attempt });
-      if (attempt >= maxRetries) {
-        let errMsg = `HTTP ${resp.status}`;
-        try { const j = await resp.json(); errMsg = j?.error?.message || errMsg; } catch { /* noop */ }
-        throw new Error(errMsg);
+      let resp;
+      try {
+        resp = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+          signal: controller.signal,
+        });
+      } catch (err) {
+        const isTimeout = err.name === 'AbortError';
+        const errMsg = isTimeout ? `逾時(${FETCH_TIMEOUT_MS}ms)` : err.message;
+        await debugLog('error', 'api', isTimeout ? 'gemini fetch timeout' : 'gemini fetch network error', { error: err.message, attempt, timeoutMs: isTimeout ? FETCH_TIMEOUT_MS : undefined });
+        if (attempt >= maxRetries) {
+          throw isTimeout
+            ? codedError('timeout', { ms: FETCH_TIMEOUT_MS }, '網路錯誤：' + errMsg)
+            : codedError('network', { msg: err.message }, '網路錯誤：' + errMsg);
+        }
+        await sleep(Math.min(MAX_BACKOFF_MS, 500 * Math.pow(2, attempt)));
+        attempt += 1;
+        continue;
       }
-      await sleep(Math.min(MAX_BACKOFF_MS, 500 * Math.pow(2, attempt)));
+
+      // v0.84: 5xx 伺服器錯誤也重試（Gemini 偶爾回 500/503 服務暫時不可用）
+      if (resp.status >= 500 && resp.status < 600) {
+        await debugLog('warn', 'api', `gemini ${resp.status} server error`, { status: resp.status, attempt });
+        if (attempt >= maxRetries) {
+          let errMsg = `HTTP ${resp.status}`;
+          try { const j = await resp.json(); errMsg = j?.error?.message || errMsg; } catch { /* noop */ }
+          throw new Error(errMsg);
+        }
+        await sleep(Math.min(MAX_BACKOFF_MS, 500 * Math.pow(2, attempt)));
+        attempt += 1;
+        continue;
+      }
+
+      if (resp.status !== 429) {
+        // 成功 / 非 429 錯誤:body 在 timer 涵蓋下讀完(2-2)
+        let bodyText;
+        try {
+          bodyText = await resp.text();
+        } catch (err) {
+          const isTimeout = err.name === 'AbortError';
+          const errMsg = isTimeout ? `回應讀取逾時(${FETCH_TIMEOUT_MS}ms)` : err.message;
+          await debugLog('error', 'api', isTimeout ? 'gemini body read timeout' : 'gemini body read error', { error: err.message, attempt });
+          if (attempt >= maxRetries) {
+            throw isTimeout
+              ? codedError('readTimeout', { ms: FETCH_TIMEOUT_MS }, '網路錯誤：' + errMsg)
+              : codedError('network', { msg: err.message }, '網路錯誤：' + errMsg);
+          }
+          await sleep(Math.min(MAX_BACKOFF_MS, 500 * Math.pow(2, attempt)));
+          attempt += 1;
+          continue;
+        }
+        // bodyText 為空字串時傳 null(204 等 null-body status 帶 body 會 throw)
+        return new Response(bodyText || null, { status: resp.status, statusText: resp.statusText, headers: resp.headers });
+      }
+
+      // 429 處理
+      let bodyJson = null;
+      try { bodyJson = await resp.clone().json(); } catch { /* noop */ }
+      const dim = extractQuotaDimension(bodyJson);
+      const retryAfterHeader = resp.headers.get('retry-after');
+      const retryAfterSec = retryAfterHeader ? parseInt(retryAfterHeader, 10) : NaN;
+
+      await debugLog('warn', 'api', 'gemini 429 rate limit', {
+        dimension: dim,
+        retryAfter: retryAfterHeader,
+        attempt,
+        error: bodyJson?.error?.message,
+      });
+
+      if (dim === 'RPD') {
+        throw new DailyQuotaExceededError('今日 Gemini API 配額已用盡(RPD 達上限),請明天再試或升級付費層級。');
+      }
+
+      if (attempt >= maxRetries) {
+        // API 自帶 error.message（英文，ground truth）原樣傳遞不掛 code；
+        // 沒帶才用 http429 code 讓 content 端組「HTTP 429({dim})」
+        const apiMsg = bodyJson?.error?.message;
+        if (apiMsg) throw new Error(apiMsg);
+        throw codedError('http429', { dim: dim || 'unknown' }, `HTTP 429(${dim || '未知維度'})`);
+      }
+
+      const waitMs = Number.isFinite(retryAfterSec) && retryAfterSec > 0
+        ? Math.min(retryAfterSec * 1000 + 100, RETRY_AFTER_CAP_MS)
+        : Math.min(MAX_BACKOFF_MS, 500 * Math.pow(2, attempt));
+      await sleep(waitMs);
       attempt += 1;
-      continue;
+    } finally {
+      clearTimeout(abortTimer);
     }
-
-    if (resp.status !== 429) return resp;
-
-    // 429 處理
-    let bodyJson = null;
-    try { bodyJson = await resp.clone().json(); } catch { /* noop */ }
-    const dim = extractQuotaDimension(bodyJson);
-    const retryAfterHeader = resp.headers.get('retry-after');
-    const retryAfterSec = retryAfterHeader ? parseInt(retryAfterHeader, 10) : NaN;
-
-    await debugLog('warn', 'api', 'gemini 429 rate limit', {
-      dimension: dim,
-      retryAfter: retryAfterHeader,
-      attempt,
-      error: bodyJson?.error?.message,
-    });
-
-    if (dim === 'RPD') {
-      throw new DailyQuotaExceededError('今日 Gemini API 配額已用盡(RPD 達上限),請明天再試或升級付費層級。');
-    }
-
-    if (attempt >= maxRetries) {
-      const msg = bodyJson?.error?.message || `HTTP 429(${dim || '未知維度'})`;
-      throw new Error(msg);
-    }
-
-    const waitMs = Number.isFinite(retryAfterSec) && retryAfterSec > 0
-      ? retryAfterSec * 1000 + 100
-      : Math.min(MAX_BACKOFF_MS, 500 * Math.pow(2, attempt));
-    await sleep(waitMs);
-    attempt += 1;
   }
 }
 
@@ -169,7 +275,8 @@ export async function extractGlossary(compressedText, settings) {
   const model = (glossaryConfig?.model || '').trim() || geminiConfig.model;
 
   const glossaryPrompt = glossaryConfig?.prompt || '';
-  const glossaryTemperature = glossaryConfig?.temperature ?? 0.1;
+  // v1.10.18:fallback 從 0.1 改 1.0(對齊 storage 預設;Gemini 3 設低溫易迴圈 / 退化)。
+  const glossaryTemperature = glossaryConfig?.temperature ?? 1.0;
   const maxTerms = glossaryConfig?.maxTerms ?? 200;
   // fetch 層級的 timeout。v0.70 原為 55s(Structured Output 大輸入需 30-60s),v0.72
   // 拿掉 JSON mode 後該理由消失;v1.9.21 對齊主翻譯路徑 15s(術語表用 Flash Lite
@@ -185,11 +292,12 @@ export async function extractGlossary(compressedText, settings) {
     systemInstruction: { parts: [{ text: glossaryPrompt }] },
     generationConfig: {
       temperature: glossaryTemperature,
-      topP,
-      topK,
+      // v1.10.18:Gemini 3 不送 topP/topK(見 buildSamplingFields)。
+      ...buildSamplingFields(model, { topP, topK }),
       maxOutputTokens: glossaryMaxOutput,
-      // v1.6.12:Pro 系列改用 thinkingLevel='low'(無法完全關閉 thinking),Flash
-      // 系列用 'minimal'(thoughts=0,等同舊 budget=0)。詳見 pickThinkingConfig 註解。
+      // v1.6.12:Pro 系列用 thinkingLevel='low'(無法完全關閉 thinking),Flash 系列
+      // 用 'minimal'(合法最省)。注意 minimal 不保證 thoughts=0,計費仍含思考 token,
+      // 見 pickThinkingConfig / parseGeminiUsage 註解。
       thinkingConfig: pickThinkingConfig(model),
     },
     safetySettings: [
@@ -228,22 +336,20 @@ export async function extractGlossary(compressedText, settings) {
     await debugLog('error', 'glossary', `glossary extraction failed (${reason})`, { error: err.message, elapsed: Date.now() - t0 });
     return { glossary: [], usage: { inputTokens: 0, outputTokens: 0, cachedTokens: 0 }, _diag: `${reason}: ${err.message}` };
   }
-  clearTimeout(abortTimer);
-
+  // v1.10.46(批次 2-2):json 讀完才清 timer——body 中途吊住時 timer 到點 abort,
+  // resp.json() reject 走下方 catch 回 best-effort 空結果,不再無限 pending
   let json;
   try {
     json = await resp.json();
   } catch (parseErr) {
     await debugLog('error', 'glossary', 'glossary response body parse failed', { status: resp.status, error: parseErr.message });
     return { glossary: [], usage: { inputTokens: 0, outputTokens: 0, cachedTokens: 0 }, _diag: `resp.json() failed: ${parseErr.message}` };
+  } finally {
+    clearTimeout(abortTimer);
   }
   const ms = Date.now() - t0;
-  const meta = json?.usageMetadata || {};
-  const usage = {
-    inputTokens: meta.promptTokenCount || 0,
-    outputTokens: meta.candidatesTokenCount || 0,
-    cachedTokens: meta.cachedContentTokenCount || 0,
-  };
+  // v1.10.18:outputTokens 計入 thoughtsTokenCount(見 parseGeminiUsage)。
+  const usage = parseGeminiUsage(json?.usageMetadata);
 
   if (!resp.ok) {
     const errMsg = json?.error?.message || `HTTP ${resp.status}`;
@@ -255,7 +361,7 @@ export async function extractGlossary(compressedText, settings) {
   const rawText = json?.candidates?.[0]?.content?.parts?.[0]?.text || '';
   const finishReason = json?.candidates?.[0]?.finishReason || 'unknown';
   await debugLog('info', 'glossary', 'glossary extraction response', {
-    elapsed: ms, usage: meta, rawChars: rawText.length, finishReason,
+    elapsed: ms, usage, rawChars: rawText.length, finishReason,
   });
 
   // v0.72: 不用 responseMimeType 後，模型可能在 JSON 前後附帶說明文字
@@ -326,6 +432,106 @@ export async function extractGlossary(compressedText, settings) {
   return { glossary, usage };
 }
 
+/**
+ * 為「送到 Instapaper」產生文章摘要(3-4 句,目標語言)。
+ *
+ * 設計:固定走 Gemini Flash Lite(最便宜),與使用者主翻譯引擎無關——只要有 Gemini
+ * key 就能摘要(主引擎可以是 Google 翻譯 / openai-compat)。best-effort:任何失敗
+ *(無 key / 無 model / 逾時 / API 錯誤 / 空回應)一律回 { summary: '' },由呼叫端
+ * 降級為「不附摘要照常送出」,絕不讓摘要害書籤送不出去。
+ *
+ * 跨語摘要:text 可能是已翻譯頁的目標語言文字,也可能是未翻譯頁的原文。prompt 統一
+ * 要求「用 {targetLangLabel} 輸出」,兩種情況都對(flash-lite 跨語摘要沒問題)。
+ *
+ * @param {object} args
+ * @param {string} args.text 文章純文字
+ * @param {string} args.targetLangLabel 目標語言英文 label(storage.LANG_LABELS),注入 prompt
+ * @param {string} args.apiKey Gemini API key
+ * @param {string} args.model 摘要模型(預設由呼叫端帶 flash-lite)
+ * @param {string} [args.serviceTier]
+ * @param {number} [args.fetchTimeoutMs=15000]
+ * @returns {Promise<{ summary: string, usage: { inputTokens:number, outputTokens:number, cachedTokens:number }, _diag?: string }>}
+ */
+export async function summarizeArticle({ text, targetLangLabel, apiKey, model, serviceTier, fetchTimeoutMs = 15_000 }) {
+  const emptyUsage = { inputTokens: 0, outputTokens: 0, cachedTokens: 0 };
+  const clean = (text || '').trim();
+  if (!clean || !apiKey || !model) {
+    return { summary: '', usage: emptyUsage, _diag: 'missing text/apiKey/model' };
+  }
+  const input = clean.length > MAX_SUMMARY_INPUT_CHARS ? clean.slice(0, MAX_SUMMARY_INPUT_CHARS) : clean;
+  const lang = (targetLangLabel || '').trim() || 'the same language as the article';
+
+  // 純文字、無 markdown、無 bullet——Instapaper description 只吃純文字,顯示在項目底下。
+  const systemInstruction =
+    `You are a concise summarizer. Read the article the user provides and write a summary of 3 to 4 sentences in ${lang}. ` +
+    `Capture the article's main point and key takeaways. ` +
+    `Output ONLY the summary as a single plain-text paragraph — no preamble, no title, no markdown, no bullet points, no surrounding quotation marks.`;
+
+  const body = {
+    contents: [{ role: 'user', parts: [{ text: input }] }],
+    systemInstruction: { parts: [{ text: systemInstruction }] },
+    generationConfig: {
+      temperature: 1.0,
+      // Gemini 3 不送 topP/topK(見 buildSamplingFields)。
+      ...buildSamplingFields(model),
+      maxOutputTokens: 1024,
+      thinkingConfig: pickThinkingConfig(model),
+    },
+    safetySettings: [
+      { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
+      { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
+      { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
+      { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' },
+    ],
+  };
+  if (serviceTier && serviceTier !== 'DEFAULT') {
+    body.service_tier = serviceTier.toLowerCase();
+  }
+
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
+
+  await debugLog('info', 'summary', 'instapaper summary request', { model, chars: input.length, targetLang: lang });
+
+  const t0 = Date.now();
+  // best-effort:直接 fetch + AbortController,不重試(對齊 extractGlossary)。
+  const controller = new AbortController();
+  const abortTimer = setTimeout(() => controller.abort(), fetchTimeoutMs);
+  let resp;
+  try {
+    resp = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    clearTimeout(abortTimer);
+    const reason = err.name === 'AbortError' ? `fetch timeout (${fetchTimeoutMs}ms)` : 'network error';
+    await debugLog('error', 'summary', `instapaper summary failed (${reason})`, { error: err.message, elapsed: Date.now() - t0 });
+    return { summary: '', usage: emptyUsage, _diag: `${reason}: ${err.message}` };
+  }
+  let json;
+  try {
+    json = await resp.json();
+  } catch (parseErr) {
+    await debugLog('error', 'summary', 'instapaper summary body parse failed', { status: resp.status, error: parseErr.message });
+    return { summary: '', usage: emptyUsage, _diag: `resp.json() failed: ${parseErr.message}` };
+  } finally {
+    clearTimeout(abortTimer);
+  }
+
+  const usage = parseGeminiUsage(json?.usageMetadata);
+  if (!resp.ok) {
+    const errMsg = json?.error?.message || `HTTP ${resp.status}`;
+    await debugLog('error', 'summary', 'instapaper summary failed (API)', { status: resp.status, error: errMsg });
+    return { summary: '', usage, _diag: `API error ${resp.status}: ${errMsg}` };
+  }
+
+  const rawText = (json?.candidates?.[0]?.content?.parts?.[0]?.text || '').trim();
+  await debugLog('info', 'summary', 'instapaper summary done', { elapsed: Date.now() - t0, usage, chars: rawText.length });
+  return { summary: rawText, usage };
+}
+
 // v1.5.7: buildEffectiveSystemInstruction 已移至 lib/system-instruction.js（兩個 adapter 共用）。
 /**
  * 批次翻譯文字陣列（會自動切成多批送出）。
@@ -348,10 +554,32 @@ export async function translateBatch(texts, settings, glossary, fixedGlossary, f
   const out = new Array(texts.length);
   const usage = { inputTokens: 0, outputTokens: 0, cachedTokens: 0 };
   let hadMismatch = false; // v0.94: 追蹤本批是否有 segment mismatch
-  const chunks = packChunks(texts);
+  // 批次 5-3：帶使用者設定的分批上限（原本寫死 20 段／3500 字，調高設定無效）
+  const chunks = packChunks(texts, {
+    maxUnits: settings?.maxUnitsPerBatch,
+    maxChars: settings?.maxCharsPerBatch,
+  });
   for (const { start, end } of chunks) {
     const slice = texts.slice(start, end);
-    const result = await translateChunk(slice, settings, glossary, fixedGlossary, forbiddenTerms);
+    let result;
+    try {
+      result = await translateChunk(slice, settings, glossary, fixedGlossary, forbiddenTerms);
+    } catch (err) {
+      // v1.10.46(批次 2-5):多 chunk 中途失敗時,前面已完成的 chunk 已經付過費——
+      // 把累積 usage 附在 error 上讓呼叫端(background handleTranslate)記帳後再
+      // rethrow,否則 content 端收到 error 不會發 LOG_USAGE,已付費 token 系統性
+      // 漏記(對帳低估)。translateChunk 逐段 fallback 半途 throw 也會把已累積
+      // usage 掛在 err.usage,這裡一併加總。
+      if (err && typeof err === 'object') {
+        const partial = err.usage || { inputTokens: 0, outputTokens: 0, cachedTokens: 0 };
+        err.usage = {
+          inputTokens: usage.inputTokens + (partial.inputTokens || 0),
+          outputTokens: usage.outputTokens + (partial.outputTokens || 0),
+          cachedTokens: usage.cachedTokens + (partial.cachedTokens || 0),
+        };
+      }
+      throw err;
+    }
     for (let j = 0; j < result.parts.length; j++) out[start + j] = result.parts[j];
     usage.inputTokens += result.usage.inputTokens;
     usage.outputTokens += result.usage.outputTokens;
@@ -402,8 +630,8 @@ async function translateChunk(texts, settings, glossary, fixedGlossary, forbidde
     systemInstruction: { parts: [{ text: effectiveSystem }] },
     generationConfig: {
       temperature,
-      topP,
-      topK,
+      // v1.10.18:Gemini 3 不送 topP/topK(見 buildSamplingFields)。
+      ...buildSamplingFields(model, { topP, topK }),
       maxOutputTokens,
       // v1.6.12:依模型動態選 thinkingLevel('low' for Pro, 'minimal' for Flash)。
       // 詳見 pickThinkingConfig 註解;Pro 強制 thinking 不能用 budget=0。
@@ -455,7 +683,8 @@ async function translateChunk(texts, settings, glossary, fixedGlossary, forbidde
     await debugLog('error', 'api', 'gemini response body is not JSON', {
       status: resp.status, elapsed: ms, parseError: parseErr.message, rawPreview,
     });
-    throw new Error(`Gemini API 回應格式異常（非 JSON）：HTTP ${resp.status}。${rawPreview ? '回應前 200 字元：' + rawPreview : ''}`);
+    throw codedError('badResponse', { status: resp.status, preview: rawPreview || 'N/A' },
+      `Gemini API 回應格式異常（非 JSON）：HTTP ${resp.status}。${rawPreview ? '回應前 200 字元：' + rawPreview : ''}`);
   }
   const ms = Date.now() - t0;
 
@@ -475,7 +704,8 @@ async function translateChunk(texts, settings, glossary, fixedGlossary, forbidde
   const blockReason = json?.promptFeedback?.blockReason;
   if (blockReason) {
     await debugLog('error', 'api', 'gemini prompt blocked', { blockReason, elapsed: ms });
-    throw new Error(`Gemini 拒絕處理此請求（promptFeedback.blockReason: ${blockReason}）。可能是安全過濾器誤判，請嘗試縮短段落或調整內容。`);
+    throw codedError('blocked', { reason: blockReason },
+      `Gemini 拒絕處理此請求（promptFeedback.blockReason: ${blockReason}）。可能是安全過濾器誤判，請嘗試縮短段落或調整內容。`);
   }
 
   // 檢查 candidates 為空或無文字輸出
@@ -494,7 +724,7 @@ async function translateChunk(texts, settings, glossary, fixedGlossary, forbidde
     };
     const friendlyMsg = reasonMessages[finishReason]
       || `Gemini 回傳空內容（finishReason: ${finishReason}）。`;
-    throw new Error(friendlyMsg);
+    throw codedError(EMPTY_REASON_CODES[finishReason] || 'emptyContent', { reason: finishReason }, friendlyMsg);
   }
 
   // finishReason 異常警告（有文字但不是正常結束）
@@ -502,19 +732,15 @@ async function translateChunk(texts, settings, glossary, fixedGlossary, forbidde
     await debugLog('warn', 'api', 'gemini unusual finishReason', { finishReason, elapsed: ms, textLength: text.length });
   }
 
-  const meta = json?.usageMetadata || {};
-  const chunkUsage = {
-    inputTokens: meta.promptTokenCount || 0,
-    outputTokens: meta.candidatesTokenCount || 0,
-    // Gemini 2.5+ implicit context caching 命中的 token 數（輸入 tokens 的子集）。
-    // 未命中或舊模型時欄位不會出現，用 || 0 防呆。
-    cachedTokens: meta.cachedContentTokenCount || 0,
-  };
+  // v1.10.18:outputTokens 計入 thoughtsTokenCount(見 parseGeminiUsage)。
+  // cachedTokens 為 Gemini 2.5+ implicit cache 命中的 input 子集,未命中欄位不出現 → 0。
+  const chunkUsage = parseGeminiUsage(json?.usageMetadata);
   await debugLog('info', 'api', 'gemini response', {
     elapsed: ms,
     segments: texts.length,
     inputTokens: chunkUsage.inputTokens,
     outputTokens: chunkUsage.outputTokens,
+    thoughtsTokens: chunkUsage.thoughtsTokens,
     cachedTokens: chunkUsage.cachedTokens,
     finishReason,
     // v1.5.7: LLM 回應的譯文前 300 字 — 與 'gemini request' 的 inputPreview 對照即可診斷
@@ -541,7 +767,15 @@ async function translateChunk(texts, settings, glossary, fixedGlossary, forbidde
     const tFallback0 = Date.now();
     for (let fi = 0; fi < texts.length; fi++) {
       const tSeg0 = Date.now();
-      const r = await translateChunk([texts[fi]], settings, glossary, fixedGlossary, forbiddenTerms);
+      let r;
+      try {
+        r = await translateChunk([texts[fi]], settings, glossary, fixedGlossary, forbiddenTerms);
+      } catch (err) {
+        // v1.10.46(批次 2-5):逐段 fallback 半途失敗——本批原始請求 + 已完成的逐段
+        // 都付過費,把累積 usage 掛在 error 上交給 translateBatch 外層加總(見上)。
+        if (err && typeof err === 'object') err.usage = { ...aggUsage };
+        throw err;
+      }
       await debugLog('info', 'api', `fallback segment ${fi + 1}/${texts.length}`, { elapsed: Date.now() - tSeg0 });
       aligned.push(r.parts[0] || '');
       aggUsage.inputTokens += r.usage.inputTokens;
@@ -601,7 +835,10 @@ export async function translateBatchStream(texts, settings, glossary, fixedGloss
     contents: [{ role: 'user', parts: [{ text: joined }] }],
     systemInstruction: { parts: [{ text: effectiveSystem }] },
     generationConfig: {
-      temperature, topP, topK, maxOutputTokens,
+      temperature,
+      // v1.10.18:Gemini 3 不送 topP/topK(見 buildSamplingFields)。
+      ...buildSamplingFields(model, { topP, topK }),
+      maxOutputTokens,
       thinkingConfig: pickThinkingConfig(model),
     },
     safetySettings: [
@@ -731,14 +968,11 @@ export async function translateBatchStream(texts, settings, glossary, fixedGloss
           tryEmitSegments();
         }
 
-        // 每個 SSE event 都帶 usageMetadata,取最後一個就是整批最終 usage
+        // 每個 SSE event 都帶 usageMetadata,取最後一個就是整批最終 usage。
+        // v1.10.18:outputTokens 計入 thoughtsTokenCount(見 parseGeminiUsage)。
         const meta = json?.usageMetadata;
         if (meta) {
-          lastUsage = {
-            inputTokens: meta.promptTokenCount || 0,
-            outputTokens: meta.candidatesTokenCount || 0,
-            cachedTokens: meta.cachedContentTokenCount || 0,
-          };
+          lastUsage = parseGeminiUsage(meta);
         }
       }
     }
@@ -767,13 +1001,15 @@ export async function translateBatchStream(texts, settings, glossary, fixedGloss
     elapsed, segments: texts.length, segmentsEmitted,
     inputTokens: lastUsage.inputTokens,
     outputTokens: lastUsage.outputTokens,
+    thoughtsTokens: lastUsage.thoughtsTokens,
     cachedTokens: lastUsage.cachedTokens,
     finishReason,
     outputPreview: allText.slice(0, 300),
   });
 
   if (blockReason) {
-    throw new Error(`Gemini 拒絕處理此請求(promptFeedback.blockReason: ${blockReason})`);
+    throw codedError('blocked', { reason: blockReason },
+      `Gemini 拒絕處理此請求(promptFeedback.blockReason: ${blockReason})`);
   }
 
   if (allText.length === 0) {
@@ -783,7 +1019,8 @@ export async function translateBatchStream(texts, settings, glossary, fixedGloss
       MAX_TOKENS: '輸出超過 maxOutputTokens 上限',
       OTHER: 'Gemini 回傳空內容(finishReason: OTHER)',
     };
-    throw new Error(reasonMsg[finishReason] || `Gemini 回傳空內容(finishReason: ${finishReason})`);
+    throw codedError(EMPTY_REASON_CODES[finishReason] || 'emptyContent', { reason: finishReason },
+      reasonMsg[finishReason] || `Gemini 回傳空內容(finishReason: ${finishReason})`);
   }
 
   // 計算對齊後的譯文 array(跟 non-streaming 一致),hadMismatch 留給呼叫端決定如何處理

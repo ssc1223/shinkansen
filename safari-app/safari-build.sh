@@ -70,6 +70,15 @@ echo "==> Sync extension Resources..."
 mkdir -p "$EXTENSION_RESOURCES"
 rsync -a --delete shinkansen/ "$EXTENSION_RESOURCES/"
 
+# 1.2 background → event page(scripts + persistent: false,保留 type: module)。
+#     iOS Safari 的 MV3 SW 被系統回收後不再喚醒(Apple Forums thread 758346);
+#     macOS Safari 雖未觀察到同等死透行為,但 event page 是 WebKit 原生偏好的
+#     background 形式,兩平台統一宣告避免 lifecycle 差異。Chrome 版 manifest
+#     (shinkansen/)維持 service_worker 不動。drift check(步驟 6)排除 manifest。
+#     詳見 safari-app/patch-manifest-background.sh(macOS / iOS build 共用)。
+echo "==> Patch manifest background → event page..."
+bash safari-app/patch-manifest-background.sh "$EXTENSION_RESOURCES/manifest.json"
+
 # 1.5 MAS build override:strip update-check banner 整套路徑
 # 為什麼:Apple Review Guideline 2.3.10 不准 app 內引導使用者到 App Store 外
 # 下載 app;且同 Bundle ID(app.shinkansen.macos)使用者點 banner 載
@@ -81,13 +90,16 @@ echo "==> Override distribution{,-cs}.js → IS_MAS_BUILD=true(strip update-chec
 cat > "$EXTENSION_RESOURCES/lib/distribution.js" <<'EOF'
 // distribution.js — MAS build override(由 safari-app/safari-build.sh 寫入,不要編輯)
 // 原檔見 shinkansen/lib/distribution.js,預設 false。
+// 注意：兩個 export 都必須寫出（popup / options import 兩者，少一個 import 直接炸）。
 export const IS_MAS_BUILD = true;
+export const IS_IOS_BUILD = false;
 EOF
 cat > "$EXTENSION_RESOURCES/lib/distribution-cs.js" <<'EOF'
 // distribution-cs.js — MAS build override(由 safari-app/safari-build.sh 寫入,不要編輯)
 // 原檔見 shinkansen/lib/distribution-cs.js,預設 false。值必跟 distribution.js 同步。
 if (window.__SK) {
   window.__SK.IS_MAS_BUILD = true;
+  window.__SK.IS_IOS_BUILD = false;
 }
 EOF
 
@@ -121,19 +133,25 @@ xcodebuild -exportArchive \
   -exportOptionsPlist "$EXPORT_OPTS"
 
 MAS_PKG="safari-app/shinkansen-macos-v${VERSION}-mas.pkg"
+# 刪除舊版 MAS .pkg(每次 bump 換版本號會留下舊檔累積)。新檔此刻仍在
+# $BUILD_DIR,先清空 safari-app/ 內所有 -mas.pkg 再 mv 進新版。
+rm -f safari-app/shinkansen-macos-v*-mas.pkg
 mv "$BUILD_DIR/safari-export-mas/Shinkansen.pkg" "$MAS_PKG"
 
 # 6. Source drift forcing function
 # 排除 lib/distribution.js + lib/distribution-cs.js — MAS build 故意把它們
 # override 成 IS_MAS_BUILD=true,跟 shinkansen/ 原檔的 false 必定不同,
 # 這是預期 drift(見步驟 1.5)。
-echo "==> Source drift check(排除 lib/distribution*.js 預期 override)..."
-DRIFT=$(diff -r --brief shinkansen/ "$EXTENSION_RESOURCES/" 2>&1 | grep -vE "lib/distribution(-cs)?\.js" || true)
+echo "==> Source drift check(排除 lib/distribution*.js 預期 override + manifest 預期 patch)..."
+# manifest.json 排除理由:步驟 1.2 的 event page patch 是預期受控差異,
+# 由 patch-manifest-background.sh(冪等)重跑 verify 補上 manifest 檢查。
+DRIFT=$(diff -r --brief shinkansen/ "$EXTENSION_RESOURCES/" 2>&1 | grep -vE "lib/distribution(-cs)?\.js|manifest\.json" || true)
 if [ -n "$DRIFT" ]; then
   echo "ERROR: source drift between shinkansen/ and Resources/:" >&2
   echo "$DRIFT" >&2
   exit 1
 fi
+bash safari-app/patch-manifest-background.sh "$EXTENSION_RESOURCES/manifest.json"
 
 echo ""
 echo "Done: $MAS_PKG"

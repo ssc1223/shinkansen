@@ -6,7 +6,7 @@ A fast, privacy-first translation extension for web pages and YouTube subtitles.
 
 The name *Shinkansen* (新幹線, "bullet train") evokes a fast, smooth, frictionless reading experience.
 
-> [Install from Chrome Web Store](https://chromewebstore.google.com/detail/shinkansen/pnhmlecoofeoofajcjenndnimhbodhlg) · [Install from Firefox Add-ons](https://addons.mozilla.org/firefox/addon/shinkansen/) · [Download latest zip](https://github.com/jimmysu0309/shinkansen/releases/latest) · See the [project page](https://jimmysu0309.github.io/shinkansen/) for install guide and product overview · [Release notes](https://jimmysu0309.github.io/shinkansen/release-notes.en.html)
+> [Install from Chrome Web Store](https://chromewebstore.google.com/detail/shinkansen/pnhmlecoofeoofajcjenndnimhbodhlg) · [Install from Firefox Add-ons](https://addons.mozilla.org/firefox/addon/shinkansen/) · [Install from Mac App Store](https://apps.apple.com/tw/app/shinkansen-translator/id6768586680) · [Download latest zip](https://github.com/jimmysu0309/shinkansen/releases/latest) · See the [project page](https://jimmysu0309.github.io/shinkansen/) for install guide and product overview · [Release notes](https://jimmysu0309.github.io/shinkansen/release-notes.en.html)
 
 ## Recent major updates
 
@@ -105,7 +105,7 @@ Shinkansen offers three customizable translation presets, each bound to a shortc
 | `Alt+S` / `Option+S` | Gemini | Flash ($0.50 / $3.00) | Daily reading, best quality / value |
 | `Alt+D` / `Option+D` | Google Translate | — | No API key needed, fast, free |
 
-**All customizable in the "Translation shortcuts" section of settings**: each preset's engine (Gemini / Google Translate), model (Flash Lite / Flash / Pro / custom), and display label can be changed. The keybindings themselves are configured at `chrome://extensions/shortcuts`.
+**All customizable in the "Translation shortcuts" section of settings**: each preset's engine (Gemini / Google Translate), model (Flash Lite / Flash / Pro / custom), and display label can be changed. The keybindings themselves can also be customized right there — click a preset's key field and press the combination you want (on Chrome use `⌥ Option` or `⌃ Control`; on Safari — Mac / iPad / iPhone — use `⌃ Control`, since iOS Safari doesn't pass `⌥` / `⌘` to web pages; the settings page shows the available keys per browser automatically; press `ESC` to cancel). Works with iPad external keyboards too. You can also adjust the built-in default keys at `chrome://extensions/shortcuts` (Chrome) or `about:addons` (Firefox).
 
 **Unified cancel / restore behavior**:
 - Press any shortcut while translating → cancel immediately
@@ -140,6 +140,8 @@ Notes: you must have view access to the document. Mobile reading view is read-on
 Open a YouTube video with English captions, make sure CC is on, click the Shinkansen toolbar icon — the popup will show a "YouTube subtitle translation" toggle. Turn it on. Captions are progressively replaced with Traditional Chinese without affecting playback; styling matches native YouTube captions exactly.
 
 If you watch a lot of English YouTube content, enable auto-translate in the "YouTube subtitles" tab in settings — translation will start automatically whenever you open a video, no manual toggling.
+
+On YouTube video pages, the toolbar popup shows a "Caption size" dropdown to enlarge the translated captions (100%–200%). It works on both desktop and mobile; on iPhone / iPad it also scales the captions shown by the iOS system player in fullscreen
 
 ### AI smart segmentation (ASR-only)
 
@@ -250,7 +252,7 @@ Firefox's **HTTPS-Only Mode** (`about:preferences#privacy`, scroll to the bottom
 
 AI models occasionally produce wording you'd rather avoid in the translation — for example, when translating to British English you may want "colour" instead of "color"; when translating to European Portuguese you may want "telemóvel" instead of "celular"; or your in-house style guide may forbid certain words entirely ("utilize" should always be "use", "leverage" should always be "use", etc.). The blocked-word list lets you give the model an explicit rule per word: never use the left column; always use the right column.
 
-The list works for any target language. Each entry has three columns — blocked word, replacement, and a free-text note (optional, useful for documenting why an entry exists). You can edit, add to, or fully replace the list in the "Blocked-word list" settings tab, or click "Restore defaults" to revert. By default the list is empty; some targets ship with prepopulated defaults curated for that language's typical AI failure modes. Switching between targets only auto-resets the list if your current entries still match the previous target's defaults — your hand-edited entries are preserved.
+The list works for any target language. Each entry has three columns — blocked word (required), replacement (optional), and a free-text note (optional, useful for documenting why an entry exists). Only the blocked word is required: fill in a replacement to force a specific word, or leave it blank to simply forbid the word and let the model rephrase naturally on its own — handy when you just dislike a word but can't pin down a fixed replacement (e.g. a cliché). You can edit, add to, or fully replace the list in the "Blocked-word list" settings tab, or click "Restore defaults" to revert. By default the list is empty; some targets ship with prepopulated defaults curated for that language's typical AI failure modes. Switching between targets only auto-resets the list if your current entries still match the previous target's defaults — your hand-edited entries are preserved.
 
 After every translation response, Shinkansen scans the output and logs a `forbidden-term-leak` warning in the Debug tab (with original and translation snippets) for any blocked words that slipped through — letting you investigate model leakage without **automatically rewriting the translation**, following the design principle "language preferences belong in the prompt, not in post-hoc regex replace", which avoids damaging legitimate quoted uses in the translation.
 
@@ -288,7 +290,7 @@ Off by default. Recommended only for articles where precision matters (e.g., lon
 
 ## Current version
 
-v1.10.0 — full feature list and specs in [SPEC.md](SPEC.md) (Traditional Chinese only).
+v1.10.64 — full feature list and specs in [SPEC.md](SPEC.md) (Traditional Chinese only).
 
 ## License
 

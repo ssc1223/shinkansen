@@ -17,7 +17,131 @@
 
 ## 條目
 
-(目前沒有 pending 條目)
+### toast 在嚴格 CSP 站點(Safari)裸露顯示「翻譯中…」(2026-06-21,v1.10.63 修)
+- **症狀**:iOS Safari 上,某些站點(實例:miniflux)一載入頁面,左上角就冒出卡住的「翻譯中…」toast——沒觸發任何翻譯、自動翻譯也沒開。看到的是 toast 範本的預設文字(非真實 loading 訊息,真訊息會帶數字),且位置不對(裸露無樣式)。Chrome / 桌面看不到。
+- **根因**:miniflux 送嚴格 CSP `style-src 'nonce-...'`(無 unsafe-inline)。Safari 的 content script **不像 Chrome isolated world 那樣免疫頁面 CSP** → toast 注入的 shadow `<style>` 被 `style-src` 擋掉 → `display:none` 與全部樣式失效 → toast 裸露顯示範本字。
+- **修在**:`shinkansen/content-toast.js` —— toast 樣式改用 Constructable Stylesheet(`shadow.adoptedStyleSheets = [sheet]`,`sheet.replaceSync(TOAST_CSS)`)注入,不再用 `<style>`。JS API 建的樣式表不受 `style-src` 管。同時還原 v1.10.62 的 visualViewport 定位改動(那是基於錯誤假設的多餘複雜度,真兇是 CSP)。
+- **為什麼 path B**:Playwright **Chromium 重現不出**——Chrome content script 免疫頁面 CSP,即使在帶嚴格 CSP 的 fixture 上,舊的 `<style>` 也照樣生效 → spec 分辨不出修法前後、只會得到假綠。且 toast 是 `mode:'closed'` shadow,spec 無法內省 `adoptedStyleSheets`。
+- **已驗證(ground truth)**:**iOS 模擬器(iPhone 17,iOS 26.5)真 WebKit before/after 截圖** —— 修前 miniflux 登入頁左上角有「翻譯中…」幽靈,套修法 rebuild 後消失;桌面 cage 另驗正常 toast(adoptedStyleSheets 路徑)樣式完整、右下角正常顯示。既有 9 條 toast spec 全綠確認重構無回歸。
+
+### ~~送 Instapaper — EXTRACT_PAGE_HTML 只由最上層 frame 回應(2026-06-15)~~
+- ★ **關閉(2026-06-18,Jimmy 決定)**:跨 frame 廣播搶答的時序屬永久 path B(同 M1/M2)——Playwright harness 走單一頂層 frame、`getShinkansenEvaluator` 只接頂層 isolated world,重現不出「哪個 frame 先回應」,寫不出乾淨 spec。修法早已 in place(`content.js` 非頂層 frame 不回應)+ cage 實機驗過生效(bookmark 2020084398 = 乾淨譯文、無影片)。無對應自動測試可補 → 關閉,不再佔活動 queue。
+- ~~**症狀**:含內嵌 youtube(或任何 iframe)的頁面送 Instapaper,存下來變成「影片」而非主文。實機 readtrung 驗到:送出的 content 是 youtube-nocookie iframe frame 回的「影片嵌入頁」(347 字、標題=影片名)。~~
+- ~~**根因**:content script `all_frames: true` → 內嵌 iframe 也跑 content script;popup / background 用 `browser.tabs.sendMessage(tabId, {type:'EXTRACT_PAGE_HTML'})` **未指定 frameId** → 廣播到所有 frame → iframe frame 先回應就回它自己的文件。~~
+- ~~**修在**:`shinkansen/content.js` EXTRACT_PAGE_HTML handler 加 `if (window.top !== window) return false;`(非頂層 frame 不回應)。~~
+- ~~**為什麼 path B**:重現需「真實多 frame 頁面 + `browser.tabs.sendMessage` 廣播 + 哪個 frame 先回應的時序」。Playwright regression harness 走 `evaluate` 直呼 `window.__SK.extractPageHtml(document)`(單一頂層 frame)、`getShinkansenEvaluator` 只接頂層 isolated world,測不到「跨 frame 廣播搶答」。已用實機 cage(temp hook 真送 + Read bookmark)驗證修法生效(bookmark 2020084398 = 乾淨譯文、無影片)。~~
+
+<!-- iOS host app 設定畫面回填 extension 真值（反向 push extApiKey/extModel,v1.10.43）清空紀錄
+  （2026-06-09,Jimmy 真機驗收完成）:
+  - 症狀:host app「API Key 與預設模型設定」畫面進入時只讀 host 自己寫過的 hostApiKey/hostModel
+    （host 上次推的值,非 extension 真值）→ 顯示空白 / 舊值 → 按儲存覆寫現值（尤其預設翻譯方式
+    無「空不覆寫」防護）→ 設定被清掉。
+  - 修在:shinkansen/background.js（pushExtSettings + extModelToken slot2 反向對映 + content-init
+    /sw-init/onStartup/storage.onChanged 觸發,IS_IOS_BUILD gate）/ SafariWebExtensionHandler.swift
+    （pushExtSettings action → 寫 extApiKey/extModel）/ ViewController.swift（sendSettingsToPage
+    優先讀 ext*,fallback host*）。
+  - 為什麼 path B:同 §26.12 forward 橋接——IS_IOS_BUILD gate（Chromium false 早退）+ sendNativeMessage
+    需 Safari appex native handler + App Group（Chromium 無對應）+ host 端 WKWebView 讀 App Group plist。
+  - 1.10.42.1 真機:API Key 回填正確,但預設翻譯方式顯示 Google（實際 Gemini Flash）。根因:iOS background
+    是 event page,options 改設定時在睡 → storage.onChanged 沒喚醒 → extModel 沒寫 → fallback 到舊
+    hostModel='google'。1.10.42.2 修:push 改掛 content-init（每次頁面載入,pull 已驗證會喚醒 event page）。
+  - ★ 清空依據:2026-06-09 Jimmy 真機（1.10.42.2 TestFlight）驗收——擴充功能設 Gemini Flash + API Key →
+    host 設定畫面正確顯示現值、儲存後設定不再被清 → 回報「結果正確」。比照 §26.12 靠真機 ground truth 結案。 -->
+
+### ~~code review 2026-06-09 M2 — content-drive.js rAF loop orphan 收斂 + 防重複綁定~~
+- ★ **關閉(2026-06-10,Jimmy 決定)**:orphan content script 情境 harness 永久無法重現(同 M1),屬永久 path B,寫不出乾淨 spec。code 修法早已 in place、風險已堵住(orphan 自停 + 防重複綁定 guard),既有 drive-* spec 已驗 overlay / render 邏輯沒被破壞。無對應測試可補 → 關閉,不再佔活動 queue。
+- ~~**症狀**(潛在):content-drive.js:411 _startRenderLoop 的 rAF loop 原本無條件遞迴永不停,orphan content script 後仍每幀 getBoundingClientRect 空轉;_listenPlayerMessages 無防重複綁定~~
+- ~~**修在**:`shinkansen/content-drive.js` _startRenderLoop 加 orphan 自我停止(`!chrome.runtime?.id`)+ DRIVE.renderLoopRunning 防重複啟動 guard;_listenPlayerMessages 加 DRIVE._msgListenerInstalled guard~~
+- ~~**為什麼還不能寫測試**:orphan context 同 M1(harness 無法重現);防重複啟動 / 綁定 guard 要測需 expose 內部 + 計 rAF 次數,收益低~~
+- ~~**取捨(非 bug)**:不在 _autoTranslateEnabled=false 時暫停 loop,只收斂「回不來」的 orphan~~
+
+### ~~code review 2026-06-09 M4 — usage-db getDB 連線失效自我重建~~
+- ★ **已清(2026-06-10,走路徑 A)**:`test/jest-unit/usage-db-reconnect.test.cjs`(4 case)。
+  用假 indexedDB.open 替身(reuse exchange-rate test 的 vm sandbox loadEsm pattern,getDB
+  是 hoisted function declaration 直接 ctx.getDB() 可呼叫),觀測 openCount + 回傳 db identity
+  驗:singleton 共用 / onclose 重建 / onversionchange close+重建 / **stale onclose 不誤殺新連線
+  (_db===db guard)**。SANITY 已驗(拿掉 onclose 的 `if (_db === db)` → stale onclose 測試
+  fail,還原 pass)。零新 dep、零 production 改動。
+  - 訊號層界定:本 spec 驗「連線失效後的記帳邏輯」,不驗「真瀏覽器儲存壓力下是否真的 fire
+    onclose / 重建後 transaction 是否成功」(harness 到不了的層,fake-indexeddb 也模擬不出
+    儲存壓力驅逐,故不引入)。
+- ~~**症狀**(潛在):getDB singleton 沒掛 onclose / onversionchange,連線被瀏覽器關閉後 _dbPromise cache 死連線 → db.transaction() 丟 InvalidStateError,usage 寫入靜默失敗到 SW 重啟~~
+- ~~**修在**:`shinkansen/lib/usage-db.js` req.onsuccess 掛 `db.onclose` / `db.onversionchange`,比對 `_db === db` 後 null 掉 _dbPromise 讓下次 getDB 重建~~
+
+### ~~code review 2026-06-09 M8 — YT heuristic / on-the-fly 批次結果 res.result 防禦~~
+- ★ **已清(2026-06-10,走路徑 A)**:`test/regression/youtube-batch-missing-result-guard.spec.js`(2 case)。
+  production 加 2 個測試 seam(`SK._runAsrHeuristicWindow` / `SK._flushOnTheFly`,同既有 `SK._runAsrSubBatch` 性質),
+  spec mock `safeSendMessage` 回 ok=true 但不帶 result,直接驅動兩條路徑。
+  - 觀測點:兩條 result 迴圈都包 try/catch,throw 會被吞 → 不能用「不 reject」斷言。改觀測
+    captionMap:有 fix → 每段 fallback 原文填入(非空);無 fix → `undefined[j]` 第一步 throw 被吞
+    → captionMap 維持空。
+  - SANITY 已驗:兩處 `const results = res.result || []` 改回 `res.result` 直接索引 →
+    captionMap.size > 0 斷言 fail(throw 被吞、captionMap 空)→ 還原 pass。
+  - 訊號層界定:驗「缺 result 時 fallback 原文寫 captionMap 不靜默丟空」,不驗 background 真會不會
+    違反契約(正常不會)/ overlay 視覺。
+
+---
+
+## Deferred 改善項(code review 2026-06-09,待評估排程)
+
+> 這些是 2026-06-09 全 codebase review 找出、但當輪決定**不動**的項目(架構級重構 / 低 ROI)。
+> 不是 bug,功能現況正確。放這裡是為了不遺失,未來有空再評估。**不計入 release gate**。
+>
+> **2026-06-09 後續處理**：M9(c)、L2(a)（部分：只合 Drive Gemini+Custom）、L2(b) 已於本輪
+> 完成，走路徑 A 寫了 regression spec（`test/jest-unit/alarm-dispatcher.test.cjs` /
+> `drive-batch-merge.test.cjs` / `exchange-rate-and-format.test.cjs` 新增 describe）並 SANITY 驗過，
+> 從本清單移除。L2(a) 的 Google / YouTube `_runAsrSubBatch` 折疊評估後風險 > 收益，**不做**
+>（輸入格式 / 輸出目標 / 時間戳生成全不同）。剩 L5 待評估。
+
+### L5 — gemini.js segment mismatch 逐段 fallback 不過 rate limiter
+- lib/gemini.js translateChunk mismatch 時逐段重打 API,不經 limiter.acquire(不計入 RPM/TPM 視窗)。
+- **為何 deferred**:修法需把 limiter 從 background 接進純 API 模組(架構改動);mismatch 罕見,逐段 fallback 內層已有 429 退避兜底,後果良性。
+- **建議**:fallback 逐段也走 limiter,或在 background 層處理 mismatch retry。
+
+## 已評估為「非 bug / 維持原樣」(不要再被當問題重提)
+
+- **M7 PDF 多行末行被吞**:**誤報**。數學證明 fit 保證 `requiredH ≤ blockH+1`,drawText 的 `cy < pdfBottom - lineHeight` break 對成功 fit 的最後一行永不觸發(餘裕 = `fontSize×(visualRatio-1)+lineHeight-1 ≥ 5.5 > 0`)。break 只在 fallback overflow 情境清掉真的溢出的行——正確行為。移除 break 反而讓 fallback 譯文溢出蓋下個 block。2026-06-09 Plano/Quotation/Trimble 真翻譯 Read 譯文 PDF 均無末行遺失。
+- **L1 caption scale observer**:**維持觀察 #movie_player**,不縮到 .ytp-caption-window-container。YT 在字幕 toggle / 全螢幕 / 畫質切換時銷毀重建該容器,observer 掛舊容器會漏掉重建。現有 rAF 合併 + idempotent apply 已壓住成本(且只在 scale≠100 啟動)。
+
+<!-- iOS host app ↔ extension App Group 設定橋接（Phase 2,SPEC-PRIVATE §26.12）清空紀錄
+  （2026-06-09,模擬器端到端驗收完成）:
+  - 功能:host app onboarding / 設定畫面選的 API Key + 預設模型，經 App Group 共享
+    UserDefaults + native messaging 拉進 extension storage，四指 tap / Alt+S / popup 翻譯用到。
+  - 改在:ViewController.swift（saveSettings/getSettings）/ SafariWebExtensionHandler.swift
+    （pullHostSettings）/ shinkansen/background.js（pullHostSettings + model→slot2 + seq 消費）/
+    shinkansen/content-touch.js（頁面載入送 PULL_HOST_SETTINGS）。
+  - 為什麼 path B（harness 抓不到）:pull 以 IS_IOS_BUILD gate（Chromium false 早退）+
+    sendNativeMessage 需 Safari appex native handler + App Group 共享容器（Chromium 無對應）+
+    Safari WebExtension chrome.storage 在 WebKit 不透明位置（自動讀不到 consumedSeq）。
+  - ★ 清空依據:2026-06-09 Jimmy 模擬器驗收——App Group plist 確認 host 寫入（hostApiKey/
+    hostModel/hostSettingsSeq=6）、擴充功能已啟用（Extensions.plist GrantedPermissions）、
+    設 Gemini 模型 + sim Safari 翻譯英文頁回報「測試翻譯正常」→ 整條 host 寫 → pull → 套用 →
+    翻譯生效跑通。比照 §26.6/26.7 靠「實際翻譯成功」ground truth 結案，queue 不再追蹤。
+  - 已知未涵蓋（非 pending,屬上架流程）:真機 TestFlight smoke-check + profile 重簽（§26.12 ⑥）。 -->
+
+
+<!-- v1.10.27 清空紀錄(2026-06-08,iPhone 實機驗收完成):
+  - iOS 原生全螢幕字幕軌:gate + fullscreen 事件切換層(永久 path B)
+  - 症狀:iPhone / iPad Safari 看 YouTube 一按全螢幕,翻譯字幕消失(iOS 平台限制——
+    webkitEnterFullscreen 進原生播放器只搬 <video>,DOM overlay 全被蓋住)
+  - 修在:shinkansen/content-youtube.js iOS FS track 模組(_refreshIosFsTrack /
+    _isIOSSafari / _iosFsBeginHandler / _iosFsEndHandler)
+  - 已寫的 spec(路徑 A,自動測得到那層):test/regression/youtube-ios-fullscreen-track.spec.js
+    4 case + SANITY——驗 _buildIosFsTrackCues cue 組裝 + _ensureIosFsTrack 真實建軌灌 VTTCue
+  - 為什麼 gate / fullscreen 事件層永遠寫不出 spec(訊號層次,CLAUDE.md 工作流原則 §3):
+    1. _isIOSSafari() 在 Playwright Chromium 永遠回 false → _refreshIosFsTrack 整段
+       early return,自動環境碰不到
+    2. webkitbeginfullscreen / webkitendfullscreen 是 iOS 原生播放器專屬事件,Chromium
+       不 fire;原生播放器把 TextTrack 渲染出來更是 iPhone 系統層,harness 完全看不到
+  - ★ 清空依據:2026-06-08 Jimmy iPhone 實機(TestFlight)驗收回報「測試都正常」——
+    進全螢幕字幕正常顯示中文、退出切回 DOM overlay 正常。永久 path B 那層改靠這次
+    實機驗收結案,queue 不再追蹤。
+  - 取捨(非 bug):全螢幕字幕外觀由 iOS「設定→輔助使用→字幕」控制,無法照搬 overlay
+    的中英共用黑底樣式(iPhone 硬限制)。
+  - 已知未涵蓋範圍(非本條 pending,屬功能未做):目前只鏡像 ASR(自動生成)路徑的
+    displayCues;非 ASR(手動上傳字幕)路徑走 replaceSegmentEl,沒有 displayCues 來源,
+    全螢幕仍會消失——待後續評估是否補(mobile YouTube 外語影片以 ASR 為大宗,MVP 先涵蓋 ASR)。
+-->
 
 <!-- v1.10.0 清空紀錄(2026-05-20):
   - B3 整條移除(使用者要求移除 MAS 上架待辦,2026-05-20)。Part 1(popup banner

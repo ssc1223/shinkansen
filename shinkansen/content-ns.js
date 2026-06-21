@@ -32,10 +32,32 @@ function _sk_isCurrentFrameDisabled() {
   return _sk_shouldDisableInFrame(isFrame, window.innerWidth, window.innerHeight, visible);
 }
 
+// ─── v1.10.59: 非 HTML 文件 gate（pure function 設計，給 spec unit-test 用） ───
+// RSS/Atom/純 XML feed（如 rsshub.app/<route>）等被 Chrome 直接渲染的文件，content
+// script 一樣會被注入，但這類 XMLDocument 的 createElement('div') 產出的是 namespace
+// 為 null 的通用 Element，沒有 .style / attachShadow 等 HTMLElement 能力 →
+// content-toast.js 第 9 行 `toastHost.style.cssText = ...` 會直接 throw（Cannot set
+// properties of undefined），整條 content script 在此中斷。
+//
+// 判別不能看 documentElement.namespaceURI：Chrome 的 XML viewer 會在 XMLDocument 上
+// 注入一個 namespace 為 xhtml 的 `<html>` pretty-print wrapper（root 看起來像 HTML），
+// 但 document 本身仍是 XMLDocument、createElement('div') 仍是無 .style 的通用 Element。
+// 所以直接測「這份文件能不能造出帶 .style 的 div」這個 content script 真正依賴的能力
+// ——結構性通則，對任何文件型別都成立，不綁站點 / contentType 白名單。
+function _sk_isNonHtmlDocument(doc) {
+  try {
+    const probe = doc && doc.createElement('div');
+    return !probe || !probe.style;  // 無 .style = 無 HTMLElement 能力 = 非 HTML 文件
+  } catch (_e) {
+    return true;  // createElement 都 throw 的文件更不該跑 content script
+  }
+}
+
 if (window.__shinkansen_loaded) {
   // 防止重複載入（SPA 框架可能重新注入 content script）
-} else if (_sk_isCurrentFrameDisabled()) {
-  // 在不合格 iframe 內（廣告/分析/cookie consent 等），不建立完整命名空間
+} else if (_sk_isCurrentFrameDisabled() || _sk_isNonHtmlDocument(document)) {
+  // 在不合格 iframe 內（廣告/分析/cookie consent 等）或非 HTML 文件（RSS/XML feed 等），
+  // 不建立完整命名空間，避免在沒有 HTMLElement 能力的文件上注入時 throw
   window.__shinkansen_loaded = true;
   window.__SK = { disabled: true, shouldDisableInFrame: _sk_shouldDisableInFrame };
 } else {
@@ -115,6 +137,18 @@ if (window.__shinkansen_loaded) {
     originalFontFamily: new Map(), // el → string
   };
 
+  // v1.10.57:「這頁是否已翻譯」單一裁決源 —— 以 DOM 注入痕跡為準,不信記憶體
+  // STATE.translated boolean。SPA 子頁導航時 resetForSpaNavigation 會把 STATE.translated
+  // 歸零,但站點保留的舊節點(header / nav / 共用區塊)仍掛 marker + 顯示譯文,造成
+  // 「STATE 說沒翻、畫面是譯文」的殭屍狀態 → popup / icon 顯示錯、toggle 走錯動作。
+  // 此函式涵蓋三種注入痕跡:single(data-shinkansen-translated)、dual(shinkansen-translation
+  // wrapper)、framework-managed nodeValue mutate(data-shinkansen-nodevalue-mutated)。
+  SK.TRANSLATED_MARKER_SELECTOR =
+    '[data-shinkansen-translated], shinkansen-translation, [data-shinkansen-nodevalue-mutated]';
+  SK.isPageTranslated = function isPageTranslated() {
+    return !!document.querySelector(SK.TRANSLATED_MARKER_SELECTOR);
+  };
+
   // v1.4.12: content script 在 storage.sync.translatePresets 尚未寫入時的 fallback
   // （例如從 v1.4.11 升級但使用者還未開過設定頁 / onInstalled 沒觸發）。
   // 內容必須與 lib/storage.js DEFAULT_SETTINGS.translatePresets 保持一致。
@@ -164,6 +198,11 @@ if (window.__shinkansen_loaded) {
   // armSpaObserverRescan debounce 1s 後 + idle gate 走完整 inject path)。
   SK.USER_INTERACTION_BLACKOUT_MS = 2000;
   SK._lastInteractionT = 0;
+
+  // v1.10.39(code review 2026-06-09 L2):字幕 / Drive 最後一條 cue 沒有「下一條 startMs」
+  // 可推 endMs 時,用 startMs + 此值當保守結尾。原本這個 magic 1500 在 content-drive.js
+  // (×3)+ content-youtube.js(×2)各自寫死 → 任一處調整其他不會跟著改。集中成共用常數。
+  SK.ASR_LAST_CUE_FALLBACK_MS = 1500;
   if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
     const markInteraction = () => { SK._lastInteractionT = Date.now(); };
     // capture phase + passive: 確保最早 fire,不阻塞網頁 listener。
@@ -250,6 +289,7 @@ if (window.__shinkansen_loaded) {
   // 與 inline element（A/SPAN/B/I/...）區分。BBCode Case B 的 DIV 偵測用此白名單，
   // 避免誤抓 inline 元素內的短文字。
   SK.CONTAINER_TAGS = new Set(['DIV', 'SECTION', 'ARTICLE', 'MAIN', 'ASIDE']);
+  SK.CONTAINER_TAG_SELECTOR = Array.from(SK.CONTAINER_TAGS).join(',');
 
   // 直接排除（純技術性元素 + 我們自己注入的譯文 wrapper）
   // v1.5.2: SHINKANSEN-TRANSLATION 加入 HARD_EXCLUDE。
@@ -378,6 +418,14 @@ if (window.__shinkansen_loaded) {
   // 完整實測見 reports/streaming-probe-2026-04-28.md §2-§5。
   SK.BATCH0_UNITS = 25;
   SK.BATCH0_CHARS = 3700;
+
+  // v1.10.53: Case B 超長區塊(純文字 + 多個 <br>、無 block 子孫)切分門檻。
+  // 「整篇文章塞在一個 <div> 用 <br><br> 分段」(Christie's 拍品專文等)原本整塊當單一
+  // element 單元 → 變成 2 萬字單一 streaming segment,Gemini flash/flash-lite 串流極慢
+  // 甚至 stall「無法結束」。文字超過此值且能按段落切出 ≥2 段時,改切成多個 fragment 平行翻。
+  // 取 DEFAULT_CHARS_PER_BATCH:超過單批 char 上限的單元本來就無法併批、只能自己一批,
+  // 切分後反而能塞回正常批次平行吞吐。
+  SK.BR_BLOCK_SPLIT_CHARS = 3500;
 
   // SPA 動態載入常數
   SK.SPA_OBSERVER_DEBOUNCE_MS = 1000;
@@ -762,7 +810,11 @@ if (window.__shinkansen_loaded) {
       // once: true 已自動 remove,這層只是保險(處理 dispatch 拋例外的情境)
       el.removeEventListener('shinkansen-fw-detect-response', handler);
     }
-    _fwQueryCache.set(el, result);
+    // v1.10.39(code review 2026-06-09 M3):只快取 true。result=false 可能是「查詢時機
+    // 早於 React/Vue fiber 掛載」(streaming hydration:Medium / Substack / Notion)的假陰性,
+    // 永久快取會讓該 element 後續被框架接管後仍走 single innerHTML 注入 → 撞 fiber 孤兒
+    // (本機制原本就是要避免的)。false 不快取 → 下次該 element 再被查時重新偵測。
+    if (result) _fwQueryCache.set(el, result);
     return result;
   };
 
@@ -838,5 +890,198 @@ if (window.__shinkansen_loaded) {
     } catch {
       return null;
     }
+  };
+
+  // ─── 送到 Instapaper:擷取當前頁面完整 HTML ──────────────
+  // 把使用者眼前這頁（single mode 已就地換成譯文的 DOM）clone 後剝除技術性節點
+  // 與擴充自己注入的 UI chrome，序列化成乾淨 HTML 送 Instapaper Full API 的 content
+  // 參數，由 Instapaper 端 readability 抽正文。回 { url, title, html }。
+  //
+  // 純函式（吃 doc 參數）方便 regression spec 在 isolated world 直接驗。
+  // 剝除清單:
+  //   - 技術性:script / style / noscript / template / link
+  //   - 媒體嵌入:iframe / video / audio / object / embed（見下方「為何剝媒體嵌入」）
+  //   - 擴充 UI:#shinkansen-toast-host（toast shadow host）、#shinkansen-dual-style（dual 模式注入樣式）
+  //   - 保留 <shinkansen-translation> wrapper（dual 模式譯文本體，是要送的內容）
+  // 用 outerHTML（HTML 序列化）而非 XMLSerializer:後者會塞 xmlns 與把 void element
+  // 改成 XML 自閉合，對下游 reader 是噪音；outerHTML 產出的是乾淨 HTML5。
+  //
+  // 為何剝媒體嵌入（iframe / video 等）:下游 reader（Instapaper）的正文抽取器會把
+  // 影片嵌入「升級」成整篇主要內容——實測 Christie's 文章頁內嵌 Brightcove 播放器
+  // iframe 時，Instapaper 抽到的是播放器 UI（字幕設定對話框 + 影片檔名當標題），整篇
+  // 19K 字文章被丟掉。一般無影片頁面不受影響（譯文正常送達），只有含影片嵌入的頁面
+  // 會被綁架。剝掉媒體嵌入只留文字正文是結構性通則（非站點特判），讓 reader 抽到文章。
+  SK.STRIP_FOR_EXTRACT = 'script, style, noscript, template, link, iframe, video, audio, object, embed, #shinkansen-toast-host, #shinkansen-dual-style';
+
+  // 挑「譯文標題」送下游 reader。
+  // 為何不用 document.title:single mode 譯文是就地替換 body DOM,**不動 <head><title>**
+  //（也不動 og:title 等 meta）→ document.title 永遠是原文標題。實測送到 Instapaper 標題
+  // 全是未翻譯原文。譯文標題真正所在是頁面內容區的主標題（已就地翻成譯文)。
+  //
+  // 為何不只看 <h1>:不少 CMS（WordPress 主題等）把文章主標放 <h2>/<h3>（class
+  // post-title / entry-title）而非 <h1>,整頁可能一個 <h1> 都沒有。實測 Stratechery
+  // 週報頁 h1 數 = 0,主標是 <main> 內第一個 <h2>(「Fable 的現狀、…」),舊版只查 h1
+  // → fallback 到 document.title → 送出原文標題。改成「內容區第一個標題」的結構性通則
+  //（非站點特判,§8）:main/article 內主標通常是文件序第一個 heading。
+  //
+  // 優先序:
+  //   1. 內容區（main/article）內的 <h1>
+  //   2. 內容區內第一個 <h2>–<h6>（排除 nav/footer 內的）—— CMS 主標在 h2 的情況
+  //   3. 任一 <h1>（沒 main/article 容器時;可能是站名 banner,但仍比原文 title 好）
+  //   4. 退回 document.title（沒任何可用標題;single mode 不動 <head>,永遠原文）
+  SK.pickExtractTitle = function pickExtractTitle(doc) {
+    doc = doc || document;
+    const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
+    const container = doc.querySelector('main') || doc.querySelector('article');
+    if (container) {
+      const h1text = norm(container.querySelector('h1') && container.querySelector('h1').textContent);
+      if (h1text) return h1text;
+      for (const h of container.querySelectorAll('h2, h3, h4, h5, h6')) {
+        if (h.closest('nav, footer')) continue; // 站內導覽 / 頁尾標題不是文章主標
+        const t = norm(h.textContent);
+        if (t) return t;
+      }
+    }
+    const anyH1 = doc.querySelector('h1');
+    const a = norm(anyH1 && anyH1.textContent);
+    if (a) return a;
+    return doc.title || '';
+  };
+
+  // 用 vendored Readability（lib/readability.js）在「譯文 DOM 的 clone」上抽乾淨正文，
+  // 取代舊「整頁 documentElement strip」。舊法把整頁 SPA 噪音 + 影片嵌入 facade 一起送
+  // Instapaper，下游 readability 會被影片塊綁架（見 PLAN-send-to-instapaper.md）。
+  // Readability 跑 clone、不動 live 譯文頁（§15）；抽完套 JRead 驗證過的硬化薄層。
+  // 標題仍取譯文主 <h1>（pickExtractTitle）:single mode 不動 <head><title>，Readability
+  // 預設偏好 <title> 會拿到未翻譯原文，故主用 h1、Readability title 只當 fallback。
+  // Readability 抽不到（罕見結構 / 未載入）時退回 legacy 整頁 strip，至少有內容可送。
+  SK.extractPageHtml = function extractPageHtml(doc) {
+    doc = doc || document;
+    const url = (doc.location && doc.location.href) || '';
+    const Rdb = (typeof Readability !== 'undefined') ? Readability
+      : (typeof window !== 'undefined' && window.Readability) ? window.Readability : null;
+    if (!Rdb) return SK.extractPageHtmlLegacy(doc);
+    let parsed = null;
+    try {
+      const clone = doc.cloneNode(true);
+      // 先剝我方注入的 UI host，避免被 Readability 當內容評分
+      clone.querySelectorAll('#shinkansen-toast-host, #shinkansen-dual-style').forEach((el) => el.remove());
+      // 先剝媒體嵌入（再跑 Readability）:Readability 的 videos regex 會「保留」youtube
+      // 等影片 iframe 當內容,而譯文是中文(字元數遠少於英文)→ 整篇正文的字數分數驟降,
+      // 一個被保留的影片 iframe 就可能反超整篇文章被選成 article（實測譯文 readtrung
+      // 被內嵌 youtube 影片塊綁架成 347 字)。嵌入對下游 reader 本來就要剝（§3 媒體嵌入
+      // 會綁架正文）,提前到 Readability 之前剝掉,讓評分只在真正的文字內容間比。
+      // 結構性通則:剝通用嵌入 tag（非站點 class）。
+      clone.querySelectorAll('iframe, video, audio, object, embed, lite-youtube').forEach((el) => el.remove());
+      parsed = new Rdb(clone, { charThreshold: 200 }).parse();
+    } catch (_) { parsed = null; }
+    if (!parsed || !parsed.content) return SK.extractPageHtmlLegacy(doc);
+    const title = (SK.pickExtractTitle(doc) || parsed.title || doc.title || "")
+      .replace(/\s+/g, ' ').trim();
+    const body = SK.hardenExtractedHtml(parsed.content, title, doc);
+    const html = '<!DOCTYPE html>\n<html><head><meta charset="utf-8"><title>'
+      + SK.escapeHtmlText(title) + '</title></head><body>' + body + '</body></html>';
+    // text:給「送到 Instapaper」的摘要用的純文字(Readability 已抽好正文 textContent)。
+    // 折疊空白即可,長度上限交給 summarizeArticle 統一截斷(單一資料源)。已翻譯頁 = 譯文,
+    // 未翻譯頁 = 原文,兩者都餵得進摘要 prompt。
+    const text = (parsed.textContent || '').replace(/\s+/g, ' ').trim();
+    return { url, title, html, text };
+  };
+
+  // 把 Readability 輸出的正文 HTML 再硬化一層，對齊 JRead extractReaderPayload 已驗證的
+  // 下游修法（下游 reader 會 re-sanitize / re-parse，這些殘留會壞掉呈現）:
+  //   1. 剝媒體嵌入（iframe/video/...）：防影片塊在下游 re-parse 時再次綁架正文
+  //   2. 去重主標題：下游用 title 欄位另渲染主標，body 內同文 heading 會重複
+  //   3. 段落 div→p：下游砍 inline style 後，靠 margin 撐間距的 leaf div 會擠在一起
+  //   4. 空殼修剪：剝節點後留下的空殼在下游渲染成空 bullet
+  SK.hardenExtractedHtml = function hardenExtractedHtml(htmlString, title, doc) {
+    doc = doc || document;
+    const root = doc.createElement('div');
+    root.innerHTML = String(htmlString || '');
+    // 0. 剝註解節點（Readability 會保留 HTML 註解，是下游噪音，且可能含原站嵌入殘留）
+    const walker = doc.createTreeWalker(root, NodeFilter.SHOW_COMMENT, null);
+    const comments = [];
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) comments.push(n);
+    comments.forEach((c) => c.remove());
+    // 1. 剝媒體嵌入
+    root.querySelectorAll('iframe, video, audio, object, embed, canvas').forEach((el) => el.remove());
+    // 2. 去重主標題（折疊空白 + 大小寫後與 title 全文相等的 h1-h6）
+    const fold = (s) => (s || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    const ft = fold(title);
+    if (ft) {
+      root.querySelectorAll('h1, h2, h3, h4, h5, h6').forEach((h) => {
+        if (fold(h.textContent) === ft) h.remove();
+      });
+    }
+    // 3. 段落 div → p（只含 text / inline 子節點的 leaf div，轉 p 不違反 HTML 規則）
+    const INLINE = new Set(['A', 'SPAN', 'STRONG', 'EM', 'B', 'I', 'U', 'S', 'SUB', 'SUP',
+      'MARK', 'SMALL', 'CODE', 'BR', 'WBR', 'ABBR', 'TIME', 'CITE', 'Q', 'LABEL']);
+    Array.from(root.querySelectorAll('div')).forEach((div) => {
+      const onlyInline = Array.from(div.childNodes).every((n) =>
+        n.nodeType === 3 || (n.nodeType === 1 && INLINE.has(n.tagName)));
+      if (onlyInline && (div.textContent || '').trim()) {
+        const p = doc.createElement('p');
+        while (div.firstChild) p.appendChild(div.firstChild);
+        div.replaceWith(p);
+      }
+    });
+    // 4. 空殼修剪（post-order：沒有非空白文字、也沒有媒體子孫的元素整個移除，逐層塌）
+    const KEEP = new Set(['TABLE', 'THEAD', 'TBODY', 'TFOOT', 'TR', 'TD', 'TH', 'CAPTION',
+      'COLGROUP', 'COL', 'BR', 'HR', 'WBR', 'IMG', 'PICTURE', 'SOURCE', 'TRACK', 'SVG']);
+    const MEDIA_SEL = 'img, picture, svg';
+    (function prune(node) {
+      Array.from(node.children).forEach(prune);
+      if (node === root) return;
+      if (KEEP.has(node.tagName)) return;
+      if ((node.textContent || '').trim()) return;
+      if (node.querySelector(MEDIA_SEL)) return;
+      node.remove();
+    })(root);
+    return root.innerHTML;
+  };
+
+  SK.escapeHtmlText = function escapeHtmlText(s) {
+    return String(s || '').replace(/[&<>"]/g, (c) =>
+      ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  };
+
+  // legacy fallback：舊「整頁 documentElement strip」。Readability 抽不到時用，確保至少
+  // 有內容可送（雖可能含較多噪音）。STRIP_FOR_EXTRACT / pickExtractTitle 仍為此服務。
+  SK.extractPageHtmlLegacy = function extractPageHtmlLegacy(doc) {
+    doc = doc || document;
+    const root = doc.documentElement;
+    if (!root) return { url: '', title: '', html: '' };
+    const clone = root.cloneNode(true);
+    clone.querySelectorAll(SK.STRIP_FOR_EXTRACT).forEach((el) => el.remove());
+    const title = SK.pickExtractTitle(doc);
+    // 移除 content 內與標題重複的主標題 <h1>:下游 reader（Instapaper）會用 title 參數
+    // 另外渲染一行標題,若 body 又留同字的主 <h1> 就會出現「重複標題」。只移除「正規化
+    // 後文字 === title」的那個主 h1（用 pickExtractTitle 的同優先序定位）,其他 h1 不動。
+    try {
+      const dupH1 = clone.querySelector('main h1') || clone.querySelector('article h1') || clone.querySelector('h1');
+      if (dupH1) {
+        const t = (dupH1.textContent || '').replace(/\s+/g, ' ').trim();
+        if (t && t === title) dupH1.remove();
+      }
+    } catch (_) { /* 移除失敗不影響其餘擷取 */ }
+    // 同步把 clone 的 <head><title> 改成譯文標題,讓下游 reader 即使從 content 的
+    // <title> 抽標題（而非用 title 參數）也拿到譯文版,雙保險。
+    try {
+      let titleEl = clone.querySelector('title');
+      if (!titleEl) {
+        const head = clone.querySelector('head');
+        if (head) { titleEl = doc.createElement('title'); head.insertBefore(titleEl, head.firstChild); }
+      }
+      if (titleEl && title) titleEl.textContent = title;
+    } catch (_) { /* 改 <title> 失敗不影響 title 參數 */ }
+    const html = '<!DOCTYPE html>\n' + clone.outerHTML;
+    // text:摘要用純文字(legacy 路徑從 strip 後的 clone 取,含較多噪音但有總比沒有好)
+    const text = (clone.textContent || '').replace(/\s+/g, ' ').trim();
+    return {
+      url: (doc.location && doc.location.href) || '',
+      title,
+      html,
+      text,
+    };
   };
 }

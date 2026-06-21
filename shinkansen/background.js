@@ -2,10 +2,11 @@
 // 職責：接收翻譯請求、呼叫 Gemini API、處理快取、處理快捷鍵、統一除錯 Log。
 
 import { browser } from './lib/compat.js';
-import { translateBatch, extractGlossary, translateBatchStream } from './lib/gemini.js';
+import { IS_IOS_BUILD } from './lib/distribution.js'; // Phase 2: host app 設定橋接只在 iOS build 走 native messaging
+import { translateBatch, extractGlossary, translateBatchStream, summarizeArticle } from './lib/gemini.js';
 import { translateBatch as translateBatchCustom, extractGlossary as extractGlossaryCustom } from './lib/openai-compat.js'; // v1.5.7
 import { translateGoogleBatch } from './lib/google-translate.js';
-import { getSettings, getSettingsCached, cleanupLegacySyncKeys, DEFAULT_SUBTITLE_SYSTEM_PROMPT, DEFAULT_ASR_SUBTITLE_SYSTEM_PROMPT, DEFAULT_DOC_SYSTEM_PROMPT, DOC_INLINE_MARKER_INSTRUCTION, getEffectiveSystemPrompt, getEffectiveSubtitleSystemPrompt, getEffectiveAsrSubtitleSystemPrompt, getEffectiveDocSystemPrompt, getEffectiveGlossaryPrompt } from './lib/storage.js';
+import { getSettings, getSettingsCached, setSettings, cleanupLegacySyncKeys, DEFAULT_SUBTITLE_SYSTEM_PROMPT, DEFAULT_ASR_SUBTITLE_SYSTEM_PROMPT, DEFAULT_DOC_SYSTEM_PROMPT, DOC_INLINE_MARKER_INSTRUCTION, getEffectiveSystemPrompt, getEffectiveSubtitleSystemPrompt, getEffectiveAsrSubtitleSystemPrompt, getEffectiveDocSystemPrompt, getEffectiveGlossaryPrompt, LANG_LABELS } from './lib/storage.js';
 import { debugLog, getLogs, clearLogs, getPersistedLogs, clearPersistedLogs } from './lib/logger.js';
 import * as cache from './lib/cache.js';
 import { RateLimiter } from './lib/rate-limiter.js';
@@ -17,6 +18,33 @@ import { checkForUpdate, markUpdateNoticeShown, localTodayKey } from './lib/upda
 import { shouldLogInit as _shouldLogRateLimitInit } from './lib/rate-limit-init-log-dedup.js'; // v1.8.60
 import { maybeWriteWelcomeNotice } from './lib/welcome-notice.js'; // v1.6.5
 import { refreshExchangeRate, getCachedRate, isCacheFresh } from './lib/exchange-rate.js'; // v1.8.41
+import { codedError } from './lib/bg-error.js'; // 使用者面對錯誤帶 error code 過協定，content 端查 dict 翻譯
+import { saveToInstapaper, buildInstapaperPayload } from './lib/instapaper.js'; // 送到 Instapaper（Alt+I 快捷鍵路徑）
+import { planStreamingPartialReuse } from './lib/stream-reuse.js'; // v1.10.61: streaming 批次 missing-only 分流
+
+// instapaper-keys.js（gitignored）的 consumer 金鑰載入。
+// 不能用 dynamic import()：MV3 service worker 禁止 dynamic import（實測 throw
+// "import() is disallowed on ServiceWorkerGlobalScope"），這正是「popup 送得出去、
+// 快捷鍵一定失敗」的根因——SW 載不到金鑰 → saveToInstapaper 回 CONFIG。
+// 改用 fetch 自家檔案原始碼（SW 可 fetch 自己打包的資源）+ regex 抽兩個 hex 金鑰
+//（檔案格式由我們自己的模板控制）。缺檔（fresh clone / CI）→ fetch 失敗 catch →
+// 金鑰留空 → 功能停用。載入後掛 globalThis.__SK，lib/instapaper.js 的
+// getInstapaperConsumerKeys() 自會讀到。
+let _instapaperKeysLoaded = false;
+async function ensureInstapaperKeys() {
+  if (_instapaperKeysLoaded) return;
+  _instapaperKeysLoaded = true;
+  try {
+    const url = browser.runtime.getURL('lib/instapaper-keys.js');
+    const text = await (await fetch(url)).text();
+    const ck = text.match(/consumerKey\s*:\s*['"]([^'"]+)['"]/);
+    const cs = text.match(/consumerSecret\s*:\s*['"]([^'"]+)['"]/);
+    if (ck && cs) {
+      globalThis.__SK = globalThis.__SK || {};
+      globalThis.__SK.INSTAPAPER_KEYS = { consumerKey: ck[1], consumerSecret: cs[1] };
+    }
+  } catch (_) { /* 無金鑰檔 → 功能停用 */ }
+}
 
 debugLog('info', 'system', 'service worker started', { version: browser.runtime.getManifest().version });
 
@@ -31,29 +59,41 @@ cleanupLegacySyncKeys();
 // 設定變更時會透過 storage.onChanged 重新套用上限。
 let limiter = null;
 
-async function initLimiter() {
-  const settings = await getSettings();
-  const limits = getLimitsForSettings(settings);
-  limiter = new RateLimiter(limits);
-  // v1.8.60: SW idle-die 每 5-25 分鐘 cold start → 此 log 在 Debug 分頁視覺上很雜。
-  // 加 24h 去重:同 limits 設定 24h 內只 log 一次;limits 變化(tier / override / model)
-  // 仍即時 log,值得記。dedup 邏輯抽到 lib/rate-limit-init-log-dedup.js 方便 unit test。
-  const payload = {
-    tier: settings.tier,
-    model: settings.geminiConfig.model,
-    rpm: limits.rpm,
-    tpm: limits.tpm,
-    rpd: limits.rpd,
-    safetyMargin: limits.safetyMargin,
-  };
-  try {
-    const { _rateLimitInitLog: prev } = await browser.storage.local.get('_rateLimitInitLog');
-    if (!_shouldLogRateLimitInit(prev, Date.now(), payload)) return;
-    await browser.storage.local.set({ _rateLimitInitLog: { payload, timestamp: Date.now() } });
-  } catch { /* storage 失敗就 fall through 寫 log,不阻 SW 啟動 */ }
-  debugLog('info', 'rate-limit', 'rate limiter initialized', payload);
+// v1.10.46(批次 2-3):單一 in-flight promise lock(仿 _stickyHydratingPromise)。
+// 原本 module top-level fire-and-forget + handler 內 `if (!limiter) await initLimiter()`
+// 在 SW 冷啟動同時進來兩個翻譯請求時會並發跑兩次 init,各自 new RateLimiter——
+// 後完成者用空視窗覆蓋前者已記帳的 RPM/TPM sliding window,限流形同重置。
+let _limiterInitPromise = null;
+
+function initLimiter() {
+  if (_limiterInitPromise) return _limiterInitPromise;
+  _limiterInitPromise = (async () => {
+    const settings = await getSettings();
+    const limits = getLimitsForSettings(settings);
+    limiter = new RateLimiter(limits);
+    // v1.8.60: SW idle-die 每 5-25 分鐘 cold start → 此 log 在 Debug 分頁視覺上很雜。
+    // 加 24h 去重:同 limits 設定 24h 內只 log 一次;limits 變化(tier / override / model)
+    // 仍即時 log,值得記。dedup 邏輯抽到 lib/rate-limit-init-log-dedup.js 方便 unit test。
+    const payload = {
+      tier: settings.tier,
+      model: settings.geminiConfig.model,
+      rpm: limits.rpm,
+      tpm: limits.tpm,
+      rpd: limits.rpd,
+      safetyMargin: limits.safetyMargin,
+    };
+    try {
+      const { _rateLimitInitLog: prev } = await browser.storage.local.get('_rateLimitInitLog');
+      if (!_shouldLogRateLimitInit(prev, Date.now(), payload)) return;
+      await browser.storage.local.set({ _rateLimitInitLog: { payload, timestamp: Date.now() } });
+    } catch { /* storage 失敗就 fall through 寫 log,不阻 SW 啟動 */ }
+    debugLog('info', 'rate-limit', 'rate limiter initialized', payload);
+  })();
+  // 失敗別 cache:getSettings 偶發 storage 失敗時讓下次 initLimiter 重試,不永久卡死
+  _limiterInitPromise.catch(() => { _limiterInitPromise = null; });
+  return _limiterInitPromise;
 }
-initLimiter();
+initLimiter().catch(() => { /* 失敗交由下次 handler 內 initLimiter 重試 */ });
 
 browser.storage.onChanged.addListener((changes, area) => {
   if (area !== 'sync') return;
@@ -66,7 +106,9 @@ browser.storage.onChanged.addListener((changes, area) => {
         limiter.updateLimits(limits);
         debugLog('info', 'rate-limit', 'rate limiter limits updated', limits);
       } else {
-        limiter = new RateLimiter(limits);
+        // v1.10.46(批次 2-3):走 initLimiter 的 promise lock,不直接 new——避免跟
+        // in-flight init 並發出兩顆 limiter 互相覆蓋(initLimiter 會自己重讀 settings)
+        initLimiter().catch(() => {});
       }
     });
   }
@@ -107,9 +149,21 @@ browser.runtime.onStartup?.addListener(() => {
   checkForUpdate().catch(err => debugLog('warn', 'update-check', 'onStartup check failed', { error: err.message }));
 });
 
+// ─── 單一 onAlarm dispatcher（name → handler map）─────────────────────
+// 各 alarm 不再各自 addListener；改往 _alarmHandlers 註冊一筆 handler，由下方唯一的
+// onAlarm listener 依 alarm.name 分派。新增 alarm 只要 _registerAlarm 一行，避免分散
+// 註冊難追、未來漏接。淨行為與原本多個 name-filter listener 完全相同。
+const _alarmHandlers = Object.create(null);
+function _registerAlarm(name, handler) { _alarmHandlers[name] = handler; }
+try {
+  browser.alarms?.onAlarm.addListener((alarm) => {
+    const handler = alarm && _alarmHandlers[alarm.name];
+    if (handler) handler(alarm);
+  });
+} catch (_) { /* alarms 不可用環境 */ }
+
 browser.alarms?.create('update-check', { periodInMinutes: 60 * 24 });
-browser.alarms?.onAlarm.addListener((alarm) => {
-  if (alarm.name !== 'update-check') return;
+_registerAlarm('update-check', () => {
   checkForUpdate().catch(err => debugLog('warn', 'update-check', 'alarm check failed', { error: err.message }));
 });
 
@@ -130,10 +184,146 @@ browser.runtime.onStartup?.addListener(() => {
 });
 
 browser.alarms?.create('exchange-rate-fetch', { periodInMinutes: 60 * 24 });
-browser.alarms?.onAlarm.addListener((alarm) => {
-  if (alarm.name !== 'exchange-rate-fetch') return;
+_registerAlarm('exchange-rate-fetch', () => {
   refreshExchangeRate().catch(err => debugLog('warn', 'exchange-rate', 'alarm fetch failed', { error: err.message }));
 });
+
+// ─── Phase 2（SPEC-PRIVATE §26.12）：iOS host app 設定橋接 ─────────────────
+// iOS Safari 下，host app（WKWebView）寫不進 extension 的 storage。host app 把
+// 使用者在 onboarding / 設定畫面選的 API Key + 預設模型寫進「App Group 共享
+// UserDefaults」，這裡用 browser.runtime.sendNativeMessage 經 native handler
+// （SafariWebExtensionHandler，跑在 appex、讀得到同一個 App Group）拉回，套用進
+// extension 自己的 storage。
+//
+// 單一資料源（CLAUDE.md §5）：host 每次存遞增 hostSettingsSeq；這裡記 consumedSeq，
+// 只在 seq > consumedSeq 時套用一次 → 已消費的不重套、host 新存的會贏、使用者中途
+// 在 options 改的不被舊 pending 蓋。host 為「寫入來源」，不反向覆蓋 options 的後續改動。
+//
+// 「預設模型」對映：四指 tap / Alt+S / 工具列按鈕全走 translatePresets slot 2，
+// 所以把選的 engine+model 寫進 slot 2 那組 preset（不是切 autoTranslateSlot）。
+const HOST_MODEL_PRESETS = {
+  flash:  { engine: 'gemini', model: 'gemini-3-flash-preview' },
+  lite:   { engine: 'gemini', model: 'gemini-3.1-flash-lite' },
+  google: { engine: 'google', model: null },
+};
+
+// sendNativeMessage 跨瀏覽器簽名不一（Chrome callback、部分回 Promise），統一包成 Promise。
+function sendNativeMessageAsync(appId, msg) {
+  return new Promise((resolve, reject) => {
+    try {
+      const ret = browser.runtime.sendNativeMessage(appId, msg, (r) => {
+        const err = browser.runtime.lastError;
+        if (err) reject(new Error(err.message || 'native messaging error'));
+        else resolve(r);
+      });
+      if (ret && typeof ret.then === 'function') ret.then(resolve, reject);
+    } catch (e) { reject(e); }
+  });
+}
+
+async function pullHostSettings(trigger) {
+  if (!IS_IOS_BUILD) return;                                   // 桌面 / 非 iOS build 不走
+  if (!browser.runtime || typeof browser.runtime.sendNativeMessage !== 'function') return;
+  let resp;
+  try {
+    resp = await sendNativeMessageAsync('app.shinkansen.ios', { action: 'pullHostSettings' });
+  } catch (e) {
+    debugLog('warn', 'host-settings', 'native pull failed', { trigger, error: e.message });
+    return;
+  }
+  if (!resp || typeof resp !== 'object') return;
+  const seq = Number(resp.seq) || 0;
+  if (seq <= 0) return;                                        // host 還沒存過任何設定
+  const { hostSettingsConsumedSeq = 0 } = await browser.storage.local.get('hostSettingsConsumedSeq');
+  if (seq <= hostSettingsConsumedSeq) return;                  // 已消費 / 無新設定
+
+  const patch = {};
+  if (typeof resp.apiKey === 'string' && resp.apiKey.length > 0) patch.apiKey = resp.apiKey;
+  const presetCfg = HOST_MODEL_PRESETS[resp.model];
+  if (presetCfg) {
+    const settings = await getSettings();
+    const presets = Array.isArray(settings.translatePresets)
+      ? settings.translatePresets.map(p => ({ ...p }))
+      : null;
+    const idx = presets ? presets.findIndex(p => p && p.slot === 2) : -1;
+    if (idx >= 0) {
+      presets[idx].engine = presetCfg.engine;
+      presets[idx].model = presetCfg.model;
+      patch.translatePresets = presets;
+    }
+  }
+  if (Object.keys(patch).length > 0) {
+    await setSettings(patch);
+    debugLog('info', 'host-settings', 'applied', { trigger, seq, hasKey: !!patch.apiKey, model: resp.model || null });
+  }
+  await browser.storage.local.set({ hostSettingsConsumedSeq: seq });
+}
+
+// ─── 反向：extension 真值 → App Group（host app 設定畫面回填用）─────────────
+// 問題（單一資料源 §5）：host app 的「API Key 與預設模型設定」畫面原本只讀 host 自己
+// 寫過的 hostApiKey/hostModel，那份是「host 上次推了什麼」而非 extension 目前真正在用的值。
+// 使用者若在擴充功能 options 改過、或 onboarding 被略過，畫面就顯示空白 / 舊值 →
+// 一按儲存可能把現值（尤其預設模型，無「空不覆寫」防護）覆寫掉 → 設定被清除。
+// 修法：extension 主動把現值推進 App Group 的 extApiKey/extModel（與 host* 分開的 key,
+// 不碰 seq → 不觸發 pull,無迴圈）；ViewController.sendSettingsToPage 優先讀 ext*。
+//
+// 「預設模型」反向對映：slot 2（四指 tap / Alt+S / 工具列按鈕共用）的 engine+model → host
+// 三選一 token。自訂引擎 / 無法用三選一表示時回 ''（host 端清掉 extModel、fallback host*）。
+function extModelToken(settings) {
+  const presets = Array.isArray(settings.translatePresets) ? settings.translatePresets : [];
+  const p = presets.find((x) => x && x.slot === 2);
+  if (!p) return '';
+  if (p.engine === 'google') return 'google';
+  if (p.engine === 'gemini') {
+    return (typeof p.model === 'string' && p.model.includes('lite')) ? 'lite' : 'flash';
+  }
+  return '';
+}
+
+async function pushExtSettings(trigger) {
+  if (!IS_IOS_BUILD) return;                                   // 桌面 / 非 iOS build 不走
+  if (!browser.runtime || typeof browser.runtime.sendNativeMessage !== 'function') return;
+  try {
+    const settings = await getSettings();
+    const apiKey = typeof settings.apiKey === 'string' ? settings.apiKey : '';  // 真值（含空字串=已清空）
+    const model = extModelToken(settings);
+    await sendNativeMessageAsync('app.shinkansen.ios', { action: 'pushExtSettings', apiKey, model });
+    debugLog('info', 'host-settings', 'pushed ext settings to App Group', { trigger, hasKey: !!apiKey, model: model || null });
+  } catch (e) {
+    debugLog('warn', 'host-settings', 'native push failed', { trigger, error: e.message });
+  }
+}
+
+// 觸發點：SW/event page 冷啟動、onStartup、onInstalled、content script 載入送的 PULL_HOST_SETTINGS。
+pullHostSettings('sw-init');
+pushExtSettings('sw-init');                                    // 啟動就把現值同步給 host
+browser.runtime.onStartup?.addListener(() => { pullHostSettings('onStartup'); pushExtSettings('onStartup'); });
+browser.runtime.onInstalled.addListener(() => { pullHostSettings('onInstalled'); });
+browser.runtime.onMessage.addListener((message) => {
+  if (message && message.type === 'PULL_HOST_SETTINGS') {
+    pullHostSettings('content-init');
+    pushExtSettings('content-init');   // 同條 content-init 路徑也把現值推回 host(見下方 reliability 註解)
+  }
+  // fire-and-forget，不回 response → 不 return true
+});
+
+// apiKey（storage.local）/ translatePresets（storage.sync）一變動就把現值推給 host,
+// 讓設定畫面隨時讀得到 extension 真值。只在 iOS build 註冊（其他平台無 host app）。
+//
+// ⚠️ 但 iOS Safari 的 background 是 event page（v1.10.24 起,非持久 SW),閒置會卸載。
+// 使用者在擴充功能 options 改 Key / 模型時 event page 可能正在睡 → 此 onChanged 收不到 →
+// push 沒跑 → extModel 沒更新 → host 設定畫面 fallback 到過時的 hostModel（onboarding 略過
+// Key 時寫的 'google'）→ 顯示錯誤的預設翻譯方式。所以「真正可靠」的觸發是上面 content-init
+// 那條（content-touch.js 每次頁面載入送 PULL_HOST_SETTINGS,pull 已驗證會喚醒 event page,
+// push 搭同一條等效可靠）。這個 onChanged 只當 event page 醒著時的即時補強,不是唯一依賴。
+if (IS_IOS_BUILD) {
+  browser.storage.onChanged.addListener((changes, area) => {
+    if ((area === 'local' && 'apiKey' in changes) ||
+        (area === 'sync' && 'translatePresets' in changes)) {
+      pushExtSettings('storage-changed');
+    }
+  });
+}
 
 // 累計用量（grand total）由 IndexedDB usage-db.js 透過 QUERY_USAGE_STATS 提供。
 // 不再額外維護 storage.local 累計欄位，避免與明細紀錄 drift。
@@ -240,6 +430,50 @@ function preferArticleGlossaryEntries(fixedGlossaryEntries, articleGlossary, ena
   const articleSources = new Set(articleGlossary.map((entry) => entry.source));
   const filtered = fixedGlossaryEntries.filter((entry) => !articleSources.has(entry.source));
   return filtered.length > 0 ? filtered : null;
+}
+
+// 三條翻譯路徑（handleTranslate / handleTranslateStream / handleTranslateCustom）共用的
+// cache key suffix 組裝單一資料源。組裝規則：
+//   cacheTag（'_yt' / '_doc' / '_oc' 等，呼叫端明確指定）
+//   + '_g<hash12>'（有 glossary 時；+= 附加不可 = 覆蓋，覆蓋會把 cacheTag 吃掉 →
+//     _doc 清快取漏清、_yt 撞網頁 key）
+//   + '_b<hash>'（forbiddenTerms 非空時；使用者改清單後既有快取自動失效）
+//   + '_m<modelKeyPart>'（同段文字在不同 model 之間不共用快取；Gemini 路徑傳
+//     sanitized model 字串，custom 路徑傳 baseUrlHash_safeModel 避免不同 provider
+//     同 model name 撞 key）
+//   + '_lang<tl>'（targetLanguage 非 zh-TW 時；zh-TW 不加維持向下相容）
+//   + '_t<temp>'（docTemperature 為有限數值時；只有文件翻譯路徑傳入，讓使用者改
+//     文件獨立 temperature 後立即生效，網頁／字幕路徑不加避免 cache 多分裂）
+async function buildCacheKeySuffix({
+  cacheTag = '',
+  glossary = null,
+  fixedGlossaryEntries = null,
+  forbiddenTermsList = [],
+  modelKeyPart = 'unknown',
+  targetLanguage = '',
+  docTemperature = undefined,
+}) {
+  let suffix = cacheTag;
+  const allGlossaryForHash = [
+    ...(glossary || []).map((e) => `${e.source}:${e.target}`),
+    ...(fixedGlossaryEntries || []).map((e) => `F:${e.source}:${e.target}`),
+  ];
+  if (allGlossaryForHash.length > 0) {
+    const fullHash = await cache.hashText(allGlossaryForHash.join('|'));
+    suffix += '_g' + fullHash.slice(0, 12);
+  }
+  const forbiddenHash = await cache.hashForbiddenTerms(forbiddenTermsList);
+  if (forbiddenHash) {
+    suffix += '_b' + forbiddenHash;
+  }
+  suffix += '_m' + modelKeyPart;
+  if (targetLanguage && targetLanguage !== 'zh-TW') {
+    suffix += '_lang' + targetLanguage.replace(/[^a-z0-9]/gi, '');
+  }
+  if (typeof docTemperature === 'number' && Number.isFinite(docTemperature)) {
+    suffix += '_t' + docTemperature.toFixed(2);
+  }
+  return suffix;
 }
 
 // ─── Extension icon badge（已翻譯紅點提示） ─────────────────
@@ -472,7 +706,7 @@ const messageHandlers = {
         debugLog('error', 'system', 'TRANSLATE_BATCH_STREAM uncaught', { streamId, error: err?.message || String(err) });
         browser.tabs.sendMessage(tabId, {
           type: 'STREAMING_ERROR',
-          payload: { streamId, error: err?.message || String(err), atSegment: 0 },
+          payload: { streamId, ...errorFields(err), atSegment: 0 },
         }).catch(() => {});
       });
       return { started: true };
@@ -511,7 +745,7 @@ const messageHandlers = {
         debugLog('error', 'system', 'TRANSLATE_SUBTITLE_BATCH_STREAM uncaught', { streamId, error: err?.message || String(err) });
         browser.tabs.sendMessage(tabId, {
           type: 'STREAMING_ERROR',
-          payload: { streamId, error: err?.message || String(err), atSegment: 0 },
+          payload: { streamId, ...errorFields(err), atSegment: 0 },
         }).catch(() => {});
       });
       return { started: true };
@@ -827,6 +1061,28 @@ const messageHandlers = {
     async: true,
     handler: (_, sender) => clearTranslatedBadge(sender?.tab?.id),
   },
+  // iOS 四指 tap（content-touch.js）→ 轉發 TRANSLATE_PRESET slot 2（主要預設），
+  // 跟 commands onCommand 的 Alt+S（translate-preset-0 → slot 2）完全同一條派送
+  // 路徑——tabs.sendMessage 不帶 frameId = all frames broadcast，行為與快速鍵一致，
+  // 避免「手勢」「快速鍵」兩條 path 各自演化 drift
+  FOUR_FINGER_TAP: {
+    async: false,
+    handler: (_, sender) => {
+      const tabId = sender?.tab?.id;
+      if (tabId == null) return;
+      browser.tabs.sendMessage(tabId, { type: 'TRANSLATE_PRESET', payload: { slot: 2 } }).catch(() => {});
+    },
+  },
+  // iOS 四指長按（content-touch.js）→ 轉發 TRANSLATE_PRESET slot 1（次要預設，預設
+  // Flash Lite）。跟四指 tap 同一條 background → all frames broadcast 派送，只差 slot
+  FOUR_FINGER_LONGPRESS: {
+    async: false,
+    handler: (_, sender) => {
+      const tabId = sender?.tab?.id;
+      if (tabId == null) return;
+      browser.tabs.sendMessage(tabId, { type: 'TRANSLATE_PRESET', payload: { slot: 1 } }).catch(() => {});
+    },
+  },
   // v1.4.11 跨 tab sticky 翻譯（v1.4.12 起 value = preset slot number）
   STICKY_QUERY: {
     async: true,
@@ -939,6 +1195,9 @@ const messageHandlers = {
         limiter.rpdCount = 0;
         limiter.rpdLoaded = false;
         limiter.rpdLoadingPromise = null;
+        // v1.10.39(code review 2026-06-09 M9):清掉殘留 persist timer,避免它 30 秒後
+        // 用重置後的 rpdCount 又寫回剛被刪掉的 RPD key
+        limiter.clearRpdPersistTimer?.();
       }
       debugLog('info', 'rate-limit', 'RPD cleared via debug bridge', { removedKeys: rpdKeys });
       return { removedKeys: rpdKeys };
@@ -1031,7 +1290,27 @@ const messageHandlers = {
       return { ok: false, error: 'fetch failed', ...cached };
     },
   },
+  // 「送到 Instapaper」摘要:popup 送出前要 description 走這條(Alt+I 路徑則由
+  // handleSendToInstapaperCommand 直接呼叫同一個 helper,單一資料源不 drift)。
+  // best-effort:回 { summary: '' } 代表不附摘要,popup 照常送書籤。
+  SUMMARIZE_FOR_INSTAPAPER: {
+    async: true,
+    handler: async (payload, sender) => ({ summary: await generateInstapaperSummary(payload?.text, sender) }),
+  },
 };
+
+// 錯誤 i18n 協定（lib/bg-error.js）：err 帶 skCode 時把 errorCode / errorParams
+// 一併放進 response / STREAMING_ERROR payload，UI 端（content / translate-doc）
+// 用 lib/i18n.js bgErrorMessage() 查 dict 組訊息；error 維持原字串當 fallback。
+// 四個 STREAMING_ERROR 發送點 + dispatcher catch 都走這裡，避免欄位組裝 drift。
+function errorFields(err) {
+  const fields = { error: err?.message || String(err) };
+  if (err?.skCode) {
+    fields.errorCode = err.skCode;
+    if (err.skParams) fields.errorParams = err.skParams;
+  }
+  return fields;
+}
 
 browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const type = message?.type;
@@ -1043,7 +1322,7 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
       .then((result) => sendResponse({ ok: true, ...(result && typeof result === 'object' ? result : {}) }))
       .catch((err) => {
         debugLog('error', 'system', `${type} failed`, { error: err?.message || String(err) });
-        sendResponse({ ok: false, error: err?.message || String(err) });
+        sendResponse({ ok: false, ...errorFields(err) });
       });
     return true; // 保留 sendResponse 通道
   } else {
@@ -1052,6 +1331,23 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
     sendResponse({ ok: true, ...(result && typeof result === 'object' ? result : {}) });
     return false;
   }
+});
+
+// iOS background keep-alive port（content-touch.js 開，SPEC-PRIVATE §26.14）。
+// iOS Safari 的 background event page 閒置後會被系統永久回收且叫不醒（thread
+// 758346）→ 表現為「用一陣子後四指 / popup 翻譯失效」。content script 開一條
+// 長連線 port + 每 20s ping；「持續有 port 連著 + 收訊息」這個事實本身就讓系統
+// 把 background 維持在非閒置，不被回收。handler body 幾乎不必做事——收到 ping
+// 回個 pong 讓 content 端能偵測背景是否還活著。
+//   無條件註冊（不以 IS_IOS_BUILD gate）：桌面 build 的 content-touch.js 根本不
+// 會開這條 port（content 端有 IS_IOS_BUILD gate）→ 此 listener 在桌面永不觸發，
+// 零行為差異；無條件註冊讓 Playwright（Chromium）能驗真實 content↔background
+// round-trip（iOS 平台的回收行為 harness 測不到，但 port 接線測得到）。
+browser.runtime.onConnect.addListener((port) => {
+  if (port?.name !== 'shinkansen-keepalive') return;
+  port.onMessage.addListener(() => {
+    try { port.postMessage({ pong: true }); } catch (_) {}
+  });
 });
 
 // v1.8.0: streamId → AbortController 對映，支援使用者中途取消 streaming
@@ -1077,16 +1373,13 @@ function _stopStreamKeepAliveIfIdle() {
     try { browser.alarms.clear(_STREAM_KEEPALIVE_ALARM); } catch (_) {}
   }
 }
-// alarm 觸發即「SW 被喚醒到」這個事實本身就是 keep-alive。listener body 不必做事；
+// alarm 觸發即「SW 被喚醒到」這個事實本身就是 keep-alive。handler body 不必做事；
 // 但 alarm 觸發時若 inFlightStreams 已空（stream 完成同時 alarm fire 的 race)，順手清理。
-try {
-  browser.alarms.onAlarm.addListener((alarm) => {
-    if (alarm?.name !== _STREAM_KEEPALIVE_ALARM) return;
-    if (inFlightStreams.size === 0) {
-      try { browser.alarms.clear(_STREAM_KEEPALIVE_ALARM); } catch (_) {}
-    }
-  });
-} catch (_) { /* alarms 不可用環境 */ }
+_registerAlarm(_STREAM_KEEPALIVE_ALARM, () => {
+  if (inFlightStreams.size === 0) {
+    try { browser.alarms.clear(_STREAM_KEEPALIVE_ALARM); } catch (_) {}
+  }
+});
 
 // v1.8.0: Streaming 翻譯 handler。
 // v1.8.9: 加 opts 參數，支援字幕路徑（TRANSLATE_SUBTITLE_BATCH_STREAM）復用同一條 streaming pipeline,
@@ -1106,7 +1399,7 @@ async function handleTranslateStream(payload, sender, streamId, tabId, opts = {}
   if (!settings.apiKey) {
     browser.tabs.sendMessage(tabId, {
       type: 'STREAMING_ERROR',
-      payload: { streamId, error: '尚未設定 Gemini API Key，請至設定頁填入。', atSegment: 0 },
+      payload: { streamId, ...errorFields(codedError('apiKeyMissing', null, '尚未設定 Gemini API Key，請至設定頁填入。')), atSegment: 0 },
     }).catch(() => {});
     return;
   }
@@ -1139,45 +1432,33 @@ async function handleTranslateStream(payload, sender, streamId, tabId, opts = {}
 
   // 固定術語表 / 禁用詞清單。字幕路徑預設不套用（applyFixedGlossary/applyForbiddenTerms=false),
   // 跟 handleTranslate 對 ytSubtitle 的處理一致。
-  let fixedGlossaryEntries = null;
-  const fg = applyFixedGlossary ? settings.fixedGlossary : null;
-  if (fg) {
-    const globalEntries = Array.isArray(fg.global) ? fg.global.filter((e) => e.source && e.target) : [];
-    let domainEntries = [];
-    if (fg.byDomain && sender?.tab?.url) {
-      try {
-        const hostname = new URL(sender.tab.url).hostname;
-        domainEntries = Array.isArray(fg.byDomain[hostname]) ? fg.byDomain[hostname].filter((e) => e.source && e.target) : [];
-      } catch { /* 無效 URL，略過 */ }
-    }
-    if (globalEntries.length || domainEntries.length) {
-      fixedGlossaryEntries = [...globalEntries, ...domainEntries];
-    }
-  }
+  // v1.10.46: 改走 buildFixedGlossaryEntries + preferArticleGlossaryEntries 共用邏輯——
+  // 原手抄版沒做 Map dedup 也沒呼叫 preferArticleGlossaryEntries，global+domain 同 source
+  // 重疊時 batch 0（streaming）與 batch 1+（non-streaming）算出不同 _g hash，同頁兩個
+  // cache namespace。
+  let fixedGlossaryEntries = buildFixedGlossaryEntries(
+    applyFixedGlossary ? settings.fixedGlossary : null,
+    sender,
+  );
+  fixedGlossaryEntries = preferArticleGlossaryEntries(
+    fixedGlossaryEntries,
+    payload?.glossary,
+    payload?.preferArticleGlossary,
+  );
   const forbiddenTermsList = (applyForbiddenTerms && Array.isArray(settings.forbiddenTerms))
     ? settings.forbiddenTerms : [];
 
-  // v1.8.1/v1.8.9: cache key suffix（跟 handleTranslate 對齊）— 起始 cacheTag('_yt' / '')
-  // glossary 存在時會被覆蓋成 '_g<hash>'，維持跟非 streaming 路徑同 key 規則。
-  let cacheKeySuffix = cacheTag;
+  // v1.8.1/v1.8.9: cache key suffix 跟 handleTranslate 同 key 規則（v1.10.46 起共用
+  // buildCacheKeySuffix 單一資料源）— 起始 cacheTag（'_yt' / ''）
   const glossary = payload?.glossary || null;
-  const allGlossaryForHash = [
-    ...(glossary || []).map((e) => `${e.source}:${e.target}`),
-    ...(fixedGlossaryEntries || []).map((e) => `F:${e.source}:${e.target}`),
-  ];
-  if (allGlossaryForHash.length > 0) {
-    const fullHash = await cache.hashText(allGlossaryForHash.join('|'));
-    cacheKeySuffix = '_g' + fullHash.slice(0, 12);
-  }
-  const forbiddenHash = await cache.hashForbiddenTerms(forbiddenTermsList);
-  if (forbiddenHash) cacheKeySuffix += '_b' + forbiddenHash;
-  const modelStr = effectiveSettings.geminiConfig?.model || 'unknown';
-  cacheKeySuffix += '_m' + modelStr.replace(/[^a-z0-9.\-]/gi, '_');
-  // P1: targetLanguage 進 cache key(同 handleTranslate),zh-TW 不加維持向下相容
-  const tl = effectiveSettings.targetLanguage;
-  if (tl && tl !== 'zh-TW') {
-    cacheKeySuffix += '_lang' + tl.replace(/[^a-z0-9]/gi, '');
-  }
+  const cacheKeySuffix = await buildCacheKeySuffix({
+    cacheTag,
+    glossary,
+    fixedGlossaryEntries,
+    forbiddenTermsList,
+    modelKeyPart: (effectiveSettings.geminiConfig?.model || 'unknown').replace(/[^a-z0-9.\-]/gi, '_'),
+    targetLanguage: effectiveSettings.targetLanguage,
+  });
 
   // v1.8.1: 先查 cache。若全部命中，走 fast path 直接 emit 假 first_chunk + 所有 segment + done,
   // 不打 Gemini API。對應使用者「翻完還原重翻」的 case,batch 0 內容應該秒出。
@@ -1232,25 +1513,43 @@ async function handleTranslateStream(payload, sender, streamId, tabId, opts = {}
     }).catch(() => {});
   };
 
+  // v1.10.61: streaming 批次改「只補缺的」。原本只要這批有一段 miss(allHit=false)就把
+  // 整批 texts 重送 Gemini(含已快取段落),跟 handleTranslate / openai-compat 的
+  // missing-only 行為不一致 —— RSS feed 頂端插入新文章時,新段落落進 batch 0 會讓整批
+  // 連已翻段落一起重打。改法:先把已快取段落以「原始 index」即刻回推給 content(等同
+  // fast path 的零 API 重注入),只把 miss 的段落送 translateBatchStream;由於 stream 的
+  // onSegment 給的是 missingTexts 內的 index,要 remap 回原始 index(content 端 segmentIdx
+  // 必須對應 job.texts,見 content.js STREAMING_SEGMENT 處理的 idx < job.texts.length 驗證)。
+  const { missingIdxs, missingTexts, cachedSegments } = planStreamingPartialReuse(cached, texts);
+  debugLog('info', 'cache', 'streaming batch partial reuse', {
+    streamId, total: texts.length, reusedFromCache: cacheHits, streamedMissing: missingTexts.length,
+  });
+
   try {
+    // 已快取段落即刻回推(content 走 idle gate 注入,跟 fast path 同一條路徑)
+    onFirstChunk();
+    for (const seg of cachedSegments) onSegment(seg.idx, seg.translation, false);
+
     const result = await translateBatchStream(
-      texts,
+      missingTexts,
       effectiveSettings,
       glossary,
       fixedGlossaryEntries,
       forbiddenTermsList.length > 0 ? forbiddenTermsList : null,
-      { onFirstChunk, onSegment },
+      { onFirstChunk, onSegment: (mIdx, tr, hm) => onSegment(missingIdxs[mIdx], tr, hm) },
       ac.signal,
     );
 
     // v1.8.1: 寫回 cache（使用跟 handleTranslate 一致的 keySuffix)，下次重翻可命中 fast path
-    if (result.translations && result.translations.length > 0) {
+    // v1.10.46: hadMismatch 時不寫 — translateBatchStream 不做逐段 fallback,mismatch 的
+    // translations 是錯位陣列,以 texts[i]→translations[i] 配對寫進去會永久污染快取
+    if (!result.hadMismatch && result.translations && result.translations.length > 0) {
       // setBatch 內部會跳過 falsy translations，且 length 不對齊時也只寫對齊的那部分
       const writableTexts = [];
       const writableTranslations = [];
-      for (let i = 0; i < texts.length && i < result.translations.length; i++) {
+      for (let i = 0; i < missingTexts.length && i < result.translations.length; i++) {
         if (result.translations[i]) {
-          writableTexts.push(texts[i]);
+          writableTexts.push(missingTexts[i]);
           writableTranslations.push(result.translations[i]);
         }
       }
@@ -1286,8 +1585,11 @@ async function handleTranslateStream(payload, sender, streamId, tabId, opts = {}
           ...result.usage,
           billedInputTokens,
           billedCostUSD,
+          // v1.10.61: 帶上本批已快取段數,讓 content 端 pickRescanToast 正確判定純快取
+          // (否則 missing-only 後「只剩少數真送 API」會被誤報成整批新翻)
+          cacheHits,
         },
-        totalSegments: result.translations.length,
+        totalSegments: texts.length,
         hadMismatch: result.hadMismatch,
         finishReason: result.finishReason,
       },
@@ -1302,7 +1604,7 @@ async function handleTranslateStream(payload, sender, streamId, tabId, opts = {}
       debugLog('error', 'api', 'streaming translateBatch failed', { streamId, error: err?.message || String(err) });
       browser.tabs.sendMessage(tabId, {
         type: 'STREAMING_ERROR',
-        payload: { streamId, error: err?.message || String(err), atSegment: 0 },
+        payload: { streamId, ...errorFields(err), atSegment: 0 },
       }).catch(() => {});
     }
   } finally {
@@ -1315,7 +1617,7 @@ async function handleTranslateStream(payload, sender, streamId, tabId, opts = {}
 async function handleTranslate(payload, sender, geminiOverrides = {}, pricingOverride = null, cacheTag = '', applyFixedGlossary = true, applyForbiddenTerms = true) {
   const settings = await getSettings();
   if (!settings.apiKey) {
-    throw new Error('尚未設定 Gemini API Key，請至設定頁填入。');
+    throw codedError('apiKeyMissing', null, '尚未設定 Gemini API Key，請至設定頁填入。');
   }
   const texts = payload.texts;
   const glossary = payload.glossary || null;  // v0.69: 可選的術語對照表
@@ -1367,44 +1669,20 @@ async function handleTranslate(payload, sender, geminiOverrides = {}, pricingOve
   const forbiddenTermsList = (applyForbiddenTerms && Array.isArray(settings.forbiddenTerms))
     ? settings.forbiddenTerms : [];
 
-  // v0.70: 若有術語表，快取 key 加上 glossary hash 後綴，
-  // 確保「有術語表」與「無術語表」的翻譯分開快取。
   // v1.4.12: cacheTag 由呼叫端明確指定（'_yt' = 字幕模式 / '' = 網頁翻譯含 preset）。
   // 不再用 geminiOverrides 是否有值來判斷，因為 preset 快速鍵也會傳 { model } override，
-  // 會被誤判為字幕模式污染快取。
-  let glossaryKeySuffix = cacheTag;
-  const allGlossaryForHash = [
-    ...(glossary || []).map(e => `${e.source}:${e.target}`),
-    ...(fixedGlossaryEntries || []).map(e => `F:${e.source}:${e.target}`),
-  ];
-  if (allGlossaryForHash.length > 0) {
-    const fullHash = await cache.hashText(allGlossaryForHash.join('|'));
-    glossaryKeySuffix = '_g' + fullHash.slice(0, 12);
-  }
-  // v1.5.6: 黑名單 hash。空清單時回傳 ''，不附加後綴。
-  const forbiddenHash = await cache.hashForbiddenTerms(forbiddenTermsList);
-  if (forbiddenHash) {
-    glossaryKeySuffix += '_b' + forbiddenHash;
-  }
-  // v1.4.12: 把 model 字串納入 cache key，避免同段文字在不同 preset 之間共用快取
-  // （例如先按 Alt+A 走 Flash Lite 翻過，再按 Alt+S 走 Flash 應該重新打 API，不該命中 Flash Lite 的舊譯文）。
-  const modelStr = effectiveSettings.geminiConfig?.model || 'unknown';
-  glossaryKeySuffix += '_m' + modelStr.replace(/[^a-z0-9.\-]/gi, '_');
-  // P1: targetLanguage 進 cache key,避免不同目標語言撞 cache(zh-TW vs zh-CN 翻同一段必須分開)。
-  // zh-TW 不加 suffix(向下相容,既有 zh-TW 使用者 cache 仍 hit);zh-CN / en 加 _lang<x>
-  const tl = effectiveSettings.targetLanguage;
-  if (tl && tl !== 'zh-TW') {
-    glossaryKeySuffix += '_lang' + tl.replace(/[^a-z0-9]/gi, '');
-  }
-  // W7：文件翻譯路徑（_doc)cache key 加 temperature，讓使用者在 settings page 改
-  // 文件翻譯獨立 temperature 後立即生效（不會 cache hit 拿到舊 temp 的譯文)。
-  // 網頁 / 字幕路徑沒獨立 temperature 設定，不加（避免 cache 多分裂)
-  if (cacheTag === '_doc') {
-    const tdTemp = effectiveSettings.geminiConfig?.temperature;
-    if (typeof tdTemp === 'number' && Number.isFinite(tdTemp)) {
-      glossaryKeySuffix += '_t' + tdTemp.toFixed(2);
-    }
-  }
+  // 會被誤判為字幕模式污染快取。組裝規則見 buildCacheKeySuffix（v1.10.46 起三條路徑
+  // 共用單一資料源）。
+  const glossaryKeySuffix = await buildCacheKeySuffix({
+    cacheTag,
+    glossary,
+    fixedGlossaryEntries,
+    forbiddenTermsList,
+    modelKeyPart: (effectiveSettings.geminiConfig?.model || 'unknown').replace(/[^a-z0-9.\-]/gi, '_'),
+    targetLanguage: effectiveSettings.targetLanguage,
+    // W7：只有文件翻譯路徑帶 temperature 進 key（改文件獨立 temperature 後立即生效）
+    docTemperature: cacheTag === '_doc' ? effectiveSettings.geminiConfig?.temperature : undefined,
+  });
 
   // 1. 先撈快取
   const cached = await cache.getBatch(texts, glossaryKeySuffix);
@@ -1448,7 +1726,51 @@ async function handleTranslate(payload, sender, geminiOverrides = {}, pricingOve
     const t0 = Date.now();
     const totalChars = missingTexts.reduce((s, t) => s + (t?.length || 0), 0);
     debugLog('info', 'api', 'translateBatch start', { texts: missingTexts.length, chars: totalChars });
-    const res = await translateBatch(missingTexts, effectiveSettings, glossary, fixedGlossaryEntries, forbiddenTermsList);
+    let res;
+    try {
+      res = await translateBatch(missingTexts, effectiveSettings, glossary, fixedGlossaryEntries, forbiddenTermsList);
+    } catch (err) {
+      // v1.10.46(批次 2-5):多 chunk 中途失敗時前面 chunk 已付費(translateBatch 把
+      // 累積 usage 掛在 err.usage)。content 端收到 error 不會發 LOG_USAGE,這筆錢若不
+      // 在這裡直接記進 usage-db 就永遠漏帳(對帳系統性低估)。記完原樣 rethrow。
+      const partialUsage = err?.usage;
+      if (partialUsage && (partialUsage.inputTokens > 0 || partialUsage.outputTokens > 0)) {
+        try {
+          const cachedRate = pricingToCachedRate(effectivePricing) ?? 0.10;
+          const cachedSavedRatio = 1 - cachedRate;
+          await usageDB.logTranslation({
+            url: sender?.tab?.url || '',
+            title: sender?.tab?.title || '',
+            inputTokens: partialUsage.inputTokens,
+            outputTokens: partialUsage.outputTokens,
+            cachedTokens: partialUsage.cachedTokens || 0,
+            billedInputTokens: Math.max(0, Math.round(
+              partialUsage.inputTokens - (partialUsage.cachedTokens || 0) * cachedSavedRatio,
+            )),
+            billedCostUSD: computeBilledCostUSD(
+              partialUsage.inputTokens,
+              partialUsage.cachedTokens || 0,
+              partialUsage.outputTokens,
+              effectivePricing,
+              cachedRate,
+            ),
+            segments: missingTexts.length,
+            cacheHits,
+            timestamp: Date.now(),
+            engine: 'gemini',
+            model: effectiveSettings.geminiConfig?.model || 'unknown',
+            // 批次中途失敗的已付費部分(結果丟棄,錢有花)
+            partialFailure: true,
+          });
+          debugLog('warn', 'api', 'translateBatch failed mid-way — partial usage logged', {
+            inputTokens: partialUsage.inputTokens,
+            outputTokens: partialUsage.outputTokens,
+            error: err?.message,
+          });
+        } catch (_) { /* 記帳失敗不影響原錯誤回報 */ }
+      }
+      throw err;
+    }
     fresh = res.translations;
     batchUsage = res.usage;
     batchHadMismatch = res.hadMismatch || false; // v0.94: mismatch 旗標
@@ -1620,7 +1942,7 @@ async function handleTranslateCustom(payload, sender, cacheTag = '_oc', cpOverri
   // v1.8.41 對齊：Model 也允許為空（llama.cpp / Ollama 啟動時鎖 model,adapter 不送
   // model 欄位讓 server 用啟動 model)— lib/openai-compat.js translateChunk 本來就支援，
   // 之前在這裡提早擋下會讓 local server 配置失敗（空 model 行為應跟 adapter 一致)。
-  if (!cp.baseUrl) throw new Error('尚未設定自訂 Provider 的 Base URL。');
+  if (!cp.baseUrl) throw codedError('baseUrlMissing', null, '尚未設定自訂 Provider 的 Base URL。');
 
   const texts = payload.texts;
   const glossary = payload.glossary || null;
@@ -1643,32 +1965,20 @@ async function handleTranslateCustom(payload, sender, cacheTag = '_oc', cpOverri
   const forbiddenTermsList = (applyForbiddenTerms && Array.isArray(settings.forbiddenTerms))
     ? settings.forbiddenTerms : [];
 
-  // Cache key：'_oc' （網頁） / '_oc_yt' （字幕） base tag + glossary/forbidden hash + baseUrl hash + safe model
-  let suffix = cacheTag;
-  const allGlossaryForHash = [
-    ...(glossary || []).map(e => `${e.source}:${e.target}`),
-    ...(fixedGlossaryEntries || []).map(e => `F:${e.source}:${e.target}`),
-  ];
-  if (allGlossaryForHash.length > 0) {
-    const fullHash = await cache.hashText(allGlossaryForHash.join('|'));
-    suffix += '_g' + fullHash.slice(0, 12);
-  }
-  const forbiddenHash = await cache.hashForbiddenTerms(forbiddenTermsList);
-  if (forbiddenHash) {
-    suffix += '_b' + forbiddenHash;
-  }
+  // Cache key：'_oc' （網頁） / '_oc_yt' （字幕） base tag，組裝規則見 buildCacheKeySuffix
+  // （v1.10.46 起三條路徑共用單一資料源）。
   // baseUrl hash 6 字元 + safe model — 避免不同 provider 同 model name 共用快取
   const baseUrlHash = (await cache.hashText(cp.baseUrl)).slice(0, 6);
   const safeModel = String(cp.model).replace(/[^a-z0-9.\-]/gi, '_');
-  suffix += `_m${baseUrlHash}_${safeModel}`;
-  // P1 (v1.8.59):targetLanguage 進 cache key,zh-TW 不加維持向下相容
-  const tl = settings.targetLanguage;
-  if (tl && tl !== 'zh-TW') {
-    suffix += '_lang' + tl.replace(/[^a-z0-9]/gi, '');
-  }
-  if (cacheTag === '_oc_doc' && typeof cp.temperature === 'number' && Number.isFinite(cp.temperature)) {
-    suffix += '_t' + cp.temperature.toFixed(2);
-  }
+  const suffix = await buildCacheKeySuffix({
+    cacheTag,
+    glossary,
+    fixedGlossaryEntries,
+    forbiddenTermsList,
+    modelKeyPart: `${baseUrlHash}_${safeModel}`,
+    targetLanguage: settings.targetLanguage,
+    docTemperature: cacheTag === '_oc_doc' ? cp.temperature : undefined,
+  });
 
   // 1. 撈快取
   const cached = await cache.getBatch(texts, suffix);
@@ -1846,7 +2156,7 @@ async function handleExtractGlossary(payload, sender) {
   debugLog('info', 'glossary', 'glossary extraction start', { inputHash: payload.inputHash, chars: payload.compressedText?.length });
   const settings = await getSettings();
   if (!settings.apiKey) {
-    throw new Error('尚未設定 Gemini API Key，請至設定頁填入。');
+    throw codedError('apiKeyMissing', null, '尚未設定 Gemini API Key，請至設定頁填入。');
   }
   const { compressedText, inputHash } = payload;
 
@@ -2024,6 +2334,11 @@ async function handleExtractGlossaryCustomProvider(payload, sender) {
 //   storage 內仍維持 slot 1/2/3 編號，故 command id 0 → slot 2 mapping 寫死。
 const COMMAND_ID_TO_SLOT = { 0: 2, 1: 1, 3: 3 };
 browser.commands.onCommand.addListener(async (command) => {
+  // 送到 Instapaper（Alt+I）：走背景 OAuth + fetch，回饋走 content toast。
+  if (command === 'send-to-instapaper') {
+    handleSendToInstapaperCommand().catch(() => {});
+    return;
+  }
   const match = command.match(/^translate-preset-(\d+)$/);
   if (!match) return;
   const cmdNum = Number(match[1]);
@@ -2038,6 +2353,116 @@ browser.commands.onCommand.addListener(async (command) => {
   // uncaught promise rejection 污染 background.js 的錯誤面板。
   browser.tabs.sendMessage(tab.id, { type: 'TRANSLATE_PRESET', payload: { slot } }).catch(() => {});
 });
+
+// 「送到 Instapaper」摘要固定走 Gemini Flash Lite(最便宜),與使用者主翻譯引擎無關
+//(CLAUDE.md §17:不可用 2.5 系列)。
+const INSTAPAPER_SUMMARY_MODEL = 'gemini-3.1-flash-lite';
+
+// 產生 Instapaper 摘要(popup 與 Alt+I 兩條路徑共用,單一資料源)。
+// gate:instapaperSummaryEnabled 開 + 有 Gemini API key + 有文字。任一不滿足或摘要呼叫
+// 失敗,一律回 ''(呼叫端降級為「不附摘要照常送書籤」,摘要是加值不擋送出)。
+// usage 進 usage-db(source='instapaper-summary'),與主翻譯 / 術語表一致供帳單對帳。
+async function generateInstapaperSummary(text, sender) {
+  if (!text || typeof text !== 'string' || !text.trim()) return '';
+  let settings;
+  try { settings = await getSettings(); } catch (_) { return ''; }
+  if (settings.instapaperSummaryEnabled !== true) return '';
+  const apiKey = settings.apiKey;
+  if (!apiKey) return ''; // 無有效 Gemini key → 不摘要(需求:有 key 才用 flash-lite)
+
+  const targetLangLabel = LANG_LABELS[settings.targetLanguage] || '';
+  try {
+    const { summary, usage } = await summarizeArticle({
+      text,
+      targetLangLabel,
+      apiKey,
+      model: INSTAPAPER_SUMMARY_MODEL,
+      serviceTier: settings.geminiConfig?.serviceTier,
+    });
+
+    // 記用量(對齊 handleExtractGlossary 的記帳:source 分流、cache 折扣換算 billed)
+    if (usage && (usage.inputTokens > 0 || usage.outputTokens > 0)) {
+      const pricing = getPricingForModel(INSTAPAPER_SUMMARY_MODEL, settings) || settings.pricing;
+      const cachedRate = pricingToCachedRate(pricing) ?? 0.10;
+      const cachedSavedRatio = 1 - cachedRate;
+      const billedInputTokens = Math.max(
+        0,
+        Math.round(usage.inputTokens - (usage.cachedTokens || 0) * cachedSavedRatio),
+      );
+      const billedCostUSD = computeBilledCostUSD(
+        usage.inputTokens, usage.cachedTokens || 0, usage.outputTokens, pricing, cachedRate,
+      );
+      try {
+        await usageDB.logTranslation({
+          url: sender?.tab?.url || '',
+          title: sender?.tab?.title || '',
+          engine: 'gemini',
+          model: INSTAPAPER_SUMMARY_MODEL,
+          inputTokens: usage.inputTokens || 0,
+          outputTokens: usage.outputTokens || 0,
+          cachedTokens: usage.cachedTokens || 0,
+          billedInputTokens,
+          billedCostUSD,
+          segments: 0,
+          cacheHits: 0,
+          durationMs: 0,
+          timestamp: Date.now(),
+          source: 'instapaper-summary',
+        });
+      } catch (_) { /* 記帳失敗不影響摘要回傳 */ }
+    }
+    return (summary || '').trim();
+  } catch (_) {
+    return '';
+  }
+}
+
+// 送到 Instapaper 快捷鍵處理：取 active tab → 擷取頁面 HTML → 摘要 → OAuth 簽章 + fetch。
+// 回饋透過 INSTAPAPER_TOAST 訊息派給 content（快捷鍵無 popup）。
+async function handleSendToInstapaperCommand() {
+  const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.id) return;
+  const toast = (status) =>
+    browser.tabs.sendMessage(tab.id, { type: 'INSTAPAPER_TOAST', status }).catch(() => {});
+
+  // enable gate：未啟用或未連結 → 提示後 no-op
+  const { instapaperEnabled = false, instapaperToken, instapaperTokenSecret, instapaperSummaryEnabled = true } =
+    await browser.storage.sync.get(['instapaperEnabled', 'instapaperToken', 'instapaperTokenSecret', 'instapaperSummaryEnabled']);
+  if (instapaperEnabled !== true || !instapaperToken || !instapaperTokenSecret) {
+    toast('not-enabled');
+    return;
+  }
+
+  await ensureInstapaperKeys();
+  toast('sending');
+  let page;
+  try {
+    page = await browser.tabs.sendMessage(tab.id, { type: 'EXTRACT_PAGE_HTML' });
+  } catch (_) {
+    // content script 沒注入的頁（chrome:// 等）→ 無法擷取也無法 toast，直接放棄
+    return;
+  }
+  if (!page?.ok || !page.url) { toast('failed'); return; }
+
+  try {
+    // 摘要那步會多打一次 Gemini（數秒）→ 先 toast「製作摘要中」避免 UI 看似卡住。
+    // toggle 開但沒 key 時 generateInstapaperSummary 會秒回 '',toast 瞬間翻到 sending。
+    if (instapaperSummaryEnabled !== false) toast('summarizing');
+    // 摘要 best-effort:產不出回 ''，buildInstapaperPayload 不帶 description,書籤照常送。
+    const description = await generateInstapaperSummary(page.text, { tab });
+    toast('sending');
+    const payload = buildInstapaperPayload({ url: page.url, html: page.html, title: page.title, description });
+    const r = await saveToInstapaper({
+      token: instapaperToken, tokenSecret: instapaperTokenSecret, payload,
+    });
+    if (r.ok) toast('sent');
+    else if (r.error === 'AUTH') toast('failed-auth');
+    else if (r.error === 'NETWORK') toast('failed-network');
+    else toast('failed');
+  } catch (_) {
+    toast('failed');
+  }
+}
 
 // ─── 安裝/更新事件 ─────────────────────────────────────────
 // W7：一次性清 tc_* 翻譯 cache(PDF inline marker 協定變動 → 舊 sha1 全部失效)。

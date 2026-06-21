@@ -6,8 +6,39 @@ import { getCachedRate, FALLBACK_USD_TWD_RATE } from '../lib/exchange-rate.js';
 import { RELEASE_HIGHLIGHTS } from '../lib/release-highlights.js';
 import { shouldShowWelcomeNotice } from '../lib/welcome-notice.js';
 import { isWorthNotifying } from '../lib/update-check.js';
-import { IS_MAS_BUILD } from '../lib/distribution.js';
+import { IS_MAS_BUILD, IS_IOS_BUILD } from '../lib/distribution.js';
+import { isTouchScreenDevice } from '../lib/platform.js';
 import { pickPopupSlot, presetsRequireGemini, TARGET_LANGUAGES, DEFAULT_SETTINGS } from '../lib/storage.js';
+import { saveToInstapaper, buildInstapaperPayload } from '../lib/instapaper.js'; // 送到 Instapaper
+
+// iOS build（SPEC-PRIVATE §26）。build 屬性 vs 平台屬性分離見 lib/platform.js：
+//   - body.runtime-ios（build 屬性，不論 host OS）：CSS 隱藏「翻譯文件」入口
+//     （iOS build 已 strip translate-doc/，留著是死按鈕）
+//   - body.runtime-ios-touch（平台屬性，只在真觸控裝置）：popup 撐滿放大。
+//     iOS build 可透過「iPhone 與 iPad App 在 Mac 上執行」裝在 macOS，此時要
+//     尊重 macOS popover 尺寸 → 不放大，只保留 runtime-ios 的死按鈕隱藏。
+if (IS_IOS_BUILD) {
+  document.body.classList.add('runtime-ios');
+  if (isTouchScreenDevice()) {
+    document.body.classList.add('runtime-ios-touch');
+    // 箱子尺寸（zoom）與寬度撐滿改由 popup.css 全權處理（固定放大檔 zoom 1.35 + 觸控且
+    // viewport 已寬時 width:auto,對齊 JRead 實機驗證做法,見 popup.css runtime-ios-touch
+    // 區段註解）。這裡只剩字體大小微調：
+    //   字體大小（--sk-fz）：大 iPad（12.9"）跟 iPad mini 共用同一個 popover 尺寸（都
+    //   ~420pt），但大螢幕檢視距離較遠 → 字看起來偏小。zoom 是整體縮放、改不了「字相對
+    //   箱子」的比例,故另用 --sk-fz 只放大可讀文字（popup.css 用 calc 套），箱子尺寸不動。
+    //   依螢幕短邊校準：iPad mini（短邊 744）→ 1.0 維持原樣；12.9"（短邊 1024）→ ~1.35。
+    //   iPhone（短邊 ≤ 440）算出 < 1 被 clamp 回 1.0 → 不變。用 screen.*（固定值、不隨
+    //   orientation 變）。
+    const applyIosFontScale = () => {
+      const screenMin = Math.min(screen.width || 744, screen.height || 744);
+      const fz = Math.min(1.4, Math.max(1.0, 1 + (screenMin - 744) / 800));
+      document.body.style.setProperty('--sk-fz', String(fz));
+    };
+    applyIosFontScale();
+    window.addEventListener('resize', applyIosFontScale);
+  }
+}
 
 // P2 (v1.8.60):i18n. lib/i18n.js 在 popup.html 內以普通 <script> 早於本 module 載入,
 // 因此 window.__SK.i18n API 必然存在
@@ -113,12 +144,27 @@ async function refreshShortcutHint() {
   // v1.8.19: 主要預設 command id 改為 translate-preset-0（字典序保證 chrome://extensions/shortcuts 顯示在最上）
   const el = $('shortcut-hint');
   if (!el) return;
+  // iOS build 真觸控裝置：主要觸發是四指輕點（= 主要預設完整 toggle，
+  // content-touch.js），提示改顯示手勢而非鍵盤快速鍵（接實體鍵盤時
+  // Alt+S 照常可用，options 快速鍵 section 有完整說明）。
+  // iOS build 跑在 Mac（無觸控）時不走這條 → fall through 顯示鍵盤快速鍵，
+  // 尊重 macOS 特性（見 lib/platform.js）。
+  if (IS_IOS_BUILD && isTouchScreenDevice()) {
+    el.textContent = t('popup.shortcut.iosTouch');
+    return;
+  }
   try {
     const cmds = await browser.commands.getAll();
     const cmd = cmds.find((c) => c.name === 'translate-preset-0');
     const shortcut = cmd?.shortcut?.trim();
     if (shortcut) {
-      el.textContent = t('popup.shortcut.value', { shortcut });
+      // Mac 上把 "Alt+S" 顯示成 "⌥S"（Option 不是 Alt），與設定頁 recorder 一致；
+      // 非 Mac（Windows / Linux）保持 "Alt+S"。Safari 回 "Alt+S"，Chrome Mac 多已回
+      // "⌥S"（不變）。lib/shortcut-utils.js 的 macifyCommandShortcut 為單一來源。
+      const isMac = /Mac/i.test((typeof navigator !== 'undefined' && navigator.platform) || '');
+      const SC = (typeof window !== 'undefined' && window.__SKShortcuts) || null;
+      const display = SC ? SC.macifyCommandShortcut(shortcut, isMac) : shortcut;
+      el.textContent = t('popup.shortcut.value', { shortcut: display });
     } else {
       // 使用者可能在 chrome://extensions/shortcuts 清掉了快捷鍵
       el.textContent = t('popup.shortcut.unset');
@@ -281,6 +327,13 @@ async function init() {
     $('glossary-toggle').checked = gc?.enabled ?? false;
   } catch { /* 讀取失敗時維持預設 checked */ }
 
+  // 送到 Instapaper：只有「已啟用且已連結」才顯示按鈕
+  try {
+    const { instapaperEnabled = false, instapaperToken } =
+      await browser.storage.sync.get(['instapaperEnabled', 'instapaperToken']);
+    $('send-to-instapaper-btn').hidden = !(instapaperEnabled === true && !!instapaperToken);
+  } catch { /* 讀取失敗維持 hidden */ }
+
   // v1.2.12: YouTube 字幕 toggle — 只在 YouTube 影片頁才顯示
   // v1.4.13: toggle 語意從「當前 active 狀態」改為「ytSubtitle.autoTranslate 設定值」，
   // 讓使用者一打開 popup 就看到預設 ON（DEFAULT_SETTINGS.ytSubtitle.autoTranslate=true），
@@ -293,6 +346,9 @@ async function init() {
       const { ytSubtitle = {} } = await browser.storage.sync.get('ytSubtitle');
       // 沒設定過視為 true（與 DEFAULT_SETTINGS.ytSubtitle.autoTranslate 對齊）
       $('yt-subtitle-toggle').checked = ytSubtitle.autoTranslate !== false;
+      // 字幕大小 scale（全平台統一,只在 YouTube 影片頁顯示）。預設 100。
+      $('yt-caption-size-row').hidden = false;
+      $('yt-caption-size').value = String(ytSubtitle.captionScale ?? 100);
     }
     // commit 5a':Drive 影片 viewer toggle 共用 ytSubtitle.autoTranslate
     // （user 不需要為 Drive 多做設定，跟 YouTube 字幕用同一個開關）
@@ -449,6 +505,22 @@ $('bilingual-toggle').addEventListener('change', async (e) => {
   }
 });
 
+// 字幕大小 scale change handler（寫 ytSubtitle.captionScale；content-youtube onChanged
+// 即時套用 overlay + iOS ::cue,不需 reload 影片頁）
+$('yt-caption-size').addEventListener('change', async (e) => {
+  const scale = parseInt(e.target.value, 10);
+  if (!Number.isFinite(scale)) return;
+  try {
+    const { ytSubtitle = {} } = await browser.storage.sync.get('ytSubtitle');
+    await browser.storage.sync.set({
+      ytSubtitle: { ...ytSubtitle, captionScale: scale },
+    });
+  } catch (err) {
+    statusEl.textContent = t('popup.status.captionSizeFailed');
+    statusEl.style.color = '#ff3b30';
+  }
+});
+
 $('options-btn').addEventListener('click', async() => {
   try{
     await browser.runtime.openOptionsPage();
@@ -465,6 +537,60 @@ $('translate-doc-btn').addEventListener('click', async () => {
   window.close();
 });
 
+// ── 送到 Instapaper ──────────────────────────────────────
+// 在 popup 直接做 OAuth 簽章 + fetch（避開 iOS 背景 event page 掛起）：
+// 向 content 取目前頁面 HTML（含已就地替換的譯文）→ saveToInstapaper。
+function instapaperErrText(error) {
+  switch (error) {
+    case 'AUTH': return t('instapaper.failedAuth');
+    case 'NETWORK': return t('instapaper.failedNetwork');
+    default: return t('instapaper.failed');
+  }
+}
+
+$('send-to-instapaper-btn').addEventListener('click', async () => {
+  const btn = $('send-to-instapaper-btn');
+  btn.disabled = true;
+  statusEl.style.color = '#86868b';
+  statusEl.textContent = t('instapaper.sending');
+  try {
+    const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
+    if (!tab?.id) throw new Error('no active tab');
+    const page = await browser.tabs.sendMessage(tab.id, { type: 'EXTRACT_PAGE_HTML' });
+    if (!page?.ok || !page.url) throw new Error(page?.error || 'extract failed');
+    // 送出前向 background 要文章摘要。Gemini 呼叫 + usage 記帳集中在 background（與 Alt+I
+    // 路徑共用同一個 generateInstapaperSummary，單一資料源不 drift）。best-effort:background
+    // 依 instapaperSummaryEnabled + 是否有 Gemini key gate,回 '' 代表不附摘要,書籤照常送。
+    let description = '';
+    try {
+      // 摘要那步會多打一次 Gemini（數秒），顯示獨立狀態避免看起來像卡在「送出中」。
+      // 只讀 toggle 當「要不要顯示摘要中」的 UX 訊號,真正 gate（含 Gemini key）仍只在
+      // background;toggle 開但沒 key 時 background 會秒回 ''，狀態瞬間翻到送出中。
+      const { instapaperSummaryEnabled = true } = await browser.storage.sync.get(['instapaperSummaryEnabled']);
+      if (instapaperSummaryEnabled !== false) statusEl.textContent = t('instapaper.summarizing');
+      const sres = await browser.runtime.sendMessage({ type: 'SUMMARIZE_FOR_INSTAPAPER', payload: { text: page.text } });
+      if (sres?.ok && typeof sres.summary === 'string') description = sres.summary;
+    } catch (_) { /* 摘要失敗不擋送出 */ }
+    statusEl.textContent = t('instapaper.sending');
+    const { instapaperToken, instapaperTokenSecret } =
+      await browser.storage.sync.get(['instapaperToken', 'instapaperTokenSecret']);
+    const payload = buildInstapaperPayload({ url: page.url, html: page.html, title: page.title, description });
+    const r = await saveToInstapaper({ token: instapaperToken, tokenSecret: instapaperTokenSecret, payload });
+    if (r.ok) {
+      statusEl.textContent = t('instapaper.sent');
+      statusEl.style.color = '#34c759';
+    } else {
+      statusEl.textContent = instapaperErrText(r.error);
+      statusEl.style.color = '#ff3b30';
+    }
+  } catch (_) {
+    statusEl.textContent = t('instapaper.failed');
+    statusEl.style.color = '#ff3b30';
+  } finally {
+    btn.disabled = false;
+  }
+});
+
 // v1.6.23:popup 開著時 reactive sync ytSubtitle.autoTranslate（設定頁同步寫 storage 後立即反映）
 // popup 通常 click 外面就關閉，但 detached popup window 或極短時間視窗下這條 listener 確保一致
 browser.storage.onChanged.addListener((changes, area) => {
@@ -476,6 +602,8 @@ browser.storage.onChanged.addListener((changes, area) => {
   $('drive-subtitle-toggle').checked = enabled;
   // commit 5c:bilingualMode 同步
   $('bilingual-toggle').checked = newVal.bilingualMode === true;
+  // 字幕大小 scale 同步
+  if (newVal.captionScale != null) $('yt-caption-size').value = String(newVal.captionScale);
 });
 
 // v1.0.3: 編輯譯文按鈕
