@@ -35,10 +35,22 @@ const IOS_SH = path.join(ROOT, 'safari-app', 'safari-build-ios.sh');
 const MAC_SH = path.join(ROOT, 'safari-app', 'safari-build.sh');
 const SRC_MANIFEST = path.join(ROOT, 'shinkansen', 'manifest.json');
 
+function isExecutableInGitIndex(file) {
+  try {
+    const rel = path.relative(ROOT, file).replace(/\\/g, '/');
+    const out = execFileSync('git', ['ls-files', '-s', '--', rel], { cwd: ROOT, encoding: 'utf8' });
+    return out.startsWith('100755 ');
+  } catch (_) {
+    return false;
+  }
+}
+
 test.describe('patch-manifest-background.sh', () => {
   test('存在且 executable', () => {
     expect(fs.existsSync(PATCH_SH)).toBe(true);
-    expect(fs.statSync(PATCH_SH).mode & 0o111).toBeTruthy();
+    // Windows 的 node:fs stat mode 會回 0666，無法反映 Git executable bit；
+    // 因此 Windows/跨平台測試改以檔案系統 executable 或 Git index 100755 任一成立為準。
+    expect((fs.statSync(PATCH_SH).mode & 0o111) || isExecutableInGitIndex(PATCH_SH)).toBeTruthy();
   });
 
   test('執行後必須是 event page 形式:scripts + persistent:false、保留 type:module、其餘欄位不動、冪等', () => {

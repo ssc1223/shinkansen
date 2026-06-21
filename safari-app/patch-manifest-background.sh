@@ -26,25 +26,45 @@ if [ ! -f "$MANIFEST" ]; then
   exit 1
 fi
 
-ALREADY=$(jq -r '.background | has("scripts") and (has("service_worker") | not)' "$MANIFEST")
-if [ "$ALREADY" != "true" ]; then
-  SW_FILE=$(jq -r '.background.service_worker' "$MANIFEST")
-  if [ -z "$SW_FILE" ] || [ "$SW_FILE" = "null" ]; then
-    echo "ERROR: $MANIFEST 讀不到 background.service_worker" >&2
-    exit 1
-  fi
-  TMP="$MANIFEST.tmp"
-  jq '.background = ((.background | del(.service_worker)) + { scripts: [.background.service_worker], persistent: false })' \
-    "$MANIFEST" > "$TMP"
-  mv "$TMP" "$MANIFEST"
-fi
+# 用 Node 取代 jq：Windows 開發環境通常已有 Node（本 repo 測試也依賴 Node），
+# 但不一定有 jq。保持輸入輸出與 jq 版本相同：就地改寫、冪等、保留 background.type。
+node --input-type=module - "$MANIFEST" <<'NODE'
+import fs from 'node:fs';
 
-# verify：必須是 event page 形式、scripts 指向原 SW 檔、type 欄位保留（module）
-BG_OK=$(jq -r '(.background.scripts | type == "array" and length == 1) and (.background.persistent == false) and (.background | has("service_worker") | not)' "$MANIFEST")
-if [ "$BG_OK" != "true" ]; then
-  echo "ERROR: manifest background 不是預期 event page 形式：" >&2
-  jq '.background' "$MANIFEST" >&2
-  exit 1
-fi
+const manifestPath = process.argv[2];
+let manifest;
+try {
+  manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+} catch (err) {
+  console.error(`ERROR: ${manifestPath} 不是有效 JSON: ${err.message}`);
+  process.exit(1);
+}
 
-echo "manifest background patched: $(jq -c '.background' "$MANIFEST")"
+const bg = manifest.background || {};
+const already = Array.isArray(bg.scripts) && !Object.prototype.hasOwnProperty.call(bg, 'service_worker');
+if (!already) {
+  const swFile = bg.service_worker;
+  if (!swFile || swFile === 'null') {
+    console.error(`ERROR: ${manifestPath} 讀不到 background.service_worker`);
+    process.exit(1);
+  }
+  delete bg.service_worker;
+  bg.scripts = [swFile];
+  bg.persistent = false;
+  manifest.background = bg;
+  fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+}
+
+const patchedBg = manifest.background || {};
+const ok = Array.isArray(patchedBg.scripts)
+  && patchedBg.scripts.length === 1
+  && patchedBg.persistent === false
+  && !Object.prototype.hasOwnProperty.call(patchedBg, 'service_worker');
+if (!ok) {
+  console.error('ERROR: manifest background 不是預期 event page 形式：');
+  console.error(JSON.stringify(patchedBg, null, 2));
+  process.exit(1);
+}
+
+console.log(`manifest background patched: ${JSON.stringify(patchedBg)}`);
+NODE

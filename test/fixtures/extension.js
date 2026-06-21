@@ -27,6 +27,16 @@ const __dirname = path.dirname(__filename);
 const EXTENSION_PATH = path.resolve(__dirname, '../../shinkansen');
 // 回歸測試的靜態 fixture 目錄（HTML / canned LLM response 等）
 const REGRESSION_FIXTURES_DIR = path.resolve(__dirname, '../regression/fixtures');
+// Chrome 會封鎖部分「unsafe ports」（例如 6666），即使本機測試 server 正常啟動，
+// page.goto 仍會回 net::ERR_UNSAFE_PORT。OS 隨機配 port=0 時偶爾會抽中，需重抽。
+const CHROME_UNSAFE_PORTS = new Set([
+  1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 69,
+  77, 79, 87, 95, 101, 102, 103, 104, 109, 110, 111, 113, 115, 117, 119,
+  123, 135, 137, 139, 143, 161, 179, 389, 427, 465, 512, 513, 514, 515,
+  526, 530, 531, 532, 540, 548, 554, 556, 563, 587, 601, 636, 989, 990,
+  993, 995, 1719, 1720, 1723, 2049, 3659, 4045, 5060, 5061, 6000, 6566,
+  6665, 6666, 6667, 6668, 6669, 6697, 10080,
+]);
 
 export const test = base.extend({
   // eslint-disable-next-line no-empty-pattern
@@ -106,8 +116,13 @@ export const test = base.extend({
       sockets.add(sock);
       sock.on('close', () => sockets.delete(sock));
     });
-    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-    const port = server.address().port;
+    let port;
+    do {
+      await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+      port = server.address().port;
+      if (!CHROME_UNSAFE_PORTS.has(port)) break;
+      await new Promise((resolve) => server.close(() => resolve()));
+    } while (true);
     const baseUrl = `http://127.0.0.1:${port}`;
     await use({ baseUrl, port });
     for (const s of sockets) s.destroy();
