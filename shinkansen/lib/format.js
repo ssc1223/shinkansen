@@ -1,12 +1,20 @@
 // format.js — 共用格式化工具函式
 // 由 popup.js 與 options.js 共用，消除重複程式碼。
+//
+// 注意：金額邏輯(formatUSD / formatTWD)與 lib/format-currency.js(content script
+// 用的 UMD 版)是同一份事實的雙實作，改任一份要兩份一起改(drift guard 見
+// test/jest-unit/exchange-rate-and-format.test.cjs)。唯一刻意差異：formatMoney
+// 對缺 rate 的 TWD——ESM 版顯示 NT$ 0、UMD 版 fallback 31.6(2026-06-09 評估保留)。
 
 /**
  * 格式化 bytes 為人類可讀的 B / KB / MB 字串。
  */
 export function formatBytes(b) {
   if (b < 1024) return b + ' B';
-  if (b < 1024 * 1024) return (b / 1024).toFixed(1) + ' KB';
+  // 閾值判斷用「捨入後值」：1048570 bytes 直接用原值判斷會落在 KB 檔位，
+  // 顯示成 '1024.0 KB'（應為 '1.00 MB'）——進位縫隙。
+  const kb = (b / 1024).toFixed(1);
+  if (Number(kb) < 1024) return kb + ' KB';
   return (b / 1024 / 1024).toFixed(2) + ' MB';
 }
 
@@ -14,9 +22,11 @@ export function formatBytes(b) {
  * 格式化 token 數為 K / M 字串。
  */
 export function formatTokens(n) {
-  if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + 'M';
-  if (n >= 1_000) return (n / 1_000).toFixed(1) + 'K';
-  return String(n);
+  if (n < 1_000) return String(n);
+  // 同 formatBytes：999999 用原值判斷會顯示 '1000.0K'（應為 '1.00M'）。
+  const k = (n / 1_000).toFixed(1);
+  if (Number(k) < 1_000) return k + 'K';
+  return (n / 1_000_000).toFixed(2) + 'M';
 }
 
 /**
@@ -82,6 +92,22 @@ export function formatYmd(ts) {
   const mm = String(d.getMonth() + 1).padStart(2, '0');
   const dd = String(d.getDate()).padStart(2, '0');
   return `${yyyy}${mm}${dd}`;
+}
+
+/**
+ * 把 ms timestamp 格式化為 YYYYMMDD-HHMMSS（本地時區），供匯出檔名用
+ * （設定備份 shinkansen-settings-、Log 備份 shinkansen-log-）。到秒避免
+ * 同一天多次匯出檔名重複。
+ *
+ * issue #54：必須用本地時區（getFullYear/getHours... 系列），不可用
+ * `toISOString()`——那是 UTC，台灣（UTC+8）使用者看到的檔名時間會比實際
+ * 早 8 小時（例如本地早上 6 點匯出，檔名卻是前一天晚上 10 點）。
+ */
+export function formatYmdHms(ts) {
+  const d = new Date(ts);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-` +
+         `${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
 }
 
 /**

@@ -3,11 +3,77 @@
 import { browser } from '../lib/compat.js';
 import { formatBytes, formatTokens, formatUSD, formatMoney } from '../lib/format.js';
 import { getCachedRate, FALLBACK_USD_TWD_RATE } from '../lib/exchange-rate.js';
-import { RELEASE_HIGHLIGHTS } from '../lib/release-highlights.js';
+import { RELEASE_HIGHLIGHT_KEYS } from '../lib/release-highlights.js';
 import { shouldShowWelcomeNotice } from '../lib/welcome-notice.js';
-import { isWorthNotifying } from '../lib/update-check.js';
-import { IS_MAS_BUILD } from '../lib/distribution.js';
+import { isWorthNotifying, buildUpdateDownloadUrl } from '../lib/update-check.js';
+import { IS_MAS_BUILD, IS_IOS_BUILD } from '../lib/distribution.js';
+import { isTouchScreenDevice } from '../lib/platform.js';
 import { pickPopupSlot, presetsRequireGemini, TARGET_LANGUAGES, DEFAULT_SETTINGS } from '../lib/storage.js';
+import { saveToInstapaper, buildInstapaperPayload } from '../lib/instapaper.js'; // 送到 Instapaper
+
+// 懸浮按鈕的「功能選單」會把本 popup 以 iframe 嵌進網頁當頁內浮層（src 帶 ?panel=1）。
+// 嵌入頁無法自關（window.close 無效）→ 改 postMessage 通知外層 content script 收掉浮層；
+// 真正的工具列 popup（非 panel）維持原本 window.close()。
+const IS_PANEL = (() => {
+  try { return new URLSearchParams(location.search).get('panel') === '1'; }
+  catch (_e) { return false; }
+})();
+function closePopup() {
+  if (IS_PANEL) {
+    try { window.parent.postMessage({ type: 'shinkansen-close-panel' }, '*'); } catch (_e) {}
+    return;
+  }
+  window.close();
+}
+// panel 浮層模式：回報內容高度給外層 content script，讓 iframe 收緊到內容高度（不留白）。
+// 內容變動（banner 展開 / usage 載入）時用 ResizeObserver 重報。非 panel（原生 popup）no-op。
+if (IS_PANEL) {
+  // 用 body 量內容高度（documentElement.scrollHeight 會被 iframe viewport 高度撐住、量不到
+   // 真實內容；body 高度才是內容本身）。
+  const postPanelSize = () => {
+    try {
+      const rect = document.body.getBoundingClientRect();
+      const h = Math.ceil(rect.height);
+      // 一併回報內容寬度，讓外層 iframe 收緊到 popup 實際寬（桌面 280px），不留左右白邊。
+      const w = Math.ceil(rect.width);
+      window.parent.postMessage({ type: 'shinkansen-panel-size', height: h, width: w }, '*');
+    } catch (_e) {}
+  };
+  window.addEventListener('load', postPanelSize);
+  if (window.ResizeObserver) {
+    try { new ResizeObserver(postPanelSize).observe(document.body); } catch (_e) {}
+  }
+  setTimeout(postPanelSize, 0);
+}
+
+// iOS build（SPEC-PRIVATE §26）。build 屬性 vs 平台屬性分離見 lib/platform.js：
+//   - body.runtime-ios（build 屬性，不論 host OS）：CSS 隱藏「翻譯文件」入口
+//     （iOS build 已 strip translate-doc/，留著是死按鈕）
+//   - body.runtime-ios-touch（平台屬性，只在真觸控裝置）：popup 撐滿放大。
+//     iOS build 可透過「iPhone 與 iPad App 在 Mac 上執行」裝在 macOS，此時要
+//     尊重 macOS popover 尺寸 → 不放大，只保留 runtime-ios 的死按鈕隱藏。
+if (IS_IOS_BUILD) {
+  document.body.classList.add('runtime-ios');
+  if (isTouchScreenDevice()) {
+    document.body.classList.add('runtime-ios-touch');
+    // 箱子尺寸（zoom）與寬度撐滿改由 popup.css 全權處理（固定放大檔 zoom 1.35 + 觸控且
+    // viewport 已寬時 width:auto,對齊 JRead 實機驗證做法,見 popup.css runtime-ios-touch
+    // 區段註解）。這裡只剩字體大小微調：
+    //   字體大小（--sk-fz）：大 iPad（12.9"）跟 iPad mini 共用同一個 popover 尺寸（都
+    //   ~420pt），但大螢幕檢視距離較遠 → 字看起來偏小。zoom 是整體縮放、改不了「字相對
+    //   箱子」的比例,故另用 --sk-fz 只放大可讀文字（popup.css 用 calc 套），箱子尺寸不動。
+    //   依螢幕短邊校準：iPad mini（短邊 744）→ 1.0 維持原樣；12.9"（短邊 1024）→ ~1.35。
+    //   iPhone（短邊 ≤ 440）算出 < 1 被 clamp 回 1.0 → 不變。用 screen.*（固定值、不隨
+    //   orientation 變）。
+    const applyIosFontScale = () => {
+      const screenMin = Math.min(screen.width || 744, screen.height || 744);
+      const fz = Math.min(1.4, Math.max(1.0, 1 + (screenMin - 744) / 800));
+      document.body.style.setProperty('--sk-fz', String(fz));
+    };
+    applyIosFontScale();
+    window.addEventListener('resize', applyIosFontScale);
+  }
+}
 
 // P2 (v1.8.60):i18n. lib/i18n.js 在 popup.html 內以普通 <script> 早於本 module 載入,
 // 因此 window.__SK.i18n API 必然存在
@@ -31,8 +97,14 @@ async function refreshUsageInfo() {
   try {
     // 讀 displayCurrency + cached rate 決定金額顯示幣值。
     // grand total 走 IndexedDB getStats（與用量明細分頁同源，避免 drift）。
+    // v2.0.71：popup 累計費用支援「清除」——實際是顯示基準點重設（usageResetAt，
+    // storage.local，與 usage-db 同為裝置本機），只加總基準點之後的紀錄；
+    // usage-db 紀錄本身不動,options 用量明細分頁完全不受影響。
+    const { usageResetAt } = await browser.storage.local.get('usageResetAt');
+    const statsPayload = (typeof usageResetAt === 'number' && usageResetAt > 0)
+      ? { from: usageResetAt } : {};
     const [resp, currencyState] = await Promise.all([
-      browser.runtime.sendMessage({ type: 'QUERY_USAGE_STATS' }),
+      browser.runtime.sendMessage({ type: 'QUERY_USAGE_STATS', payload: statsPayload }),
       readCurrencyState(),
     ]);
     const stats = resp?.ok ? resp.stats : null;
@@ -113,12 +185,27 @@ async function refreshShortcutHint() {
   // v1.8.19: 主要預設 command id 改為 translate-preset-0（字典序保證 chrome://extensions/shortcuts 顯示在最上）
   const el = $('shortcut-hint');
   if (!el) return;
+  // iOS build 真觸控裝置：主要觸發是四指輕點（= 主要預設完整 toggle，
+  // content-touch.js），提示改顯示手勢而非鍵盤快速鍵（接實體鍵盤時
+  // Alt+S 照常可用，options 快速鍵 section 有完整說明）。
+  // iOS build 跑在 Mac（無觸控）時不走這條 → fall through 顯示鍵盤快速鍵，
+  // 尊重 macOS 特性（見 lib/platform.js）。
+  if (IS_IOS_BUILD && isTouchScreenDevice()) {
+    el.textContent = t('popup.shortcut.iosTouch');
+    return;
+  }
   try {
     const cmds = await browser.commands.getAll();
     const cmd = cmds.find((c) => c.name === 'translate-preset-0');
     const shortcut = cmd?.shortcut?.trim();
     if (shortcut) {
-      el.textContent = t('popup.shortcut.value', { shortcut });
+      // Mac 上把 "Alt+S" 顯示成 "⌥S"（Option 不是 Alt），與設定頁 recorder 一致；
+      // 非 Mac（Windows / Linux）保持 "Alt+S"。Safari 回 "Alt+S"，Chrome Mac 多已回
+      // "⌥S"（不變）。lib/shortcut-utils.js 的 macifyCommandShortcut 為單一來源。
+      const isMac = /Mac/i.test((typeof navigator !== 'undefined' && navigator.platform) || '');
+      const SC = (typeof window !== 'undefined' && window.__SKShortcuts) || null;
+      const display = SC ? SC.macifyCommandShortcut(shortcut, isMac) : shortcut;
+      el.textContent = t('popup.shortcut.value', { shortcut: display });
     } else {
       // 使用者可能在 chrome://extensions/shortcuts 清掉了快捷鍵
       el.textContent = t('popup.shortcut.unset');
@@ -157,21 +244,11 @@ document.addEventListener('click', async (e) => {
   e.preventDefault();
   try {
     const { updateAvailable } = await browser.storage.local.get('updateAvailable');
-    const version = updateAvailable?.version;
     const isSafari = browser.runtime.getURL('').startsWith('safari-web-extension://');
-    let url;
-    if (isSafari && version) {
-      url = `https://github.com/jimmysu0309/shinkansen/releases/download/v${version}/shinkansen-macos-v${version}.pkg`;
-    } else {
-      // 三層 fallback:storage.releaseUrl > 用 version 組 tag URL > releases 索引頁
-      // 即使 storage 內缺 releaseUrl 或損壞也能跳到合理頁面
-      url = updateAvailable?.releaseUrl
-        || (version
-          ? `https://github.com/jimmysu0309/shinkansen/releases/tag/v${version}`
-          : 'https://github.com/jimmysu0309/shinkansen/releases');
-    }
+    // URL 規則單一資料源：lib/update-check.js buildUpdateDownloadUrl(options banner 同用)
+    const url = buildUpdateDownloadUrl(updateAvailable, isSafari);
     await browser.tabs.create({ url });
-    window.close();
+    closePopup();
   } catch (err) {
     console.error('[shinkansen] update-banner click failed', err);
   }
@@ -201,10 +278,11 @@ async function init() {
       $('update-dot').hidden = false;
       $('welcome-banner').hidden = false;
       $('welcome-banner-title').textContent = t('popup.banner.welcome', { version: welcomeNotice.version });
-      // AMO source review: RELEASE_HIGHLIGHTS 是 dev hardcoded 字串陣列（見 lib/release-highlights.js）,
-      // highlightToHtml 是同檔案內的安全 markdown-to-html 轉換（只處理 **bold** → <strong>），無 user input。
-      $('welcome-bullets').innerHTML = RELEASE_HIGHLIGHTS
-        .map(h => `<li>${highlightToHtml(h)}</li>`)
+      // AMO source review: RELEASE_HIGHLIGHT_KEYS 對應 lib/i18n.js 內 dev hardcoded 的
+      // 譯文字串（見 lib/release-highlights.js），highlightToHtml 是本檔內的安全
+      // markdown-to-html 轉換（只處理 **bold** → <strong>），無 user input。
+      $('welcome-bullets').innerHTML = RELEASE_HIGHLIGHT_KEYS
+        .map(k => `<li>${highlightToHtml(t(k))}</li>`)
         .join('');
     }
   } catch { /* 略 */ }
@@ -239,7 +317,7 @@ async function init() {
   // v0.62 起：autoTranslate 仍走 sync（跨裝置同步），apiKey 改走 local（不同步）
   // P2 (v1.8.60): UI 語系獨立於 targetLanguage,讀 uiLanguage('auto' / 三語)後
   // 透過 I18N.getUiLanguage('auto') 解析為 navigator.language 推導值
-  const { autoTranslate = false, displayMode = 'single', translatePresets = [], uiLanguage, targetLanguage } = await browser.storage.sync.get(['autoTranslate', 'displayMode', 'translatePresets', 'uiLanguage', 'targetLanguage']);
+  const { autoTranslate = false, displayMode = 'single', translatePresets = [], uiLanguage, targetLanguage, autoConvertZh = false } = await browser.storage.sync.get(['autoTranslate', 'displayMode', 'translatePresets', 'uiLanguage', 'targetLanguage', 'autoConvertZh']);
   const { apiKey = '' } = await browser.storage.local.get(['apiKey']);
   $('auto').checked = autoTranslate;
 
@@ -250,7 +328,9 @@ async function init() {
     const tl = (typeof targetLanguage === 'string' && TARGET_LANGUAGES.includes(targetLanguage))
       ? targetLanguage : DEFAULT_SETTINGS.targetLanguage;
     $('targetLanguage').value = tl;
+    _updateAutoConvertZhRow(tl);
   }
+  $('auto-convert-zh-toggle').checked = autoConvertZh === true;
 
   // P2: UI i18n — 寫入 _currentTarget(現在叫「ui dict 語系」更貼切,但變數名沿用),
   // 套 applyI18n,訂閱 storage.uiLanguage 變動
@@ -281,6 +361,13 @@ async function init() {
     $('glossary-toggle').checked = gc?.enabled ?? false;
   } catch { /* 讀取失敗時維持預設 checked */ }
 
+  // 送到 Instapaper：只有「已啟用且已連結」才顯示按鈕
+  try {
+    const { instapaperEnabled = false, instapaperToken } =
+      await browser.storage.sync.get(['instapaperEnabled', 'instapaperToken']);
+    $('send-to-instapaper-btn').hidden = !(instapaperEnabled === true && !!instapaperToken);
+  } catch { /* 讀取失敗維持 hidden */ }
+
   // v1.2.12: YouTube 字幕 toggle — 只在 YouTube 影片頁才顯示
   // v1.4.13: toggle 語意從「當前 active 狀態」改為「ytSubtitle.autoTranslate 設定值」，
   // 讓使用者一打開 popup 就看到預設 ON（DEFAULT_SETTINGS.ytSubtitle.autoTranslate=true），
@@ -288,24 +375,29 @@ async function init() {
   try {
     const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
     const url = tab?.url || '';
-    if (url.includes('youtube.com/watch')) {
-      $('yt-subtitle-row').hidden = false;
+    // /live/<id> 直播分享連結也是 watch 頁本體（v2.0.87，與 content-youtube.js
+    // isYouTubePage 同步）
+    const isYtWatch = /youtube\.com\/(watch|live\/)/.test(url);
+    const isDriveFile = /^https:\/\/drive\.google\.com\/file\//.test(url);
+    if (isYtWatch || isDriveFile) {
+      // 批次 8 D10:三個 toggle 共用同一筆 ytSubtitle,合併成一次 sync.get(原本連讀 2-3 次)
       const { ytSubtitle = {} } = await browser.storage.sync.get('ytSubtitle');
-      // 沒設定過視為 true（與 DEFAULT_SETTINGS.ytSubtitle.autoTranslate 對齊）
-      $('yt-subtitle-toggle').checked = ytSubtitle.autoTranslate !== false;
-    }
-    // commit 5a':Drive 影片 viewer toggle 共用 ytSubtitle.autoTranslate
-    // （user 不需要為 Drive 多做設定，跟 YouTube 字幕用同一個開關）
-    if (/^https:\/\/drive\.google\.com\/file\//.test(url)) {
-      $('drive-subtitle-row').hidden = false;
-      const { ytSubtitle = {} } = await browser.storage.sync.get('ytSubtitle');
-      $('drive-subtitle-toggle').checked = ytSubtitle.autoTranslate !== false;
-    }
-    // commit 5c：雙語對照 toggle(YouTube + Drive 影片頁都顯示，共用 ytSubtitle.bilingualMode)
-    if (url.includes('youtube.com/watch') || /^https:\/\/drive\.google\.com\/file\//.test(url)) {
-      $('bilingual-row').hidden = false;
-      const { ytSubtitle = {} } = await browser.storage.sync.get('ytSubtitle');
-      $('bilingual-toggle').checked = ytSubtitle.bilingualMode === true;
+      if (isYtWatch) {
+        $('yt-subtitle-row').hidden = false;
+        // 沒設定過視為 true（與 DEFAULT_SETTINGS.ytSubtitle.autoTranslate 對齊）
+        $('yt-subtitle-toggle').checked = ytSubtitle.autoTranslate !== false;
+        // 字幕大小 scale（全平台統一,只在 YouTube 影片頁顯示）。預設 100。
+        $('yt-caption-size-row').hidden = false;
+        $('yt-caption-size').value = String(ytSubtitle.captionScale ?? 100);
+      }
+      // commit 5a':Drive 影片 viewer toggle 共用 ytSubtitle.autoTranslate
+      // （user 不需要為 Drive 多做設定，跟 YouTube 字幕用同一個開關）
+      if (isDriveFile) {
+        $('drive-subtitle-row').hidden = false;
+        $('drive-subtitle-toggle').checked = ytSubtitle.autoTranslate !== false;
+      }
+      // v2.0.85:字幕雙語對照 toggle 已移除——雙語與否跟隨「顯示模式」(displayMode),
+      // content-youtube.js / content-drive.js 由 displayMode === 'dual' 導出
     }
   } catch { /* 非影片頁面，保持 hidden */ }
 
@@ -327,17 +419,19 @@ $('translate-btn').addEventListener('click', async () => {
   const btn = $('translate-btn');
   if (btn.disabled) return;
   btn.disabled = true;
-  const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
-  if (!tab?.id) { btn.disabled = false; return; }
-  const mode = btn.dataset.mode;
-  statusEl.textContent = mode === 'restore' ? t('popup.status.restoring') : t('popup.status.translating');
+  // 批次 8 D9:tabs.query 移進 try——query reject(權限 / 內部頁異常)時原本落在
+  // try 區塊外,btn.disabled 永遠不會復原,按鈕永久鎖死
   try {
+    const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
+    if (!tab?.id) { btn.disabled = false; return; }
+    const mode = btn.dataset.mode;
+    statusEl.textContent = mode === 'restore' ? t('popup.status.restoring') : t('popup.status.translating');
     // v1.6.6: 讀 settings.popupButtonSlot 決定按鈕對應的 preset slot（預設 2 = Flash）
     // content.js handleTranslatePreset 自帶 toggle 行為（已翻譯 → 還原 / 翻譯中 → abort / 閒置 → 翻譯）
     const { popupButtonSlot } = await browser.storage.sync.get('popupButtonSlot');
     const slot = pickPopupSlot(popupButtonSlot);
     await browser.tabs.sendMessage(tab.id, { type: 'TRANSLATE_PRESET', payload: { slot } });
-    window.close();
+    closePopup();
   } catch (err) {
     statusEl.textContent = t('popup.status.cannotRun');
     statusEl.style.color = '#ff3b30';
@@ -349,12 +443,36 @@ $('auto').addEventListener('change', async (e) => {
   await browser.storage.sync.set({ autoTranslate: e.target.checked });
 });
 
+// 簡繁自動互轉 toggle:row 只在 target 為中文變體時顯示(其他 target 無互轉方向,
+// 顯示只會困惑);開啟後任何偵測為相反變體的頁面於載入 / SPA 導航時自動本地轉換
+function _updateAutoConvertZhRow(tl) {
+  const row = $('auto-convert-zh-row');
+  if (row) row.hidden = !(tl === 'zh-TW' || tl === 'zh-CN');
+}
+
+$('auto-convert-zh-toggle').addEventListener('change', async (e) => {
+  const enabled = e.target.checked;
+  try {
+    await browser.storage.sync.set({ autoConvertZh: enabled });
+  } catch (err) {
+    console.error('[shinkansen] autoConvertZh set failed', err);
+  }
+  // 立即對當前分頁生效:勾選 → 本頁跑本地轉換;取消 → 還原(僅當本頁是本地轉換結果)
+  try {
+    const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
+    if (tab?.id) {
+      await browser.tabs.sendMessage(tab.id, { type: 'SET_AUTO_CONVERT_ZH', payload: { enabled } }).catch(() => {});
+    }
+  } catch { /* 非可注入頁面，安靜忽略 */ }
+});
+
 // 翻譯目標語言切換 — 立刻寫 storage(content script 下一次翻譯讀新值生效;
 // 舊翻譯快取仍保留,使用者可手動清快取重新翻譯)。non-集合值 fallback DEFAULT
 // 避免損壞值寫進 storage。
 $('targetLanguage').addEventListener('change', async (e) => {
   const v = e.target.value;
   const tl = TARGET_LANGUAGES.includes(v) ? v : DEFAULT_SETTINGS.targetLanguage;
+  _updateAutoConvertZhRow(tl);  // 簡繁自動互轉 row 與 target 連動顯示
   try {
     await browser.storage.sync.set({ targetLanguage: tl });
   } catch (err) {
@@ -434,17 +552,18 @@ $('drive-subtitle-toggle').addEventListener('change', async (e) => {
   }
 });
 
-// commit 5c：雙語 toggle change handler（寫 ytSubtitle.bilingualMode 到 storage,YouTube
-// 跟 Drive 兩條路徑各自的 onChanged listener 自動反應；切換生效需 reload 影片頁）
-$('bilingual-toggle').addEventListener('change', async (e) => {
-  const bilingual = e.target.checked;
+// 字幕大小 scale change handler（寫 ytSubtitle.captionScale；content-youtube onChanged
+// 即時套用 overlay + iOS ::cue,不需 reload 影片頁）
+$('yt-caption-size').addEventListener('change', async (e) => {
+  const scale = parseInt(e.target.value, 10);
+  if (!Number.isFinite(scale)) return;
   try {
     const { ytSubtitle = {} } = await browser.storage.sync.get('ytSubtitle');
     await browser.storage.sync.set({
-      ytSubtitle: { ...ytSubtitle, bilingualMode: bilingual },
+      ytSubtitle: { ...ytSubtitle, captionScale: scale },
     });
   } catch (err) {
-    statusEl.textContent = t('popup.status.bilingualToggleFailed');
+    statusEl.textContent = t('popup.status.captionSizeFailed');
     statusEl.style.color = '#ff3b30';
   }
 });
@@ -462,7 +581,61 @@ $('options-btn').addEventListener('click', async() => {
 $('translate-doc-btn').addEventListener('click', async () => {
   const url = browser.runtime.getURL('translate-doc/index.html');
   await browser.tabs.create({ url });
-  window.close();
+  closePopup();
+});
+
+// ── 送到 Instapaper ──────────────────────────────────────
+// 在 popup 直接做 OAuth 簽章 + fetch（避開 iOS 背景 event page 掛起）：
+// 向 content 取目前頁面 HTML（含已就地替換的譯文）→ saveToInstapaper。
+function instapaperErrText(error) {
+  switch (error) {
+    case 'AUTH': return t('instapaper.failedAuth');
+    case 'NETWORK': return t('instapaper.failedNetwork');
+    default: return t('instapaper.failed');
+  }
+}
+
+$('send-to-instapaper-btn').addEventListener('click', async () => {
+  const btn = $('send-to-instapaper-btn');
+  btn.disabled = true;
+  statusEl.style.color = '#86868b';
+  statusEl.textContent = t('instapaper.sending');
+  try {
+    const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
+    if (!tab?.id) throw new Error('no active tab');
+    const page = await browser.tabs.sendMessage(tab.id, { type: 'EXTRACT_PAGE_HTML' });
+    if (!page?.ok || !page.url) throw new Error(page?.error || 'extract failed');
+    // 送出前向 background 要文章摘要。Gemini 呼叫 + usage 記帳集中在 background（與 Alt+I
+    // 路徑共用同一個 generateInstapaperSummary，單一資料源不 drift）。best-effort:background
+    // 依 instapaperSummaryEnabled + 是否有 Gemini key gate,回 '' 代表不附摘要,書籤照常送。
+    let description = '';
+    try {
+      // 摘要那步會多打一次 Gemini（數秒），顯示獨立狀態避免看起來像卡在「送出中」。
+      // 只讀 toggle 當「要不要顯示摘要中」的 UX 訊號,真正 gate（含 Gemini key）仍只在
+      // background;toggle 開但沒 key 時 background 會秒回 ''，狀態瞬間翻到送出中。
+      const { instapaperSummaryEnabled = true } = await browser.storage.sync.get(['instapaperSummaryEnabled']);
+      if (instapaperSummaryEnabled !== false) statusEl.textContent = t('instapaper.summarizing');
+      const sres = await browser.runtime.sendMessage({ type: 'SUMMARIZE_FOR_INSTAPAPER', payload: { text: page.text } });
+      if (sres?.ok && typeof sres.summary === 'string') description = sres.summary;
+    } catch (_) { /* 摘要失敗不擋送出 */ }
+    statusEl.textContent = t('instapaper.sending');
+    const { instapaperToken, instapaperTokenSecret } =
+      await browser.storage.sync.get(['instapaperToken', 'instapaperTokenSecret']);
+    const payload = buildInstapaperPayload({ url: page.url, html: page.html, title: page.title, description });
+    const r = await saveToInstapaper({ token: instapaperToken, tokenSecret: instapaperTokenSecret, payload });
+    if (r.ok) {
+      statusEl.textContent = t('instapaper.sent');
+      statusEl.style.color = '#34c759';
+    } else {
+      statusEl.textContent = instapaperErrText(r.error);
+      statusEl.style.color = '#ff3b30';
+    }
+  } catch (_) {
+    statusEl.textContent = t('instapaper.failed');
+    statusEl.style.color = '#ff3b30';
+  } finally {
+    btn.disabled = false;
+  }
 });
 
 // v1.6.23:popup 開著時 reactive sync ytSubtitle.autoTranslate（設定頁同步寫 storage 後立即反映）
@@ -474,8 +647,8 @@ browser.storage.onChanged.addListener((changes, area) => {
   const enabled = newVal.autoTranslate !== false;
   $('yt-subtitle-toggle').checked = enabled;
   $('drive-subtitle-toggle').checked = enabled;
-  // commit 5c:bilingualMode 同步
-  $('bilingual-toggle').checked = newVal.bilingualMode === true;
+  // 字幕大小 scale 同步
+  if (newVal.captionScale != null) $('yt-caption-size').value = String(newVal.captionScale);
 });
 
 // v1.0.3: 編輯譯文按鈕
@@ -520,6 +693,30 @@ $('clear-cache-yes').addEventListener('click', async () => {
   } else {
     statusEl.textContent = t('popup.status.cacheClearFailed', { error: resp?.error || t('common.errorUnknown') });
     statusEl.style.color = '#ff3b30';
+  }
+});
+
+// v2.0.71：累計費用「清除」——同 clear-cache 的 inline 確認 UI 模式（Firefox popup
+// 不能用 native confirm）。「清除」只寫 usageResetAt 顯示基準點（storage.local），
+// usage-db 紀錄一筆都不刪，options 用量明細分頁不受影響。
+$('clear-usage-btn').addEventListener('click', () => {
+  $('clear-usage-btn').hidden = true;
+  $('clear-usage-confirm').hidden = false;
+});
+
+$('clear-usage-no').addEventListener('click', () => {
+  $('clear-usage-confirm').hidden = true;
+  $('clear-usage-btn').hidden = false;
+});
+
+$('clear-usage-yes').addEventListener('click', async () => {
+  $('clear-usage-confirm').hidden = true;
+  $('clear-usage-btn').hidden = false;
+  try {
+    await browser.storage.local.set({ usageResetAt: Date.now() });
+    refreshUsageInfo();
+  } catch {
+    $('usage-info').textContent = t('popup.usage.unreadable');
   }
 });
 

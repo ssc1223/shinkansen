@@ -97,7 +97,117 @@
   <p class="lang-switch"><strong>繁體中文</strong> | <a href="release-notes.en.html">English</a></p>
 
   <h1>商店上架版本更新紀錄</h1>
-  <p class="subtitle">給 Chrome Web Store 與 Firefox Add-ons 使用者的更新摘要，只列出對使用者直接有感的功能變更與重要修正。完整的版本歷史（含每一個 patch 與技術細節）請見 GitHub <a href="https://github.com/jimmysu0309/shinkansen/blob/main/CHANGELOG.md" target="_blank" rel="noopener">CHANGELOG.md</a>。</p>
+  <p class="subtitle">給 Chrome Web Store、Firefox Add-ons 與 App Store（iOS / iPadOS Safari）使用者的更新摘要，只列出對使用者直接有感的功能變更與重要修正。完整的版本歷史（含每一個 patch 與技術細節）請見 GitHub <a href="https://github.com/jimmysu0309/shinkansen/blob/main/CHANGELOG.md" target="_blank" rel="noopener">CHANGELOG.md</a>。</p>
+
+  <h2>v2.3.0 <span class="release-date">2026-08-06 上架</span></h2>
+  <p class="release-meta">相對於上一個商店版本 v2.0.9</p>
+
+  <p class="lead">這版最大的新功能是「EPUB 電子書翻譯」，「翻譯文件」也擴充支援 TXT / Markdown / HTML；新增簡繁網頁轉換（免費），並累積大量翻譯品質與穩定性修正</p>
+
+  <ul>
+    <li><strong>新增「EPUB 電子書翻譯」（beta）</strong>：「翻譯文件」頁現在支援 .epub 電子書，整套設計圍繞「譯一本書最痛的問題：譯名跨章節漂移」——翻譯前逐章掃描全書抽出人名 / 地名 / 術語對照表，過目、編輯、鎖定後全書一致；可先翻一兩章驗品質再續翻；翻完可跑「譯後一致性掃描」揪出譯名漂移與術語表未遵守的段落，支援自動替換與就地修正；EPUB 檔下載可選單語譯文或雙語對照譯本；術語表可匯出 / 匯入，系列作續集可沿用前作譯名；新增「本文件額外翻譯指令」欄位，可針對單一文件下客製翻譯指示</li>
+
+    <li><strong>文件翻譯支援 TXT / Markdown / HTML</strong>：除了 PDF 與 EPUB，現在也能上傳 .txt / .md / .html 檔，術語表、譯後一致性掃描、預覽編輯、費用預估全部沿用，譯文輸出格式與原檔相同（Markdown 進 Markdown 出、程式碼區塊原樣保留）。另外，術語表匯入新增 CSV 兩欄簡表格式，外部整理的名詞對照表可直接匯入</li>
+
+    <li><strong>新增簡繁網頁轉換（免費）</strong>：簡中網頁自動翻成繁中（或繁中翻簡中），本機直接自動字詞轉換不送 AI 翻譯——速度更快、零 token 費用</li>
+
+    <li><strong>YouTube 字幕多項修正</strong>：youtube.com/live/ 形式的直播連結現在也能翻譯字幕；譯文不再把英文單字切成兩半顯示；台灣影片不再被 YouTube 的英文自動翻譯軌帶偏；目標設繁中時，簡中影片字幕不再多翻一次；雙語字幕改為跟隨顯示模式設定；自動字幕 AI 分句的時間軸與句子邊界修正；整體可靠性提升</li>
+
+    <li><strong>術語表修正與強化</strong>：「網域專用術語表」修復——先前填 example.com 但頁面實際在 www.example.com（或貼了完整網址）會比對不中，看起來像只有全域有效，現在自動容錯命中，既有設定不需重填；術語表一致化啟用時，「譯名（原文）」對照改為全頁只出現一次</li>
+
+    <li><strong>譯文編輯模式強化</strong>：新增浮動工具列（復原 / 完成）；貼上內容自動轉純文字，不再帶入外部樣式；並修正多項編輯狀態問題</li>
+
+    <li><strong>PDF 翻譯品質總修</strong>：版面偵測重構與多項渲染修正，表格與多欄版面的譯文覆蓋更精準</li>
+
+    <li><strong>大量翻譯品質與穩定性修正</strong>：譯文段數不符時先用序號標記自動二次對齊，大幅減少逐段重送；整段譯文被誤判「跟原文相同」而靜默丟棄的問題修復；前端框架站（The Verge 等）重繪把譯文打回原文的守護補強，並完整保留段內連結；含互動註腳的段落整段不翻、被行內程式碼包住的標題不翻、媒體型自訂元素翻譯後消失等偵測與注入修復；快速鍵「翻譯 / 還原」切換修復；嵌入式播放器誤翻計費修復；Gemini 模型清單更新，成效不彰的「API 配額管理」設定整項移除；另完成三輪全面 code review，收尾 84 條正確性與效能修復</li>
+  </ul>
+
+  <h2>v2.0.9 <span class="release-date">2026-07-09 上架</span></h2>
+  <p class="release-meta">相對於上一個商店版本 v2.0.0</p>
+
+  <p class="lead">這版以穩定性收斂為主軸，累積修復大量網頁翻譯、YouTube 字幕與雙語對照問題</p>
+
+  <ul>
+    <li><strong>YouTube 字幕多項修正</strong>：快速換影片時，上一支影片還在路上的字幕譯文不再寫進新影片；日文 / 韓文原文字幕在單語模式下譯文注入不進去的問題修正；影片頁長按懸浮按鈕的選單新增「啟動 / 關閉字幕翻譯」列，一鍵切換當前影片的字幕翻譯</li>
+
+    <li><strong>雙語對照修正</strong>：Google 搜尋等使用「反爬蟲翻轉」的頁面，譯文不再上下顛倒；譯文區塊不再把原段落的互動按鈕（例如「顯示更多」展開鈕）搬走，原文原封不動</li>
+
+    <li><strong>列印 / 存 PDF 時不再印出懸浮按鈕</strong>：先前列印網頁或存成 PDF 時，懸浮按鈕會被一起畫進輸出；這版列印時自動隱藏，螢幕顯示不受影響</li>
+
+    <li><strong>目標語言守門</strong>：翻譯目標設英文 / 德文等拉丁字母語言時，偶發收到中文譯文的段落改為保留原文，不再顯示與目標語言不符的文字；內部佔位符標記漏出顯示在畫面上的問題也一併修正</li>
+
+    <li><strong>其他修正</strong>：API Key 沒填或失效導致整頁翻譯全數失敗時，頁面不再被誤標成已翻譯（先前會殘留工具列紅點、快速鍵要按兩次才會重翻）；呼叫 Gemini 的 API 金鑰改以 request header 傳送、不再出現在網址中（Google 官方建議形式，更安全；翻譯行為與費用完全不變）；部分文章頁翻譯後一排小頭像或縮圖爆成滿版大圖的版面問題修正；隱藏（display:none）的內容不再被翻譯、白白消耗 token；SVG 圖內的連結不再導致整頁翻譯失敗；全新安裝時術語表顯示「關」卻自行執行的問題修正</li>
+  </ul>
+
+  <h2>v2.0.0 <span class="release-date">2026-06-23 上架</span></h2>
+  <p class="release-meta">相對於上一個商店版本 v1.10.42</p>
+
+  <p class="lead">這版兩大新功能是「懸浮按鈕」與「送到 Instapaper」；iOS / iPadOS Safari 版也即將登陸 App Store</p>
+
+  <ul>
+    <li><strong>新增「懸浮按鈕」</strong>：頁面邊緣常駐一顆可拖移的懸浮按鈕，點選即翻譯本頁、長按可切換翻譯引擎或叫出功能選單；全平台預設開啟，按鈕大小（小 / 中 / 大）與透明度可調</li>
+
+    <li><strong>新增「送到 Instapaper」</strong>：連結 Instapaper 帳號後，用工具列視窗按鈕或快速鍵即可把翻譯後的整篇文章一鍵存進你自己的 Instapaper（存的是中文譯文版，可附 AI 自動摘要），日後可重讀。不像一般稍後再讀工具只存網址、由伺服器重新抓取原文，Shinkansen 直接上傳翻譯後的內容</li>
+
+    <li><strong>iOS / iPadOS Safari 版即將登陸 App Store</strong>：iPhone / iPad 也能用 Shinkansen 整頁翻譯，目前送審中，敬請期待。提供「四指輕點」整頁翻譯手勢；App 首次開啟有引導流程可填 Gemini API Key、選預設翻譯方式（iOS 版不含 PDF 文件翻譯）</li>
+
+    <li><strong>多項網站翻譯與穩定性修正</strong>：累積修復 React／Next.js 文章站譯文錯位、RSS／XML feed 崩潰、論壇主貼文漏翻、長文最後一段翻不完等問題，翻譯失敗訊息也改為跟著介面語言走（8 語）</li>
+  </ul>
+
+  <h2>v1.10.42 <span class="release-date">2026-06-09 上架</span></h2>
+  <p class="release-meta">相對於上一個商店版本 v1.10.17</p>
+
+  <p class="lead">這版加強了 YouTube 字幕、自訂翻譯快速鍵、翻譯取消即時還原，以及多項網站翻譯與設定修正</p>
+
+  <ul>
+    <li><strong>新增「自訂翻譯快速鍵」</strong>：三組翻譯預設的快速鍵現在可以直接在設定頁「翻譯快速鍵」內錄製（點欄位後按下想要的組合鍵），全平台通用，特別解決 Safari / iPad 外接鍵盤沒有改鍵入口的問題</li>
+
+    <li><strong>取消翻譯改為「按下當下立即還原」</strong>：過去按快速鍵取消，要等正在進行的批次回完才真正還原原文（大批次加慢模型可能等數秒到十幾秒）；這版按下當下立即還原、立即可重新翻譯，快速連按也不再卡死</li>
+
+    <li><strong>YouTube 字幕多項改善</strong>：（1）新增「字幕大小」設定（100%–200%，工具列彈出視窗內，只在 YouTube 影片頁顯示，桌面與手機全螢幕都套用）；（2）行動版 m.youtube.com 現在也支援字幕翻譯；（3）修正自動字幕在人聲停頓的空檔字體突然暴增；（4）修正 iPhone / iPad 進入原生全螢幕後翻譯字幕消失（自動字幕與英文字幕都修）</li>
+
+    <li><strong>論壇主貼文漏翻修正</strong>：vBulletin / phpBB 等論壇把整段主文直接用粗體包住時，過去整段不會被翻譯（同一篇的引用區塊卻有翻），造成「同一篇有翻有沒翻」；這版修正後主文正常翻譯</li>
+
+    <li><strong>匯入設定不再遺失欄位</strong>：匯出再匯入設定時，自訂模型的思考強度、額外請求參數、術語表的獨立模型等欄位過去會被默默丟掉，這版補齊讓設定完整往返</li>
+
+    <li><strong>PDF 窄欄位譯文不再露出原文</strong>：PDF 表格中極窄的儲存格（數量 / 單位欄）過去白底遮罩尺寸算錯，導致原文沒被蓋、譯文疊在原文上；這版改為完整遮蓋</li>
+
+    <li><strong>費用計算對齊 Gemini 3 計費規則</strong>：Gemini 3 是推理模型，Google 會把「思考過程」也計入 output 費用；用量明細的費用計算同步補上思考 token，並對齊 Gemini 3 的生成參數（不再送對 Gemini 3 無效的 Top P / Top K，相關失效設定也已從設定頁移除）。日常預設模型（Flash Lite）的金額不受影響</li>
+  </ul>
+
+  <h2>v1.10.17 <span class="release-date">2026-06-02 上架</span></h2>
+  <p class="release-meta">相對於上一個商店版本 v1.10.11</p>
+
+  <p class="lead">這版集中在 X（Twitter）推文與 YouTube 影片／留言的翻譯穩定性與品質，並修正重翻時重複消耗額度、自訂模型逾時、以及匯出檔名時間錯誤等問題</p>
+
+  <ul>
+    <li><strong>X 推文翻譯穩定性修正</strong>：點開推文後譯文不再恢復成英文；捲動時新載入的推文不再漏翻，虛擬捲動把推文移出畫面再移回時也能自動接住重翻</li>
+
+    <li><strong>YouTube 影片翻譯品質修正（消除「二手翻譯」）</strong>：日文等外語影片過去偶爾被 YouTube 先自動轉成英文、再被翻成中文，品質比直接翻差；這版改為直接讀「當前正在播放」影片的原始語字幕，連續切換影片也不會抓到上一支影片的資料</li>
+
+    <li><strong>YouTube 留言漏翻與 emoji 修正</strong>：含 emoji 圖、時間戳連結的留言不再被整則跳過；emoji 翻譯後會保留、不再消失或跟中文黏在一起；留言區一次載入大量留言時零星漏翻的問題也一併修正</li>
+
+    <li><strong>重翻不再重複消耗額度</strong>：品牌名、人名等「譯文與原文相同」的段落過去不會被快取，每次重翻同一頁都要重打 API；這版修正後會正常快取，重翻更省額度</li>
+
+    <li><strong>自訂模型 API 逾時時間可調</strong>：新增「自訂模型 → 進階」的逾時設定（預設 15 秒，可調 5–600 秒），本機 LLM（如 Ollama）首次載入模型較慢時可調高，避免逾時失敗</li>
+
+    <li><strong>匯出檔名時間修正</strong>：匯出設定與匯出 Log 的檔名時間過去用世界協調時間（UTC），台灣使用者看到的時間比實際早 8 小時；這版改用本地時區</li>
+  </ul>
+
+  <h2>v1.10.11 <span class="release-date">2026-05-26 上架</span></h2>
+  <p class="release-meta">相對於上一個商店版本 v1.10.0</p>
+
+  <p class="lead">這版集中修復 X（Twitter）推文翻譯品質、Google 翻譯引擎注入問題、以及 Amazon 等外語購物網站的偵測涵蓋率</p>
+
+  <ul>
+    <li><strong>X 推文翻譯品質大幅提升（單語 + 雙語）</strong>：修復 11 個版本累積的結構性問題——推文內含 URL 連結、@mention、#hashtag、emoji 圖片、換行段落的複雜推文，譯文不再出現中間段落消失、文字黏在一起、引用推文多出灰底框等問題。點「顯示更多」展開截斷推文後，展開部分也會自動重翻。雙語對照模式下，整則推文現在只產生一個完整的翻譯區塊（之前會碎成 5-7 個小區塊且順序反轉）</li>
+
+    <li><strong>Google 翻譯引擎品質修正</strong>：兩項 Google MT 專屬修正——(1) Amazon 等網站的評論標題（含星星 icon + 文字的連結結構）不再被跳過；(2) CJK 翻譯結果跟 URL / @mention 之間不再黏在一起（自動補空格）；(3) emoji 圖片不再翻譯後重複出現兩張</li>
+
+    <li><strong>Amazon 等外語購物網站翻譯涵蓋率提升</strong>：(1) 產品推薦 carousel 卡片翻譯後，星等、徽章、價格不再消失；(2) 按鈕文字（「カートに入れる」「参考になった」等）現在也會翻譯；(3) 外語頁面的短文字 anchor、mixed-content label、比較表格按鈕等過去被偵測管線擋掉的 UI 元素，這版全面放寬</li>
+
+    <li><strong>YouTube 字幕三項修正</strong>：(1) 關閉 YouTube 翻譯功能後，原生字幕不再被隱藏（fix #51）；(2) API key 無效或額度用完時，字幕區會顯示錯誤提示（之前只停在「翻譯中⋯」）；(3) 工具列圖示的翻譯 badge 改為啟動翻譯時立即顯示，不再等翻譯完成後才出現</li>
+  </ul>
 
   <h2>v1.10.0 <span class="release-date">2026-05-20 上架</span></h2>
   <p class="release-meta">相對於上一個商店版本 v1.9.24</p>

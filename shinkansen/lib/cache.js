@@ -11,6 +11,7 @@ import { debugLog } from './logger.js';
 
 const KEY_PREFIX = 'tc_';
 const GLOSSARY_PREFIX = 'gloss_';   // v0.69: 術語表快取
+const SCAN_PREFIX = 'scanr_';       // v2.0.11: 一致性掃描譯名對照快取（EPUB）
 const VERSION_KEY = '__cacheVersion';
 
 // browser.storage.local 預設配額 10MB。保留 512KB 給非快取資料（設定、使用量統計、
@@ -93,11 +94,23 @@ async function hashText(text) {
 
 /**
  * 估算一個 storage entry 的大小（bytes）。
- * browser.storage.local 的計費方式是 JSON.stringify(key) + JSON.stringify(value)。
+ * browser.storage.local 的計費方式是 JSON.stringify(key) + JSON.stringify(value)，
+ * 且配額以 UTF-8 bytes 計——CJK 字元一個佔 3 bytes，不能用 string.length（UTF-16
+ * code unit 數）直接當 bytes，否則譯文以繁中為主的 entry 會低估 ~3 倍，
+ * evictOldest 一次多刪 ~2 倍的已付費快取、stats() 顯示值也失真。
+ * 單次遍歷近似（不跑 TextEncoder 省 allocation）：ASCII 1 byte、其餘 3 bytes。
  */
+function estimateUtf8Bytes(str) {
+  let bytes = 0;
+  for (let i = 0; i < str.length; i++) {
+    bytes += str.charCodeAt(i) > 0x7f ? 3 : 1;
+  }
+  return bytes;
+}
+
 function estimateEntrySize(key, value) {
   const valStr = typeof value === 'string' ? value : JSON.stringify(value);
-  return key.length + valStr.length;
+  return estimateUtf8Bytes(key) + estimateUtf8Bytes(valStr);
 }
 
 /**
@@ -140,7 +153,7 @@ async function evictOldest(targetBytes, preFetchedAll = null) {
   const all = preFetchedAll || await browser.storage.local.get(null);
   const cacheEntries = [];
   for (const [key, value] of Object.entries(all)) {
-    if (key.startsWith(KEY_PREFIX) || key.startsWith(GLOSSARY_PREFIX)) {
+    if (key.startsWith(KEY_PREFIX) || key.startsWith(GLOSSARY_PREFIX) || key.startsWith(SCAN_PREFIX)) {
       cacheEntries.push({
         key,
         size: estimateEntrySize(key, value),
@@ -152,18 +165,48 @@ async function evictOldest(targetBytes, preFetchedAll = null) {
   cacheEntries.sort((a, b) => a.t - b.t);
 
   let freed = 0;
-  const toRemove = [];
+  const candidates = []; // { key, size, t }——保留 t 以便 remove 前比對是否被 touch
   for (const entry of cacheEntries) {
     if (freed >= targetBytes) break;
-    toRemove.push(entry.key);
+    candidates.push(entry);
     freed += entry.size;
   }
 
-  if (toRemove.length > 0) {
-    await browser.storage.local.remove(toRemove);
-    debugLog('info', 'cache', 'LRU eviction', { removed: toRemove.length, freedKB: +(freed / 1024).toFixed(1) });
+  if (candidates.length === 0) {
+    return { removed: 0, freedBytes: 0 };
   }
-  return { removed: toRemove.length, freedBytes: freed };
+
+  // v1.10.39: 防 LRU 淘汰 race(code review 2026-06-09 H3)。
+  // 淘汰名單由本函式開頭的 get(null) 快照算出,但 snapshot 與下面 remove 之間,
+  // flushTouches(timestamp 寫回)或 setBatch(改寫譯文)可能把某候選 entry 的 t
+  // 更新成最新 → 它已不再是「最舊」,用 stale 快照淘汰會誤刪剛變最熱的 entry。
+  // remove 前重讀候選的當前值,只刪「t 仍與快照一致」(期間沒被 touch / 改寫)的。
+  // 誤刪後果僅是 cache miss(多打一次 API),但能避免就避免。
+  const candidateKeys = candidates.map(c => c.key);
+  let confirmed = candidateKeys;
+  let confirmedFreed = freed;
+  try {
+    const fresh = await browser.storage.local.get(candidateKeys);
+    confirmed = [];
+    confirmedFreed = 0;
+    for (const c of candidates) {
+      const cur = fresh[c.key];
+      if (cur == null) continue;                       // 期間已被別處刪掉
+      if (extractTimestamp(cur) !== c.t) continue;     // 期間被 touch / 改寫 → 不是最舊,跳過
+      confirmed.push(c.key);
+      confirmedFreed += c.size;
+    }
+  } catch (_) {
+    // 重讀失敗 → 退回用快照名單(維持原行為,寧可淘汰也不要 quota 爆掉)
+    confirmed = candidateKeys;
+    confirmedFreed = freed;
+  }
+
+  if (confirmed.length > 0) {
+    await browser.storage.local.remove(confirmed);
+    debugLog('info', 'cache', 'LRU eviction', { removed: confirmed.length, freedKB: +(confirmedFreed / 1024).toFixed(1) });
+  }
+  return { removed: confirmed.length, freedBytes: confirmedFreed };
 }
 
 /**
@@ -183,7 +226,7 @@ async function getCacheUsageBytes() {
   const all = await browser.storage.local.get(null);
   let bytes = 0;
   for (const [key, value] of Object.entries(all)) {
-    if (key.startsWith(KEY_PREFIX) || key.startsWith(GLOSSARY_PREFIX)) {
+    if (key.startsWith(KEY_PREFIX) || key.startsWith(GLOSSARY_PREFIX) || key.startsWith(SCAN_PREFIX)) {
       bytes += estimateEntrySize(key, value);
     }
   }
@@ -364,6 +407,26 @@ export async function setGlossary(inputHash, glossary, suffix = '') {
   await safeStorageSet({ [key]: { v: glossary, t: Date.now() } });
 }
 
+/**
+ * v2.0.11: 一致性掃描譯名對照快取（同 payload 同結果，續翻後重掃不重複計費）。
+ * 內容指紋為 key，跟 gloss_ 同 { v, t } 格式、同 LRU 淘汰池。
+ */
+export async function getScanRenderings(inputHash) {
+  const key = SCAN_PREFIX + inputHash;
+  const stored = await browser.storage.local.get(key);
+  const entry = stored[key];
+  if (entry && typeof entry === 'object' && Array.isArray(entry.v)) {
+    safeStorageSet({ [key]: { v: entry.v, t: Date.now() } }).catch(() => {});
+    return entry.v;
+  }
+  return null;
+}
+
+export async function setScanRenderings(inputHash, renderings) {
+  const key = SCAN_PREFIX + inputHash;
+  await safeStorageSet({ [key]: { v: renderings, t: Date.now() } });
+}
+
 /** v0.69: 計算文字 SHA-1（匯出給 background 使用）。 */
 export { hashText };
 
@@ -372,7 +435,7 @@ export { hashText };
  */
 export async function clearAll() {
   const all = await browser.storage.local.get(null);
-  const toRemove = Object.keys(all).filter(k => k.startsWith(KEY_PREFIX) || k.startsWith(GLOSSARY_PREFIX));
+  const toRemove = Object.keys(all).filter(k => k.startsWith(KEY_PREFIX) || k.startsWith(GLOSSARY_PREFIX) || k.startsWith(SCAN_PREFIX));
   if (toRemove.length) {
     await browser.storage.local.remove(toRemove);
   }
@@ -408,14 +471,22 @@ export async function stats() {
  * W7:清除所有文件翻譯快取(cacheTag '_doc' 的 entries),不影響網頁 / 字幕 /
  * 術語表快取。translate-doc/settings.html「進階」區塊用。
  *
- * cache key 結構:tc_<sha1>_<glossarySuffix>_doc_m<model>
- * 用 regex `/_doc(_m|$)/` 比對,精準分出文件路徑寫的 entries
+ * cache key 結構（見 background.js buildCacheKeySuffix）:
+ *   tc_<sha1(40hex)> + cacheTag（'_doc' / '_oc_doc'）+ 可選 '_g<hash>' + 可選 '_b<hash>'
+ *   + '_m<model>' + 可選 '_lang<tl>' + 可選 '_t<temp>'
+ * cacheTag 緊接在 sha1 之後，用錨定 regex 比對——不可用 /_doc(_m|$)/ 這種
+ * 「_doc 後面必接 _m」的假設：forbiddenTerms / glossary 非空時 '_doc' 後接的是
+ * '_b' / '_g'，會整批漏清（zh-TW 預設就有 26 條 forbiddenTerms，等於預設使用者
+ * 按「清除文件翻譯記憶」實際清 0 筆）。
  *
  * @returns {Promise<number>} 清除的 entry 數
  */
 export async function clearDocTranslationCache() {
   const all = await browser.storage.local.get(null);
-  const docKeys = Object.keys(all).filter((k) => k.startsWith(KEY_PREFIX) && /_doc(_m|$)/.test(k));
+  // v2.0.11: bookgloss_ 是 EPUB 全書術語表持久化 key(translate-doc 頁寫入)，
+  // 屬文件翻譯 cache 範疇，「清除文件翻譯快取」一併清
+  const docKeys = Object.keys(all).filter((k) =>
+    /^tc_[0-9a-f]{40}(?:_oc)?_doc(?:_|$)/.test(k) || k.startsWith('bookgloss_'));
   if (docKeys.length > 0) {
     await browser.storage.local.remove(docKeys);
   }

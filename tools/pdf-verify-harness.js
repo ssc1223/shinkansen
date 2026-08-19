@@ -5,7 +5,7 @@
 //   - 改 PDF 路徑(layout-analyzer / pdf-renderer / pdf-engine / translate-doc)後,
 //     CLAUDE.md 規定必走 self-verify(harness --translate + Read 譯文 PDF + Plano regression)
 //   - 本 harness 把整套 reference PDF 一次跑完,輸出集中在
-//     `.playwright-mcp/pdf-verify/<name>/translated.pdf` + `page-{i}.png`,
+//     `docs/excluded/test pdf/<日期> test pdf output/<name>/translated.pdf` + `page-{i}.png`,
 //     人/Claude 一次 Read 全部譯文 PDF,不必逐個 PDF 重跑 harness
 //
 // 不取代視覺驗收!只省「準備 verification material」的時間,
@@ -19,9 +19,9 @@
 //   SHINKANSEN_HEADED=1 npm run pdf-verify # 顯示 chromium 視窗 debug
 //
 // 輸出:
-//   .playwright-mcp/pdf-verify/<name>/translated.pdf       下載的譯文 PDF(ground truth)
-//   .playwright-mcp/pdf-verify/<name>/page-{i}.png         reader canvas 截圖(輔助)
-//   .playwright-mcp/pdf-verify/MANIFEST.md                 列出全部待驗收路徑 + 重點檢查項目
+//   docs/excluded/test pdf/<YYYY-MM-DD> test pdf output/<name>/translated.pdf  譯文 PDF(ground truth)
+//   docs/excluded/test pdf/<YYYY-MM-DD> test pdf output/<name>/page-{i}.png     reader canvas 截圖(輔助)
+//   docs/excluded/test pdf/<YYYY-MM-DD> test pdf output/MANIFEST.md             待驗收清單
 //
 // 前置:
 //   ~/.shinkansen-test-key 必須存在(40 chars Gemini key,chmod 600,不進 repo)
@@ -39,7 +39,11 @@ const __dirname = path.dirname(__filename);
 const REPO_ROOT = path.resolve(__dirname, '..');
 const EXT_PATH = path.join(REPO_ROOT, 'shinkansen');
 const PDF_DIR = path.join(REPO_ROOT, 'docs/excluded/test pdf');
-const OUT_ROOT = path.join(REPO_ROOT, '.playwright-mcp/pdf-verify');
+// 輸出到測試 PDF 同層的日期目錄(2026-08-03 Jimmy 指定慣例:測試譯文輸出一律放
+// `docs/excluded/test pdf/<YYYY-MM-DD> test pdf output/`,同日多次執行覆寫同目錄)。
+// docs/excluded 整層 .gitignore,不入 repo
+const RUN_DATE = new Date().toISOString().slice(0, 10);
+const OUT_ROOT = path.join(PDF_DIR, `${RUN_DATE} test pdf output`);
 
 // Default reference set:歷史翻車過或結構代表性的 case(CLAUDE.md / v1.8.46 紅字)
 //   - Plano:    layout-analyzer 改後字身被切第二層 bug(pdf-renderer mask 順序)
@@ -176,6 +180,11 @@ async function processOnePdf(context, extensionId, pdfFilename, outDir) {
     // 點翻譯按鈕,等 stage-reader 顯示(reader 模式 = 翻譯完成)
     await page.click('#translate-btn');
     await page.waitForSelector('#stage-reader:not([hidden])', { timeout: TRANSLATE_TIMEOUT_MS });
+
+    // review G5:reader 改可視區 lazy render,離區頁 canvas 沒 bitmap。
+    // 批次驗收要全書 raster → 先呼叫 reader 的全量 render hook
+    await page.waitForFunction(() => typeof window.__skReaderRenderAll === 'function', { timeout: 30_000 });
+    await page.evaluate(() => window.__skReaderRenderAll());
 
     // 等所有譯文 canvas render 完成(reader.js 寫好 dataset.baseHeight 才能信)
     await page.waitForFunction(

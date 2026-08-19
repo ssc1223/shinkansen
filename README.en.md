@@ -6,17 +6,17 @@ A fast, privacy-first translation extension for web pages and YouTube subtitles.
 
 The name *Shinkansen* (新幹線, "bullet train") evokes a fast, smooth, frictionless reading experience.
 
-> [Install from Chrome Web Store](https://chromewebstore.google.com/detail/shinkansen/pnhmlecoofeoofajcjenndnimhbodhlg) · [Install from Firefox Add-ons](https://addons.mozilla.org/firefox/addon/shinkansen/) · [Download latest zip](https://github.com/jimmysu0309/shinkansen/releases/latest) · See the [project page](https://jimmysu0309.github.io/shinkansen/) for install guide and product overview · [Release notes](https://jimmysu0309.github.io/shinkansen/release-notes.en.html)
+> [Install from Chrome Web Store](https://chromewebstore.google.com/detail/shinkansen/pnhmlecoofeoofajcjenndnimhbodhlg) · [Install from Firefox Add-ons](https://addons.mozilla.org/firefox/addon/shinkansen/) · [Install from Mac App Store](https://apps.apple.com/tw/app/shinkansen-translator/id6768586680) · [Download latest zip](https://github.com/jimmysu0309/shinkansen/releases/latest) · See the [project page](https://jimmysu0309.github.io/shinkansen/) for install guide and product overview · [Release notes](https://jimmysu0309.github.io/shinkansen/release-notes.en.html)
 
 ## Recent major updates
 
-- Added **Multi-language support** — translate into 8 languages (Traditional Chinese / Simplified Chinese / English / Japanese / Korean / Spanish / French / German); the extension UI is also available in all 8 languages.
-- Added **Instant Translation** — see the page start turning Chinese within 1 second of pressing translate (Gemini only).
-- Added **Bilingual mode** — original text and translation shown side by side.
-- Added **Custom AI models** — bring your own OpenRouter / Claude / local Ollama, etc.
-- Added **AI subtitle re-segmentation** — YouTube auto-generated captions are re-segmented by AI for more natural Chinese subtitles.
-- Added **Blocked-word list** — explicitly tell the AI model to avoid words you don't want appearing in the translation.
-- Added **Translate opening only** — preview the first N paragraphs to save tokens.
+- Added **EPUB book translation** (beta) — drop a whole ebook into the "Translate document" page; a book-wide glossary and a post-translation consistency scan keep name translations consistent across chapters, you can translate a chapter or two first to check quality, and the translated book can be downloaded in monolingual or bilingual format.
+- Added **TXT / Markdown / HTML file** translation — translate plain-text or Markdown novels and saved web pages in one go; the translated file keeps the same format as the original. Glossary import also **accepts CSV** (two columns: source,translation), so externally curated term lists can be imported directly.
+- Added **Simplified ↔ Traditional Chinese page conversion (free)** — Simplified (or Traditional) Chinese content is converted locally with built-in dictionaries: no API key, no API calls, works offline.
+- **Several YouTube subtitle fixes** — youtube.com/live/ live-stream links now get subtitle translation, English words are no longer split in half, Taiwanese videos are no longer thrown off by the auto-translated English track, and overall reliability is improved.
+- **Greatly improved PDF translation quality** — layout detection and rendering for tables and spec sheets have been thoroughly reworked; translated PDFs stay much closer to the original layout.
+- **A large batch of translation-quality and stability fixes** — site-specific glossaries now apply correctly, translation editing is improved, and translations are better protected against front-end frameworks reverting them.
+- **iOS / iPadOS version** is coming soon to the App Store — stay tuned.
 
 ## Why Shinkansen
 
@@ -28,24 +28,27 @@ We stress-tested Shinkansen on the English Wikipedia article for *Taiwan* (over 
 
 ## Features
 
-- **Multi-language target + multi-language UI**: translate into 8 languages — Traditional Chinese (Taiwan) / Simplified Chinese (China) / English / Japanese / Korean / Spanish / French / German. Pick in the "Translate to" dropdown inside the toolbar popup; all translation paths (web / PDF / YouTube subtitles) share this setting. Popup, settings page, web-translation progress toast, and PDF document reader UI are all available in all 8 UI languages — independent picker, defaults to your browser locale.
+- **Multi-language target + multi-language UI**: translate into 8 languages — Traditional Chinese (Taiwan) / Simplified Chinese (China) / English / Japanese / Korean / Spanish / French / German. Pick in the "Translate to" dropdown inside the toolbar icon menu; all translation paths (web / PDF / YouTube subtitles) share this setting. The toolbar icon menu, settings page, web-translation progress toast, and PDF document reader UI are all available in all 8 UI languages — independent picker, defaults to your browser locale.
 - **Instant Translation**: see the page start turning into your target language within 1 second of pressing translate — no waiting for the entire batch to come back before any text is updated (Gemini only).
 - **Preserves page layout**: text is replaced in place; fonts, sizes, colors, and links are kept; bold and italics survive untouched.
-- **Single-language overlay / bilingual side-by-side dual mode**: one-click switch in the popup. *Overlay* replaces text in place; *bilingual* keeps the original and appends the translation as a new paragraph. Bilingual mode offers four visual treatments (subtle background tint / left border / dotted underline / none) for the translated paragraphs.
+- **Single-language overlay / bilingual side-by-side dual mode**: one-click switch in the toolbar icon menu. *Overlay* replaces text in place; *bilingual* keeps the original and appends the translation as a new paragraph. Bilingual mode offers four visual treatments (subtle background tint / left border / dotted underline / none) for the translated paragraphs.
 - **Three translation engines**: Gemini (AI translation, best quality, requires API key) + Google Translate (unofficial free endpoint, no API key, faster) + Custom model — switch freely depending on what you're reading.
+- **Free Chinese variant conversion**: when your target language is Traditional or Simplified Chinese, content in the opposite variant is converted locally with built-in OpenCC dictionaries — no API key, no API calls, works offline, with phrase-level Taiwan-convention mapping (软件→軟體, 视频→影片, 内存→記憶體). Enable "Auto-convert Chinese variants" in the toolbar icon menu — the current page converts immediately when you check it (and reverts when you uncheck it), and future pages convert automatically on load; on mixed-language pages only the Chinese paragraphs use the free conversion while the rest go through your chosen engine.
 - **Custom AI models**: any OpenAI-compatible endpoint — OpenRouter / Together / Groq / local Ollama, hundreds of models.
 - **Three customizable shortcuts**: `Alt+A` / `Alt+S` / `Alt+D` each bound to its own translation preset (engine + model + label). Pick the right engine per content type with one keystroke (e.g., Flash for reading material, Google MT for casual browsing). Details in "Translation shortcuts and presets" below.
+- **Floating button**: a floating button pinned to the left/right edge of the page — tap to translate the page, long-press to switch translation engine or open the menu; on by default on all platforms, with adjustable button size and opacity.
+- **Document translation (PDF / EPUB / TXT / Markdown / HTML)**: upload a file and translate the whole thing — PDFs keep the original layout in the translated output; EPUB supports a book-wide glossary (consistent name translations across chapters), per-chapter translation, preview editing, and bilingual output; TXT / Markdown / HTML files reuse the same chapter pipeline, and the translated file keeps the same format as the original. Details in "Document translation" below.
 - **YouTube subtitle translation**: detects YouTube captions and replaces them in real time with Traditional Chinese; styling matches the native YouTube subtitle look. Details in "YouTube subtitle translation" below.
-- **Bilingual subtitles**: one-click toggle in the popup makes subtitles show two lines simultaneously — English on top, Chinese below. Useful for listening practice or proofreading. YouTube and Google Drive videos share the same setting. Details in "Bilingual subtitles" below.
+- **Bilingual subtitles**: when the display mode is set to "Bilingual", subtitles show two lines simultaneously — English on top, Chinese below. Useful for listening practice or proofreading. Applies to both YouTube and Google Drive videos. Details in "Bilingual subtitles" below.
 - **YouTube AI re-segmentation** (ASR-only): YouTube auto-generated captions arrive as broken word fragments without punctuation. Shinkansen sends the whole batch to AI for semantic re-segmentation, then translates — Chinese subtitles go from "shattered words" to "complete sentences". Details in "AI smart segmentation" below.
 - **Custom glossary**: pin specific terms to your preferred translations so proper nouns are always rendered consistently. Two layers (global + domain-specific) where domain rules override global. Details in "Custom glossary" below.
 - **Blocked-word list**: an editable list of words you don't want in the translation. Works for any target language — write your own substitution pairs (defaults to empty for most targets; ships with 25 entries for Traditional Chinese targets). Injected as a high-prominence block at the end of the system prompt. Details in "Blocked-word list" below.
 - **Translate opening only**: preview the first few paragraphs before deciding whether to translate the whole article. Saves tokens. Details in "Translate opening only" below.
 - **Full-text glossary consistency** (off by default): especially useful for long articles with many proper nouns. Automatically ensures the same name or term is translated consistently throughout. Details in "Glossary consistency" below.
 - **Translation cache + live cost report**: two-layer caching (local cache + Gemini implicit cache). After translation, the toast shows live cache hit rate and actual cost saved. Details in "Translation cache and cost calculation" below.
-- **API quota management**: Shinkansen manages your Gemini API usage in the background, so large pages don't get cut off mid-translation by Google, and you get an early warning before hitting the daily quota — no failure surprises. For most cases, picking the right Tier is all you need.
 - **Usage tracking**: every translation's token count and cost is logged, with charts and CSV export.
 - **Edit translations**: after a page is translated, you can directly edit the translated text on the page — handy for cleaning up before printing PDFs or letting Readwise Reader pick it up.
+- **Send to Instapaper**: save the whole translated article to your own Instapaper account via the Instapaper API — what gets saved is the translation you see, not the original. Unlike Instapaper's standard save (which stores the URL and lets the server re-fetch the original article), Shinkansen uploads the translated content directly, so you can re-read the translated version later.
 - **Cross-tab translation continuity**: after triggering translation in tab A, opening a link from A in a new tab B (with Cmd-click on Mac / Ctrl-click on Windows / `target="_blank"` / `window.open`) automatically translates B with the same preset. Multi-level: B opens C, C inherits too.
 - **Auto-translate specific sites**: add domains to a whitelist in settings; pages on those sites auto-translate on load (the toast displays an `[Auto]` prefix to indicate the whitelist trigger).
 - **Restore original**: press the same shortcut to switch back to the original — toggle anytime.
@@ -76,7 +79,7 @@ Go to the [Firefox Add-ons listing](https://addons.mozilla.org/firefox/addon/shi
 1. Get a Gemini API key — see the [API key setup guide](docs/API-KEY-SETUP.en.md) for step-by-step instructions
 2. Click the Shinkansen icon in the toolbar → "Settings"
 3. Paste your Gemini API key
-4. Default model is `gemini-3-flash-preview`, Service Tier `DEFAULT`
+4. Default model is `gemini-3.1-flash-lite`, Service Tier `DEFAULT`
 5. Other parameters (temperature, paragraphs per batch, character budget, etc.) can be tweaked as needed
 
 ## Usage
@@ -92,8 +95,8 @@ Go to the [Firefox Add-ons listing](https://addons.mozilla.org/firefox/addon/shi
 - **YouTube subtitle translation**: open a video with English captions, make sure CC is on, click the toolbar icon → toggle "YouTube subtitle translation" on
 - **Auto-translate sites**: add domains to the "Auto-translate sites" list in settings; pages on those sites translate on load (toast shows the `[Auto]` prefix)
 - **Custom glossary**: add term mappings in the "Glossary" tab; translations are forced to use your preferred renderings
-- **Glossary consistency**: enable it from the popup or settings page; long-form translations build a glossary first to keep proper nouns consistent
-- **Edit translations**: after translating, click "Edit translations" in the popup to directly edit the translated text on the page
+- **Glossary consistency**: enable it from the toolbar icon menu or settings page; long-form translations build a glossary first to keep proper nouns consistent
+- **Edit translations**: after translating, click "Edit translations" in the toolbar icon menu to directly edit the translated text on the page. While editing, a floating toolbar at the bottom of the page lets you undo changes paragraph by paragraph or finish editing
 
 ## Translation shortcuts and presets
 
@@ -105,7 +108,7 @@ Shinkansen offers three customizable translation presets, each bound to a shortc
 | `Alt+S` / `Option+S` | Gemini | Flash ($0.50 / $3.00) | Daily reading, best quality / value |
 | `Alt+D` / `Option+D` | Google Translate | — | No API key needed, fast, free |
 
-**All customizable in the "Translation shortcuts" section of settings**: each preset's engine (Gemini / Google Translate), model (Flash Lite / Flash / Pro / custom), and display label can be changed. The keybindings themselves are configured at `chrome://extensions/shortcuts`.
+**All customizable in the "Translation shortcuts" section of settings**: each preset's engine (Gemini / Google Translate), model (Flash Lite / Flash / Pro / custom), and display label can be changed. The keybindings themselves can also be customized right there — click a preset's key field and press the combination you want (on Chrome use `⌥ Option` or `⌃ Control`; on Safari — Mac / iPad / iPhone — use `⌃ Control`, since iOS Safari doesn't pass `⌥` / `⌘` to web pages; the settings page shows the available keys per browser automatically; press `ESC` to cancel). Works with iPad external keyboards too. You can also adjust the built-in default keys at `chrome://extensions/shortcuts` (Chrome) or `about:addons` (Firefox).
 
 **Unified cancel / restore behavior**:
 - Press any shortcut while translating → cancel immediately
@@ -129,17 +132,49 @@ When to use it: bulk browsing of English forums, news, product pages, etc. — c
 
 Google Docs renders text via Canvas, so generic web translation extensions can't access the content. Shinkansen detects Google Docs and uses the following flow:
 
-1. On a Google Docs editing page, press `Option+S` (or click "Translate this page" in the popup)
+1. On a Google Docs editing page, press `Option+S` (or click "Translate this page" in the toolbar icon menu)
 2. Shinkansen opens the same document in a new tab in "mobile reading view" (mobilebasic)
 3. Once the new tab loads, translation starts automatically — no second keystroke needed
 
 Notes: you must have view access to the document. Mobile reading view is read-only and does not affect the original document.
 
+## Document translation (PDF / EPUB / TXT / Markdown / HTML)
+
+Click the Shinkansen toolbar icon → "Translate document" to open a dedicated tab, then drop a PDF, EPUB, TXT, Markdown, or HTML file onto the page to translate the whole file. Files are parsed entirely in your browser — nothing is uploaded anywhere except the text sent to the translation engine.
+
+**PDF translation**:
+
+- **Layout preserved**: the PDF layout is analyzed to rebuild paragraphs (columns, tables, lists, captions), and the translation is rendered at the original positions
+- **Online reader**: side-by-side original / translation view with synchronized scrolling
+- **Download translated PDF**: the translation is written directly onto the original page layout (with an embedded CJK font); downloads as `<filename>-shinkansen.pdf` for offline reading or archiving
+- **Limits**: 50 pages / 10 MB; scanned-image PDFs (OCR required) and encrypted PDFs are not supported
+
+**EPUB book translation** (beta):
+
+- **Book-wide glossary**: before translating, the whole book is scanned to extract a glossary of names / places / terms (including nicknames, short forms, and standalone-surname variants); review and edit it, then it stays frozen for the entire book so translated names remain consistent across chapters. Export / import as JSON, or import an externally curated CSV (two columns: source,translation; header rows and quoted fields are tolerated) — reuse a previous book's glossary for sequels
+- **Per-chapter translation**: after parsing, a chapter list shows word counts and estimated cost per chapter; translate a chapter or two to check quality before continuing — finished chapters hit the cache and are never billed again
+- **Post-translation consistency scan**: after each round, drift ("same source term, multiple translations") is detected automatically; unify with one click and feed the fix back into the glossary
+- **Preview and editing**: per-chapter and whole-book preview, click-to-edit paragraphs, search & replace, original-text comparison view
+- **Automatic session saving**: translation progress, glossary, and accumulated cost are saved locally as a bundle; closing and reopening the page restores everything, and sessions can be exported to a file and imported on another computer
+- **Translated book download**: the translation is written back into the original book structure (CSS / images / fonts and untranslated chapters preserved as-is), in monolingual or bilingual format; 100 MB limit, DRM-protected books are rejected
+
+**TXT / Markdown / HTML file translation**:
+
+- **Same pipeline as EPUB**: book-wide glossary, post-translation consistency scan, preview editing, automatic session saving, and cost estimates all carry over
+- **TXT**: translated paragraph by paragraph (split on blank lines); blank lines and separators are preserved as-is
+- **Markdown**: split into chapters by headings (`#` / `##`) with the same chapter checklist as EPUB; headings, lists, quotes, and other markup are preserved, and code blocks are passed through untranslated
+- **HTML**: saved web pages (`.htm` / `.html`) reuse the EPUB chapter serialization engine — inline bold / italic / link markup is preserved, and `<script>` / styles pass through untouched
+- **Output format matches the input**: txt in, txt out; Markdown in, Markdown out; HTML in, HTML out — downloads as `<filename>-shinkansen.<ext>`
+
+Document translation shares the same translation cache and usage tracking as web translation. The "Translation settings" dialog also lets you set the batch size and a per-document extra prompt (e.g., "this is a 19th-century novel — keep the tone classical").
+
 ## YouTube subtitle translation
 
-Open a YouTube video with English captions, make sure CC is on, click the Shinkansen toolbar icon — the popup will show a "YouTube subtitle translation" toggle. Turn it on. Captions are progressively replaced with Traditional Chinese without affecting playback; styling matches native YouTube captions exactly.
+Open a YouTube video with English captions, make sure CC is on, click the Shinkansen toolbar icon — the menu will show a "YouTube subtitle translation" toggle. Turn it on. Captions are progressively replaced with Traditional Chinese without affecting playback; styling matches native YouTube captions exactly.
 
 If you watch a lot of English YouTube content, enable auto-translate in the "YouTube subtitles" tab in settings — translation will start automatically whenever you open a video, no manual toggling.
+
+On YouTube video pages, the toolbar icon menu shows a "Caption size" dropdown to enlarge the translated captions (100%–200%). It works on both desktop and mobile; on iPhone / iPad it also scales the captions shown by the iOS system player in fullscreen
 
 ### AI smart segmentation (ASR-only)
 
@@ -151,12 +186,13 @@ Shinkansen has a dedicated pipeline for ASR captions:
 - **Default "hybrid mode"**: a fast local heuristic shows segmented captions immediately (subsecond, no waiting), while AI segmentation runs in the background and replaces them with the polished version when ready — best of both worlds.
 - **Stable subtitle overlay**: Shinkansen's own overlay completely bypasses YouTube's native caption-segment rendering (which causes "word-by-word popup" behavior); whole sentences appear and disappear cleanly. Auto-shifts up to avoid the progress bar when the controls appear.
 - **Toggleable**: if you only want minimum latency with YouTube's original segmentation, uncheck "AI segmentation mode" in the "YouTube subtitles" tab.
+- **Automatically disabled with the Google Translate engine**: AI segmentation needs an LLM, which would call Gemini and incur cost. When the free engine is selected, YouTube's original segmentation is always used — your API key is never touched behind your back.
 
 Human-uploaded captions (professional / community-contributed) are unaffected by this setting; they continue using the original sentence-by-sentence translation pipeline.
 
 ### Bilingual subtitles
 
-Click the Shinkansen toolbar icon, toggle "Bilingual subtitles" on in the popup. Subtitles will then show both original and translation simultaneously (English on top, Chinese below). Off shows Chinese only (default).
+Subtitle bilingual display follows the display mode setting: click the Shinkansen toolbar icon and pick the "Bilingual" display mode — subtitles will then show both original and translation simultaneously (English on top, Chinese below). The "Replace" mode (default) shows Chinese only. Page translation and subtitles share the same display mode, no separate setting needed.
 
 Best for:
 - **Listening practice**: glance at the original when you can't catch a word
@@ -164,8 +200,8 @@ Best for:
 - **Language learning**: use subtitles as bilingual study material
 
 Implementation notes:
-- **YouTube and Google Drive videos share the same setting** (toggling once switches both)
-- **Live toggle**: switching during playback takes effect immediately, no reload
+- **YouTube and Google Drive videos share the same display mode** (switching to Bilingual affects both)
+- **Live switch**: changing the mode during playback takes effect immediately, no reload
 - **Compatible with AI segmentation**: bilingual subtitles work cleanly on AI-segmented full sentences — full English sentence + full Chinese sentence on two lines
 
 ### Cost
@@ -220,7 +256,7 @@ In addition to Gemini and Google Translate, you can connect one OpenAI-compatibl
    - **Base URL**: e.g., `https://openrouter.ai/api/v1` (Shinkansen automatically appends `/chat/completions`)
    - **Model ID**: e.g., `anthropic/claude-sonnet-4-5` (OpenRouter format is `provider/model`)
    - **API Key**: the Bearer token for that provider; click "Test" to verify connectivity instantly (~1 token cost)
-3. Optional: translation prompt (leave blank = use the built-in compact default, identical to Gemini's) / temperature / model pricing input & output rates (USD per 1M tokens; 0 = don't display cost)
+3. Optional: translation prompt (leave blank = use the built-in compact default, identical to Gemini's) / temperature (leave blank = omit the parameter entirely, for reasoning models that only accept their own default) / model pricing input & output rates (USD per 1M tokens; 0 = don't display cost)
 4. Save
 5. In the "General settings" tab → "Translation shortcuts", change any preset's engine to "Custom model"
 6. Triggering that preset's shortcut now routes through your custom endpoint
@@ -231,7 +267,7 @@ In addition to Gemini and Google Translate, you can connect one OpenAI-compatibl
 - **Shared blocked-word list and custom glossary**: settings from those two tabs are auto-injected into the prompt end; custom models inherit them. Edit once, both engines apply.
 - **Cache partitioning**: the cache key includes a base URL hash — different endpoints with the same model name don't pollute each other
 - **API key not synced**: `customProvider.apiKey` lives only in your local browser — not synced across devices, not included in JSON export
-- **No rate limiter**: OpenRouter and friends handle quotas themselves; 429 retry-with-backoff is built in
+- **429 retry with backoff built in**: when a provider returns 429 (quota limit), requests are automatically retried with backoff
 - **Strong segment markers** (on by default): local quantized models (e.g. gemma-4 quantized) tend to mistranslate the compact `«1» «2»` segment markers as natural language ("N1, N2") and leak them into the output. With this on, multi-segment batches use `<<<SHINKANSEN_SEG-N>>>` instead — weak models don't mistranslate it. Cost: about 7 extra tokens per segment. Commercial APIs (OpenRouter / Groq, etc.) typically don't need this, but leaving it on is harmless
 
 ### Limitations
@@ -250,7 +286,7 @@ Firefox's **HTTPS-Only Mode** (`about:preferences#privacy`, scroll to the bottom
 
 AI models occasionally produce wording you'd rather avoid in the translation — for example, when translating to British English you may want "colour" instead of "color"; when translating to European Portuguese you may want "telemóvel" instead of "celular"; or your in-house style guide may forbid certain words entirely ("utilize" should always be "use", "leverage" should always be "use", etc.). The blocked-word list lets you give the model an explicit rule per word: never use the left column; always use the right column.
 
-The list works for any target language. Each entry has three columns — blocked word, replacement, and a free-text note (optional, useful for documenting why an entry exists). You can edit, add to, or fully replace the list in the "Blocked-word list" settings tab, or click "Restore defaults" to revert. By default the list is empty; some targets ship with prepopulated defaults curated for that language's typical AI failure modes. Switching between targets only auto-resets the list if your current entries still match the previous target's defaults — your hand-edited entries are preserved.
+The list works for any target language. Each entry has three columns — blocked word (required), replacement (optional), and a free-text note (optional, useful for documenting why an entry exists). Only the blocked word is required: fill in a replacement to force a specific word, or leave it blank to simply forbid the word and let the model rephrase naturally on its own — handy when you just dislike a word but can't pin down a fixed replacement (e.g. a cliché). You can edit, add to, or fully replace the list in the "Blocked-word list" settings tab, or click "Restore defaults" to revert. By default the list is empty; some targets ship with prepopulated defaults curated for that language's typical AI failure modes. Switching between targets only auto-resets the list if your current entries still match the previous target's defaults — your hand-edited entries are preserved.
 
 After every translation response, Shinkansen scans the output and logs a `forbidden-term-leak` warning in the Debug tab (with original and translation snippets) for any blocked words that slipped through — letting you investigate model leakage without **automatically rewriting the translation**, following the design principle "language preferences belong in the prompt, not in post-hoc regex replace", which avoids damaging legitimate quoted uses in the translation.
 
@@ -268,27 +304,9 @@ LLMs translating long articles tend to produce inconsistent renderings for the s
 
 Off by default. Recommended only for articles where precision matters (e.g., long-form journalism with many names, academic articles). Side effect: the glossary translation step bypasses some system prompt instructions — for example, if you originally configured "keep English names untranslated", enabling glossary consistency forces them to be translated. Building the glossary also costs an extra API call, increasing token usage and translation time slightly.
 
-## Gemini API rate limits reference (snapshotted 2026-04-10)
-
-### Tier 1
-
-| Model | RPM | TPM | RPD |
-|-------|-----|-----|-----|
-| Gemini 3.1 Flash Lite | 4K | 4M | 150K |
-| Gemini 3 Flash | 1K | 2M | 10K |
-| Gemini 3.5 Flash | 225 | 2M | 250 |
-
-### Tier 2
-
-| Model | RPM | TPM | RPD |
-|-------|-----|-----|-----|
-| Gemini 3.1 Flash Lite | 10K | 10M | 350K |
-| Gemini 3 Flash | 2K | 3M | 100K |
-| Gemini 3.5 Flash | 1K | 5M | 50K |
-
 ## Current version
 
-v1.10.0 — full feature list and specs in [SPEC.md](SPEC.md) (Traditional Chinese only).
+v2.3.2 — full feature list and specs in [SPEC.md](SPEC.md) (Traditional Chinese only).
 
 ## License
 
@@ -303,6 +321,10 @@ licenses, and license file locations are listed in
 [THIRD-PARTY-NOTICES.md](shinkansen/THIRD-PARTY-NOTICES.md):
 
 - **PDF.js** (Mozilla, Apache 2.0) — PDF parsing / page rendering for the document translation feature
-- **pdf-lib** (Hopding, MIT) — bilingual PDF reconstruction on download
-- **fontkit** (Devon Govett / Hopding fork, MIT) — font parser used by pdf-lib for CJK subsetting
-- **Noto Sans CJK TC Regular** (Google Noto, SIL OFL 1.1) — embedded Traditional Chinese font for the translated PDF
+- **pdf-lib** (@cantoo/pdf-lib, MIT) — bilingual PDF reconstruction on download
+- **fontkit** (pdf-fontkit, MIT) — font parsing / subsetting backend used by pdf-lib
+- **Chart.js** (Chart.js Contributors, MIT) — charts on the usage breakdown tab
+- **fflate** (Arjun Barrett, MIT) — EPUB unzip / repack for the translated book
+- **@mozilla/readability** (Mozilla / Arc90, Apache 2.0) — article extraction before sending to Instapaper
+- **opencc-js / OpenCC dictionaries** (nk2028 / BYVoid, MIT / Apache 2.0) — local Simplified ↔ Traditional Chinese conversion
+- **Noto Sans CJK TC** (Google Noto, SIL OFL 1.1) — embedded Traditional Chinese font for the translated PDF (Regular + Bold)

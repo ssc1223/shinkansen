@@ -44,12 +44,11 @@
 // bold block,drawTranslatedOverlay 對 bold block 用 boldFont 寫
 
 import * as pdfjsLib from '../lib/vendor/pdfjs/pdf.min.mjs';
+import { TRANSLATABLE_TYPES } from './block-types.js';
 
 const FONT_PATH_REGULAR = 'lib/vendor/fonts/NotoSansTC-Regular.ttf';
 const FONT_PATH_BOLD = 'lib/vendor/fonts/NotoSansTC-Bold.ttf';
 
-let cachedRegularBytes = null;
-let cachedBoldBytes = null;
 async function loadFontBytes(path, cacheRef) {
   if (cacheRef.value) return cacheRef.value;
   const url = chrome.runtime.getURL(path);
@@ -66,6 +65,11 @@ const loadCJKBoldBytes = () => loadFontBytes(FONT_PATH_BOLD, boldRef);
 /**
  * 生成譯文 PDF 的核心 pipeline(供 reader WYSIWYG render + 下載按鈕共用)。
  * 不觸發 download,只回傳 bytes 與 filename
+ *
+ * 輸出形式見本檔頂端 header（W6-iter2）：每張原頁產出一張譯文頁、頁數與原檔相同，
+ * **不是**函式名 "Bilingual" 字面上的雙頁並排對照。要寫使用者看得到的說明時以 header
+ * 為準 —— v2.0.86 之前下載按鈕 title 寫成「雙頁並排對照」就是照著函式名 / 已廢棄的
+ * W6-iter1 設計寫的
  *
  * @param {ArrayBuffer} originalArrayBuffer
  * @param {LayoutDoc}   layoutDoc
@@ -86,14 +90,28 @@ export async function buildBilingualPdf(originalArrayBuffer, layoutDoc, options 
   // load + embed CJK 字型 Regular + Bold(兩把都 subset: true,最終 PDF 只含
   // 譯文實際用到的字。Regular 11.4MB / Bold 6.8MB,subset 後通常各 100-300KB)
   onProgress({ stage: 'font' });
-  const [regularBytes, boldBytes] = await Promise.all([loadCJKRegularBytes(), loadCJKBoldBytes()]);
+  // 批次 8 H9:Bold 載入/嵌入失敗降級用 Regular 頂替(warn 不炸)——Regular 是硬依賴
+  // (沒有就真的畫不出字),Bold 只影響粗體視覺,不該讓整份 PDF 生成失敗
+  const regularBytes = await loadCJKRegularBytes();
   const cjkFontRegular = await newDoc.embedFont(regularBytes, { subset: true });
-  const cjkFontBold = await newDoc.embedFont(boldBytes, { subset: true });
+  let cjkFontBold;
+  try {
+    const boldBytes = await loadCJKBoldBytes();
+    cjkFontBold = await newDoc.embedFont(boldBytes, { subset: true });
+  } catch (boldErr) {
+    console.warn('[shinkansen] CJK Bold font unavailable — falling back to Regular', boldErr);
+    cjkFontBold = cjkFontRegular;
+  }
 
   onProgress({ stage: 'parsing' });
   // password: '' 是 cantoo 解密路徑的 trigger;對非加密 PDF 無副作用
   // (cantoo 內部會先檢查 isEncrypted 才走 decrypt branch)
-  const origDoc = await PDFDocument.load(originalArrayBuffer, { ignoreEncryption: true, password: '' });
+  // v1.10.39(code review 2026-06-09 M6):傳 slice(0) 副本,不消費共用的
+  // originalArrayBuffer。buildBilingualPdf 對同一 buffer 會被呼叫多次(reader 開啟 /
+  // retry regenerate / download fallback),且加密 PDF 走 cantoo decrypt 分支可能
+  // transfer/detach buffer → 第二次 build 拿到 length 0 整份失敗。extractPdfMetaForOverlay
+  // (下方 line 104)早已自己 slice(0),此處對齊同樣防護。
+  const origDoc = await PDFDocument.load(originalArrayBuffer.slice(0), { ignoreEncryption: true, password: '' });
   const pageCount = layoutDoc.pages.length;
   // 一次 embedPages 全部頁(比 for-loop 內逐頁 embedPage 快；pdf-lib 內部 batch parse)
   const origPages = origDoc.getPages().slice(0, pageCount);
@@ -167,17 +185,39 @@ export async function downloadBilingualPdf(originalArrayBuffer, layoutDoc, optio
 
 // ----- 譯文頁 layout 渲染 -----
 
-const TRANSLATABLE_TYPES = new Set(['paragraph', 'heading', 'list-item', 'caption', 'footnote']);
-
 // W7:italic 用 pdf-lib drawText `matrix` 做 12° skew transform(業界標準做法,
 // CSS font-synthesis-style 預設 14°、FontForge -10°~-15°,折衷 12°)。matrix 走
 // PDF text rendering matrix 規格,skew x 軸:[1, 0, tan(12°), 1, tx, ty]
 const ITALIC_SKEW = Math.tan(12 * Math.PI / 180);
+// 原子 token 斷行判定上限:≤ 此字元數的 ASCII 連續串(金額 / 數值 / 短料號)被迫
+// 逐字拆行時視為 fit 失敗(寧縮字不拆);更長的串(URL / 完整料號)照舊可拆
+const ATOMIC_CHUNK_MAX_CHARS = 14;
 // 連結色 = 接近 #00468C 的偏深藍,跟黑字有對比但不過度螢光
 const LINK_RGB = [0, 0.27, 0.55];
 // link underline:baseline 下 fontSize × 0.12 處,thickness fontSize × 0.06
 const UNDERLINE_OFFSET_RATIO = 0.12;
 const UNDERLINE_THICKNESS_RATIO = 0.06;
+
+// block.styleSegments(原文)全部同 (isBold, isItalic) 時回傳該 style;
+// 混排 / 無資料 / uniform 但無樣式(全 regular)回 null。
+// 只看有實質文字的 segment——純空白 segment 的樣式位不可靠
+export function uniformBlockStyle(block) {
+  const src = block && block.styleSegments;
+  if (!Array.isArray(src) || src.length === 0) return null;
+  let isBold = null;
+  let isItalic = null;
+  for (const s of src) {
+    if (!s || typeof s.text !== 'string' || s.text.trim().length === 0) continue;
+    if (isBold === null) {
+      isBold = !!s.isBold;
+      isItalic = !!s.isItalic;
+      continue;
+    }
+    if (!!s.isBold !== isBold || !!s.isItalic !== isItalic) return null;
+  }
+  if (isBold === null) return null;
+  return (isBold || isItalic) ? { isBold, isItalic } : null;
+}
 
 // 對每個 translatable + has translation 的 block 在新 page 上蓋白底 + 寫譯文。
 // 不可翻譯 type(table / formula / figure / page-number)/ failed block / pending →
@@ -218,6 +258,24 @@ export function drawTranslatedOverlay(page, layoutPage, fontRegular, fontBold, i
       ? block.translationSegments
       : [{ text: block.translation, isBold: false, isItalic: false, linkUrl: null }];
 
+    // 換行正規化:LLM 對 bullet list 類 block 常自作主張在譯文加 \n(輸入的
+    // plainText 本來就是收斂空白後的單行)。wrap 是本 renderer 唯一的斷行者,
+    // piece 文字帶 \n 會讓 pdf-lib drawText 內部再斷一次行往下畫,跟我們的
+    // cy 前進疊加 → 譯文互疊(Thorpe bullet list 實測)。\n 一律轉單一空格
+    segs = segs.map((s) => (s.text && s.text.includes('\n')
+      ? { ...s, text: s.text.replace(/\s*\n+\s*/g, ' ') }
+      : s));
+
+    // 整塊同 style 的 block(全粗體標題 / 全斜體引言)不依賴 LLM marker:
+    // 譯文 segments 全無樣式時直接繼承原 block 的 uniform style。涵蓋三種
+    // 樣式流失來源——模型剝掉 ⟦b⟧/⟦i⟧ marker、parseMarkedTranslation fallback、
+    // 舊資料無 translationSegments。linkUrl 不在此列(連結錨點必須靠 marker 對位);
+    // 譯文帶任一 bold / italic piece 時視為 marker 有效,不覆蓋
+    const uniform = uniformBlockStyle(block);
+    if (uniform && segs.every((s) => !s.isBold && !s.isItalic)) {
+      segs = segs.map((s) => ({ ...s, isBold: uniform.isBold, isItalic: uniform.isItalic }));
+    }
+
     // fit-to-box:從 scale 1.0 起步,塞不下時依序試縮 + 擴 box,回傳最終 box +
     // 字級 + 行(每行帶 pieces 陣列)
     const fit = fitSegmentsToBox(
@@ -239,28 +297,73 @@ export function drawTranslatedOverlay(page, layoutPage, fontRegular, fontBold, i
   for (const { block, fit } of prepared) {
     const isCellBlock = block._isCellBlock === true;
     if (isCellBlock) {
-      // cell-block:mask = cell.bbox 各邊內縮 1pt 留 PDF 表格邊線 buffer。
-      // cell.bbox 邊界通常跟原 PDF 表格邊線位置重合(cell.x0 = 垂直邊線 x、
-      // cell.y0 = 水平邊線 y),邊線粗度可能 0.5-1pt,需要 1pt buffer 完全避開。
-      // 不擴 padBottom:cell 緊鄰 row 邊線,擴下方一定蓋邊線。
-      // 殘影 trade-off:cell 字身底 descender 可能殘留 1-2pt,但中文無 descender、
-      // 表格 cell 內容多為短英數字,殘影風險低
+      // cell-block mask:蓋「原文 item 形狀 + descender padding」而非整格內縮矩形。
+      // 舊法(cell.bbox 內縮 1pt、無 padBottom)在原文字身貼近 cell 底時留 1-2pt
+      // 字身底殘影(zoom 下呈虛線,Quotation 表頭列實測)。文字通常不貼表格邊線,
+      // 以 item bbox 起算的 mask 蓋得住字身(含 PDF.js bbox 常低估的 descender)
+      // 又碰不到邊線;item 貼邊時 clamp 回 cell 內縮 0.5pt(殘影只剩貼邊側極窄條,
+      // 仍優於全周內縮)。cell 內找不到 item 時 fallback 舊內縮矩形(寧可壓邊線
+      // 也不漏蓋原文,對齊 v1.10.39 M5 窄 cell 原則)
       const [bx0, by0, bx1, by1] = block.bbox;
-      const buf = 1;
-      const pdfMaskBottom = pageH - (by1 - buf);
-      page.drawRectangle({
-        x: bx0 + buf,
-        y: pdfMaskBottom,
-        width: (bx1 - bx0) - buf * 2,
-        height: (by1 - by0) - buf * 2,
-        color: rgb(1, 1, 1),
-        borderWidth: 0,
-      });
+      const buf = 0.5;
+      const fs = block.fontSize || 10;
+      const padX = fs * 0.1;
+      const padTop = fs * 0.1;
+      const padBottomCell = Math.max(1.5, fs * 0.25);
+      let drewItemMask = false;
+      for (const it of (items || [])) {
+        const [ix0, iy0, ix1, iy1] = it.bbox;
+        // 只取與 cell 相交的 item(相鄰 cell 的 item 不會與本 cell bbox 相交)
+        if (ix1 < bx0 || ix0 > bx1 || iy1 < by0 || iy0 > by1) continue;
+        const mx0 = Math.max(ix0 - padX, bx0 + buf);
+        const mx1 = Math.min(ix1 + padX, bx1 - buf);
+        const my0 = Math.max(iy0 - padTop, by0 + buf);
+        const my1 = Math.min(iy1 + padBottomCell, by1 - buf);
+        if (mx1 <= mx0 || my1 <= my0) continue;
+        page.drawRectangle({
+          x: mx0,
+          y: pageH - my1,
+          width: mx1 - mx0,
+          height: my1 - my0,
+          color: rgb(1, 1, 1),
+          borderWidth: 0,
+        });
+        drewItemMask = true;
+      }
+      if (!drewItemMask) {
+        // fallback:cell.bbox 內縮 1pt(v1.10.39 M5:窄 cell 內縮後 ≤ 0 用原尺寸)
+        const fbuf = 1;
+        const insetW = (bx1 - bx0) - fbuf * 2;
+        const insetH = (by1 - by0) - fbuf * 2;
+        const useInset = insetW > 0 && insetH > 0;
+        page.drawRectangle({
+          x: useInset ? bx0 + fbuf : bx0,
+          y: useInset ? pageH - (by1 - fbuf) : pageH - by1,
+          width: useInset ? insetW : (bx1 - bx0),
+          height: useInset ? insetH : (by1 - by0),
+          color: rgb(1, 1, 1),
+          borderWidth: 0,
+        });
+      }
     } else {
-      // non-cell-block:mask = expandBoxToCoverItems(...,clamp 到 block.bbox)+
-      // padBottom = fontSize × 0.3(蓋 link underline / 標點 / ascent 殘影)。
+      // non-cell-block:mask 基底 = 原 block.bbox ∪ 譯文實際畫字範圍,再
+      // expandBoxToCoverItems(clamp 到 block.bbox)+ padBottom = fontSize × 0.3
+      // (蓋 link underline / 標點 / ascent 殘影)。
+      // 不可用整個 fit.finalBox 當基底:fit-to-box 擴 box 後 finalBox 可能一路
+      // 伸到下一個 text block 上緣 / 頁底,但 layout blocks 全來自 text run,
+      // block 之間的圖片 / 向量圖形不是阻擋物——以 finalBox 起算會把它們整片蓋白。
+      // 只蓋「原文所在區」+「譯文實際會畫到的區」,擴 box 多出來沒畫字的區域不蓋。
       // 非 cell-block 通常不在表格內,padBottom 不會蓋表格邊線
-      const maskBox = expandBoxToCoverItems(fit.finalBox, block, items);
+      const drawn = computeDrawnExtent(fit, fontRegular, fontBold);
+      const f = fit.finalBox;
+      const [bx0, by0, bx1, by1] = block.bbox;
+      const baseBox = {
+        x0: Math.min(bx0, f.x0),
+        y0: Math.min(by0, f.y0),
+        x1: Math.max(bx1, Math.min(f.x1, f.x0 + drawn.w)),
+        y1: Math.max(by1, Math.min(f.y1, f.y0 + drawn.h)),
+      };
+      const maskBox = expandBoxToCoverItems(baseBox, block, items);
       const padBottom = Math.max(2, (block.fontSize || 12) * 0.3);
       const { x0: mx0, y0: my0, x1: mx1, y1: my1 } = maskBox;
       const pdfMaskBottom = pageH - (my1 + padBottom);
@@ -303,7 +406,12 @@ export function drawTranslatedOverlay(page, layoutPage, fontRegular, fontBold, i
         } catch (err) {
           console.warn('[Shinkansen] drawText 跳過：', piece.text.slice(0, 30), err.message);
         }
-        const pieceWidth = pieceFont.widthOfTextAtSize(piece.text, fontSize);
+        // widthOfTextAtSize 與 drawText 走同一條 fontkit layout 路徑,編不進字型的
+        // piece 兩者都會 throw——drawText 有跳過防護,這裡必須同樣兜住,否則整份
+        // PDF 生成炸掉(fallback 估算比照 computeDrawnExtent)
+        let pieceWidth;
+        try { pieceWidth = pieceFont.widthOfTextAtSize(piece.text, fontSize); }
+        catch { pieceWidth = piece.text.length * fontSize * 0.5; }
         if (piece.linkUrl) {
           // underline:baseline 下方
           const underlineY = cy - fontSize * UNDERLINE_OFFSET_RATIO;
@@ -328,6 +436,26 @@ export function drawTranslatedOverlay(page, layoutPage, fontRegular, fontBold, i
     }
   }
   return translatedLinkRects;
+}
+
+// 譯文實際畫字範圍(供 mask 限縮用):寬 = 最寬行的 piece 寬總和,高 = 同 tryFit
+// 的 requiredH 公式(首行 visual ratio + 其餘行 lineHeight)。fit.lines 可能因
+// drawText loop 的 box 底截斷而少畫,caller 對 finalBox 取 min 兜底
+function computeDrawnExtent(fit, fontRegular, fontBold) {
+  const { fontSize, lineHeight, lines } = fit;
+  let maxW = 0;
+  for (const line of lines) {
+    let w = 0;
+    for (const p of line.pieces) {
+      const font = p.isBold ? fontBold : fontRegular;
+      try { w += font.widthOfTextAtSize(p.text, fontSize); }
+      catch { w += p.text.length * fontSize * 0.5; }
+    }
+    if (w > maxW) maxW = w;
+  }
+  const visualRatio = lines.length === 1 ? SINGLE_LINE_VISUAL_RATIO : FIRST_LINE_VISUAL_RATIO;
+  const h = lines.length > 0 ? fontSize * visualRatio + (lines.length - 1) * lineHeight : 0;
+  return { w: maxW, h };
 }
 
 // fit-to-box(港 BabelDOC `_find_optimal_scale_and_layout` 演算法到 JS):
@@ -374,6 +502,9 @@ function fitSegmentsToBox(segments, fontRegular, fontBold, originalFontSize, cur
     const blockH = b.y1 - b.y0;
     if (blockW <= 0 || blockH <= 0) return null;
     const lines = wrapSegmentsToWidth(segments, fontRegular, fontBold, fontSize, blockW);
+    // 原子 token(短金額 / 數值)被逐字拆行 = 排版不合格,視為 fit 失敗——
+    // 讓 phase 迴圈改試縮字 / 擴框;全部救不了才由最終 fallback 接受拆行
+    if (lines.atomicSplit) return null;
     const visualRatio = lines.length === 1 ? SINGLE_LINE_VISUAL_RATIO : FIRST_LINE_VISUAL_RATIO;
     const requiredH = fontSize * visualRatio + (lines.length - 1) * lineHeight;
     if (requiredH <= blockH + 1) return { fontSize, lineHeight, lines, finalBox: b };
@@ -389,9 +520,14 @@ function fitSegmentsToBox(segments, fontRegular, fontBold, originalFontSize, cur
   const expandedBottom = isCellBlock ? -Infinity : getMaxBottomY(currentBlock, layoutPage);
   const canExpandRight = expandedRight > box.x1 + 0.5;
   const canExpandDown = expandedBottom > box.y1 + 0.5;
+  // 變體順序:原 box → 擴下 → 擴右 → 擴雙。「下優先於右」(對齊 Phase B 先於
+  // Phase C 的既有語意):向下是同欄流向,通常只是 cell 下緣 / 段落間的小空隙,
+  // 良性;向右會跨進版面上「非文字阻擋物」的地盤——表格右側的架構圖 / 圖片不是
+  // text block,getMaxRightX 擋不住,右擴優先時「差 2pt 塞不下」的表格 cell 會
+  // 被排成一行長文蓋過整張圖(Thorpe p3 分割區 / 驅動程式紀錄 cell 實測)
   const variants = [box];
-  if (canExpandRight) variants.push({ ...box, x1: expandedRight });
   if (canExpandDown) variants.push({ ...box, y1: expandedBottom });
+  if (canExpandRight) variants.push({ ...box, x1: expandedRight });
   if (canExpandRight && canExpandDown) {
     variants.push({ x0: box.x0, y0: box.y0, x1: expandedRight, y1: expandedBottom });
   }
@@ -403,11 +539,7 @@ function fitSegmentsToBox(segments, fontRegular, fontBold, originalFontSize, cur
   // 改成 scale 1.0 先全試擴 box variant,fontSize 100% 沒副作用優先
   for (const v of variants) {
     const r = tryFit(v, 1.0);
-    if (r) {
-      // 接受擴後 box 給之後 phase 用(fallback 路徑會用)
-      if (v !== box) box = v;
-      return r;
-    }
+    if (r) return r;
   }
 
   // Phase A: 原 box,scale 0.95 → 0.7(scale 1.0 已在 Phase 0 試過)
@@ -452,11 +584,20 @@ function fitSegmentsToBox(segments, fontRegular, fontBold, originalFontSize, cur
   return { fontSize, lineHeight, lines, finalBox: box };
 }
 
+// 批次 8 H10:CJK code point 判定單一資料源——原本 hasCJK(行距判定)與
+// wrapSegmentsToWidth 的 isCJK(換行)字元範圍不一致(hasCJK 缺全形標點/全形英數
+// 0xFF00-FFEF 與相容表意 0xF900-FAFF),純全形標點 + 拉丁混排短 block 誤用拉丁行距
+function isCJKCodePoint(cp) {
+  return (cp >= 0x3000 && cp <= 0x9FFF)
+    || (cp >= 0x3400 && cp <= 0x4DBF)
+    || (cp >= 0xF900 && cp <= 0xFAFF)
+    || (cp >= 0xFF00 && cp <= 0xFFEF);
+}
+
 // 判字串是否含 CJK(影響 line_skip)
 function hasCJK(text) {
   for (const ch of text) {
-    const cp = ch.codePointAt(0);
-    if ((cp >= 0x3000 && cp <= 0x9FFF) || (cp >= 0x3400 && cp <= 0x4DBF)) return true;
+    if (isCJKCodePoint(ch.codePointAt(0))) return true;
   }
   return false;
 }
@@ -520,32 +661,13 @@ function expandBoxToCoverItems(finalBox, block, items) {
   return { x0, y0, x1, y1 };
 }
 
-// 判斷 block 在原 PDF 是否「多數 bold」(字符數加權,bold ratio ≥ 0.5)。
-// 用 textContent items 的 bbox 中心點落入 block bbox 為判定範圍
-function isBlockBold(block, items) {
-  if (!items || items.length === 0) return false;
-  const [bx0, by0, bx1, by1] = block.bbox;
-  let boldChars = 0;
-  let totalChars = 0;
-  for (const it of items) {
-    const [ix0, iy0, ix1, iy1] = it.bbox;
-    const cx = (ix0 + ix1) / 2;
-    const cy = (iy0 + iy1) / 2;
-    if (cx >= bx0 && cx <= bx1 && cy >= by0 && cy <= by1) {
-      const n = it.str.length;
-      totalChars += n;
-      if (it.isBold) boldChars += n;
-    }
-  }
-  return totalChars > 0 && boldChars / totalChars >= 0.5;
-}
-
 // ----- 從原 PDF 抽 link + 字型 metadata -----
 
 // 用 PDF.js 一輪解全頁,每頁回傳:
 //   - links: { rect, url }  (rect PDF y-up 直接給 pdf-lib 用;新 page 同 size + 1:1 嵌)
 //   - items: [{ str, bbox, isBold }]  (bbox canvas 座標,同 layout-analyzer 用的座標系)
-// items 用於 drawTranslatedOverlay 的 isBlockBold 判定;判 bold 走兩條:
+// items 供 expandBoxToCoverItems 用(W7 起 bold 改走 styleSegments,不再用 items 反推
+// block-level bold)。判 bold 走兩條:
 //   1. font.bold === true (PDF 字型物件直接帶)
 //   2. font.name regex /Bold|Black|Heavy|Demi|Semi/  (subset 過的字型常無 .bold flag,
 //      但 name 通常仍含 weight 字串,例:'BCDFEE+Arial-Black')
@@ -644,33 +766,11 @@ function addLinkAnnotations(newDoc, newPage, links) {
 
 // 不可行首的標點(中文全形 + 半形,新行起頭看到這些字符會把它拉回上一行末)。
 // 涵蓋:句號逗號、頓號、分號冒號、感嘆問號、右括號、右引號、書名號右半
+// 不可行首字符後處理由 applyCJKPunctuationRulesPieces(segment-aware 版)負責,常數共用。
 const FORBIDDEN_LINE_START = '、。，：；！？」』）〕】》〉,.;:!?)]}';
 
-// 後處理:把違規行首字符拉回上一行末。視覺上輕微拉長上一行,但中文標點
-// 全形寬通常 fontSize 以內,且 PDF reader 不嚴格 clip,可接受
-function applyCJKPunctuationRules(lines) {
-  if (!lines || lines.length < 2) return lines;
-  const out = [...lines];
-  // 多 pass:單 pass 後若 line 開頭仍違規(罕見,連續兩個禁標點),再做一次
-  for (let pass = 0; pass < 3; pass++) {
-    let moved = false;
-    for (let i = 1; i < out.length; i++) {
-      const ln = out[i];
-      if (!ln.length) continue;
-      const firstCh = ln[0];
-      if (FORBIDDEN_LINE_START.includes(firstCh)) {
-        out[i - 1] = out[i - 1] + firstCh;
-        out[i] = ln.slice(1);
-        moved = true;
-      }
-    }
-    if (!moved) break;
-  }
-  return out.filter((l) => l.length > 0);
-}
-
-// W7:segment-aware wrap。對每 styleSegment 切 chunks(同 wrapTextToWidth 的
-// CJK 逐字 / ASCII 詞 / 空白獨立 切法),chunks 帶 segment 的 style;累加 chunk
+// W7:segment-aware wrap。對每 styleSegment 切 chunks(CJK 逐字 / ASCII 詞 /
+// 空白獨立 切法),chunks 帶 segment 的 style;累加 chunk
 // 寬超過 maxWidth 就斷新行。同 line 內合併連續同 style chunks 成 piece。
 //
 // @returns {Array<{ pieces: Array<{ text, isBold, isItalic, linkUrl }> }>}
@@ -697,10 +797,7 @@ export function wrapSegmentsToWidth(segments, fontRegular, fontBold, fontSize, m
     };
     for (const ch of seg.text) {
       const cp = ch.codePointAt(0);
-      const isCJK =
-        (cp >= 0x3000 && cp <= 0x9FFF) ||
-        (cp >= 0x3400 && cp <= 0x4DBF) ||
-        (cp >= 0xFF00 && cp <= 0xFFEF);
+      const isCJK = isCJKCodePoint(cp); // 批次 8 H10:與 hasCJK 共用單一判定
       const isWS = /\s/.test(ch);
       if (isCJK || isWS) {
         flushBuf();
@@ -724,11 +821,31 @@ export function wrapSegmentsToWidth(segments, fontRegular, fontBold, fontSize, m
     catch { return c.text.length * fontSize * 0.5; }
   }
 
+  // 1.5) 單一 chunk 自己就寬過 maxWidth(長 URL / 料號等 ASCII 連續串)→ 退化成
+  // 逐字元 chunks 再走一般 wrap:整條塞同一行會畫超出 box.x1,水平溢出疊到右側
+  // 原文 / 相鄰 block。逐字元後同 style 字元在行內仍會被 mergeChunksToPieces 合回
+  // 同一 piece,不影響渲染結構。
+  // v2.0.75:短 chunk(≤ ATOMIC_CHUNK_MAX_CHARS)被迫逐字拆 = 「原子 token 斷行」
+  // ——窄 cell 的金額 / 數值被拆成「7,000.0 / 0」「1.4 / 7」(TDC6 / OCA 實測)。
+  // 回傳陣列標 atomicSplit,fitSegmentsToBox 的 tryFit 視為 fit 失敗,改走縮字 /
+  // 擴框讓 token 整顆塞下;所有 phase 都救不了才在最終 fallback 接受逐字拆。
+  // 長串(URL / 完整料號 > 14 字元)不設限,照舊逐字拆(縮字救不了它們)
+  const sizedChunks = [];
+  let atomicSplit = false;
+  for (const c of chunks) {
+    if (!c.isWS && c.text.length > 1 && widthOf(c) > maxWidth) {
+      if (c.text.length <= ATOMIC_CHUNK_MAX_CHARS) atomicSplit = true;
+      for (const ch of c.text) sizedChunks.push({ ...c, text: ch });
+    } else {
+      sizedChunks.push(c);
+    }
+  }
+
   // 2) wrap chunks 成 lines(lineChunks: chunks[],尚未合併成 pieces)
   const lineChunks = [];
   let current = [];
   let currentWidth = 0;
-  for (const c of chunks) {
+  for (const c of sizedChunks) {
     const w = widthOf(c);
     if (current.length === 0 && c.isWS) continue; // 跳新行開頭的純空白
     if (currentWidth + w > maxWidth && current.length > 0) {
@@ -744,7 +861,9 @@ export function wrapSegmentsToWidth(segments, fontRegular, fontBold, fontSize, m
 
   // 3) 合併連續同 style 的 chunks 成 pieces;CJK 標點規則(跨 piece)
   const lines = lineChunks.map((cs) => ({ pieces: mergeChunksToPieces(cs) }));
-  return applyCJKPunctuationRulesPieces(lines);
+  const out = applyCJKPunctuationRulesPieces(lines);
+  if (atomicSplit) out.atomicSplit = true;
+  return out;
 }
 
 // 把 chunks 陣列合併成 pieces:連續同 (isBold, isItalic, linkUrl) 合一段
@@ -796,50 +915,3 @@ function applyCJKPunctuationRulesPieces(lines) {
     .filter((l) => l.pieces.length > 0);
 }
 
-// 中文按字斷，英文按詞斷，累加字寬超過 maxWidth 即斷行
-function wrapTextToWidth(text, font, fontSize, maxWidth) {
-  if (!text) return [];
-  // 分 segments:CJK 字逐字、ASCII 詞按空白切、空白獨立 segment
-  const segments = [];
-  let buf = '';
-  for (const ch of text) {
-    const cp = ch.codePointAt(0);
-    const isCJK =
-      (cp >= 0x3000 && cp <= 0x9FFF) ||
-      (cp >= 0x3400 && cp <= 0x4DBF) ||
-      (cp >= 0xFF00 && cp <= 0xFFEF); // 全形標點 / 全形 ASCII
-    const isWS = /\s/.test(ch);
-    if (isCJK || isWS) {
-      if (buf) { segments.push(buf); buf = ''; }
-      segments.push(ch);
-    } else {
-      buf += ch;
-    }
-  }
-  if (buf) segments.push(buf);
-
-  const lines = [];
-  let current = '';
-  let currentWidth = 0;
-
-  function widthOf(s) {
-    try { return font.widthOfTextAtSize(s, fontSize); }
-    catch { return s.length * fontSize * 0.5; }
-  }
-
-  for (const seg of segments) {
-    const segW = widthOf(seg);
-    // 如果當前 line 是純空白起頭跳過(避免新行開頭一個空白)
-    if (current === '' && /^\s+$/.test(seg)) continue;
-    if (currentWidth + segW > maxWidth && current.length > 0) {
-      lines.push(current);
-      current = /^\s+$/.test(seg) ? '' : seg;
-      currentWidth = current ? widthOf(current) : 0;
-    } else {
-      current += seg;
-      currentWidth += segW;
-    }
-  }
-  if (current.length > 0) lines.push(current);
-  return applyCJKPunctuationRules(lines);
-}

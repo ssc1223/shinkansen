@@ -154,6 +154,13 @@ export async function checkForUpdate() {
   }
   const latestTag = json?.tag_name || '';
   const latestVersion = String(latestTag).replace(/^v/, '');
+  // 200 + 合法 JSON 但缺 tag_name（GitHub API 異常回應）：latestVersion 空字串會被解析成
+  // [0,0,0] → 誤走 up-to-date 分支清掉先前偵測到的有效 updateAvailable。
+  // 比照 fetch 失敗分支：不動 storage，直接回報異常。
+  if (!latestVersion) {
+    debugLog('warn', 'update-check', 'response missing tag_name', {});
+    return { checked: false, hasUpdate: false, error: 'missing tag_name' };
+  }
   const releaseUrl = json?.html_url || `https://github.com/jimmysu0309/shinkansen/releases/tag/${latestTag}`;
 
   // v1.6.4: 只對 major / minor 升級提示——patch 級小修不打擾使用者。
@@ -195,6 +202,26 @@ export async function markUpdateNoticeShown() {
   await browser.storage.local.set({
     [STORAGE_KEY]: { ...cur, lastNoticeShownDate: localTodayKey() },
   });
+}
+
+/**
+ * updateAvailable → 使用者點更新提示後要開的 URL(單一資料源——popup 與 options
+ * 的 banner click handler 共用；2026-07-08 前兩邊各自實作，Safari 直下 .pkg 的
+ * 分支只存在 popup 版，options 版點了只到 release 索引頁)。
+ *
+ * @param {object|null} updateAvailable storage.local 的 updateAvailable 物件
+ * @param {boolean} isSafari Safari runtime(直接給 .pkg 下載連結)
+ * @returns {string} 目標 URL(三層 fallback:releaseUrl > tag URL > releases 索引頁)
+ */
+export function buildUpdateDownloadUrl(updateAvailable, isSafari) {
+  const version = updateAvailable?.version;
+  if (isSafari && version) {
+    return `https://github.com/jimmysu0309/shinkansen/releases/download/v${version}/shinkansen-macos-v${version}.pkg`;
+  }
+  return updateAvailable?.releaseUrl
+    || (version
+      ? `https://github.com/jimmysu0309/shinkansen/releases/tag/v${version}`
+      : 'https://github.com/jimmysu0309/shinkansen/releases');
 }
 
 /**

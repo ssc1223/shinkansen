@@ -10,6 +10,7 @@ const STORE_NAME = 'translations';
 
 /** 取得或建立 IndexedDB 連線（singleton Promise） */
 let _dbPromise = null;
+let _db = null; // 目前 resolve 出來的連線,供 onclose / onversionchange 比對是否仍是當前連線
 function getDB() {
   if (_dbPromise) return _dbPromise;
   _dbPromise = new Promise((resolve, reject) => {
@@ -21,7 +22,22 @@ function getDB() {
         store.createIndex('timestamp', 'timestamp', { unique: false });
       }
     };
-    req.onsuccess = () => resolve(req.result);
+    req.onsuccess = () => {
+      const db = req.result;
+      _db = db;
+      // v1.10.39(code review 2026-06-09 M4):連線被外部關閉時把 singleton 失效,讓下次
+      // getDB 重建。否則 _dbPromise 會 cache 著死連線,後續 db.transaction() 一律丟
+      // InvalidStateError → 所有 usage 寫入靜默失敗直到 SW 重啟。比對 _db === db 確保
+      // 只在「關閉的是當前連線」時才失效(避免舊連線的晚到 onclose 誤殺新連線)。
+      //   - onclose:瀏覽器強制關閉連線(例如儲存空間壓力)
+      //   - onversionchange:其他 context 升級 DB → 主動關閉本連線讓升級進行
+      db.onclose = () => { if (_db === db) { _db = null; _dbPromise = null; } };
+      db.onversionchange = () => {
+        try { db.close(); } catch (_) { /* 略 */ }
+        if (_db === db) { _db = null; _dbPromise = null; }
+      };
+      resolve(db);
+    };
     req.onerror = () => {
       _dbPromise = null;
       reject(req.error);
@@ -93,7 +109,9 @@ export async function upsertYouTubeUsage(record, mergeWindowMs = 3600000) {
       const cursor = e.target.result;
       if (cursor) {
         const v = cursor.value;
-        if (v.source === 'youtube-subtitle' && v.videoId === videoId && v.model === model) {
+        // v2.0.78：合併鍵含 source——Drive 字幕（source='drive-subtitle'）同走此 upsert，
+        // 與 YouTube 紀錄不互相合併（理論上 videoId 空間也不重疊，雙保險）
+        if (v.source === record.source && v.videoId === videoId && v.model === model) {
           const merged = {
             ...v,
             inputTokens:       (v.inputTokens       || 0) + (record.inputTokens       || 0),
@@ -362,8 +380,21 @@ function fmtWeekStart(d) {
 /** 填補空白期間，讓折線圖不跳空 */
 function fillGaps(buckets, fromTs, toTs, groupBy) {
   const result = [];
-  const from = new Date(fromTs || Date.now() - 30 * 86400000);
-  const to = new Date(toTs || Date.now());
+  // from 不可用 ||：0（epoch，語意「全部」）是合法值，被當 falsy 會默默縮成 30 天視窗，
+  // 更早的 bucket 建了卻掉出輸出。完全沒帶 from 時取最早 bucket 起算，沒資料才退 30 天預設。
+  let fromMs = fromTs ?? null;
+  if (fromMs === null) {
+    let minKey = null;
+    for (const key of buckets.keys()) { if (minKey === null || key < minKey) minKey = key; }
+    if (minKey !== null) {
+      const [y, m, d] = minKey.split('-').map(Number);
+      fromMs = new Date(y, (m || 1) - 1, d || 1).getTime();
+    } else {
+      fromMs = Date.now() - 30 * 86400000;
+    }
+  }
+  const from = new Date(fromMs);
+  const to = new Date(toTs ?? Date.now());
 
   if (groupBy === 'day') {
     const d = new Date(from.getFullYear(), from.getMonth(), from.getDate());
@@ -397,10 +428,14 @@ function fillGaps(buckets, fromTs, toTs, groupBy) {
 }
 
 function csvEscape(str) {
-  if (str.includes(',') || str.includes('"') || str.includes('\n')) {
-    return '"' + str.replace(/"/g, '""') + '"';
+  let s = str;
+  // 防 CSV 公式注入：title/url 來自任意網頁(<title> 攻擊者可控),Excel 對
+  // =/+/-/@ 開頭的 cell 會當公式解析(=HYPERLINK / =cmd| 類)。前置單引號中和。
+  if (/^[=+\-@]/.test(s)) s = "'" + s;
+  if (s.includes(',') || s.includes('"') || s.includes('\n')) {
+    return '"' + s.replace(/"/g, '""') + '"';
   }
-  return str;
+  return s;
 }
 
 /**
@@ -416,7 +451,8 @@ function csvEscape(str) {
  */
 export function shouldSkipUsageRecord(record) {
   if (!record) return true;
-  if (record.source === 'youtube-subtitle') return false;
+  // drive-subtitle（v2.0.78）同 youtube-subtitle 走 upsert 累計合併路徑，不跳過
+  if (record.source === 'youtube-subtitle' || record.source === 'drive-subtitle') return false;
   const ip = Number(record.inputTokens) || 0;
   const op = Number(record.outputTokens) || 0;
   const ch = Number(record.chars) || 0;

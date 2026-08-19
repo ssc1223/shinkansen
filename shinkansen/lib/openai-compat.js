@@ -19,12 +19,16 @@
 // 黑名單與固定術語表是「跨 provider 共用」（Jimmy 設計決定 #3）。
 
 import { debugLog } from './logger.js';
-import { DELIMITER, SEP_RE, MARKER_COMPACT, MARKER_STRONG, packChunks, buildEffectiveSystemInstruction } from './system-instruction.js';
+import { DELIMITER, SEP_RE, MARKER_COMPACT, MARKER_STRONG, packChunks, buildEffectiveSystemInstruction, isValidGlossaryEntry, detectOutputLangMismatch, realignByMarkers } from './system-instruction.js';
 // v1.6.18: thinking 控制 mapping（各家 provider 的 thinking schema 不同，統一成
 // thinkingLevel 'auto/off/low/medium/high' + extraBodyJson 進階透傳）
 import { buildThinkingPayload } from './openai-compat-thinking.js';
+import { codedError } from './bg-error.js'; // 使用者面對錯誤帶 error code 過協定，content 端查 dict 翻譯
 
 const MAX_BACKOFF_MS = 8000;
+// v1.10.46(批次 2-1):429 Retry-After 等待上限(同 lib/gemini.js)。provider 可能回
+// 數百秒的 Retry-After,MV3 SW 等不到那麼久,無上限等待等於永久卡批次。
+const RETRY_AFTER_CAP_MS = 30_000;
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -35,73 +39,106 @@ function sleep(ms) {
  * 與 lib/gemini.js 的 fetchWithRetry 邏輯對齊（除了 quota dimension 提取，
  * OpenAI-compatible provider 的 429 body 結構不一致，這裡只做純退避）。
  */
-// 主翻譯 fetch 層級 timeout。15s = Flash 系列慢 case 的 2x margin。跟 gemini.js
-// fetchWithRetry 對齊;OpenAI 相容 provider(OpenRouter / DeepSeek / 本機 llama.cpp 等)
-// 同樣可能 hang,timeout 後 AbortError 走網路錯誤 retry path。
-const FETCH_TIMEOUT_MS = 15_000;
+// 主翻譯 fetch 層級 timeout 預設值。使用者可透過 customProvider.fetchTimeoutSec 覆蓋。
+// 2026-07-27 從 15s 調成 90s：OpenRouter 上的 reasoning 模型（GPT / Claude 旗艦）
+// 非 streaming 要等整批生成完才回 body，15s 對一批 20 段幾乎必逾時（Jimmy 實測
+// ~openai/gpt-latest 網頁翻譯每批三連 body read timeout）
+const DEFAULT_FETCH_TIMEOUT_MS = 90_000;
 
-async function fetchWithRetry(url, headers, body, { maxRetries = 3 } = {}) {
+async function fetchWithRetry(url, headers, body, { maxRetries = 3, timeoutMs = DEFAULT_FETCH_TIMEOUT_MS } = {}) {
   let attempt = 0;
   // eslint-disable-next-line no-constant-condition
   while (true) {
-    let resp;
+    // v1.10.46(批次 2-2):abortTimer 涵蓋範圍從「只到 headers 抵達」延伸到「body 讀完」。
+    // 原本 fetch resolve 即 clearTimeout,但 fetch resolve 只代表 headers 到,行動網路 /
+    // proxy 中途吊住時 resp.json() 可無限 pending → 該批永久卡住無錯誤。改成在 controller
+    // 還在 scope 的這裡把 body 讀完(逾時 → abort → body 讀取 reject → 走網路錯誤 retry),
+    // 成功路徑回傳以 body 文字重建的 Response,呼叫端 resp.json() / clone() 行為不變。
+    // timer 統一在 finally 清(每輪 continue / return / throw 都會經過)。
     const controller = new AbortController();
-    const abortTimer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+    const abortTimer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      resp = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...headers },
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      });
-    } catch (err) {
-      clearTimeout(abortTimer);
-      const isTimeout = err.name === 'AbortError';
-      const errMsg = isTimeout ? `逾時(${FETCH_TIMEOUT_MS}ms)` : err.message;
-      await debugLog('error', 'api', isTimeout ? 'openai-compat fetch timeout' : 'openai-compat fetch network error', { error: err.message, attempt, timeoutMs: isTimeout ? FETCH_TIMEOUT_MS : undefined });
-      if (attempt >= maxRetries) throw new Error('網路錯誤：' + errMsg);
-      await sleep(Math.min(MAX_BACKOFF_MS, 500 * Math.pow(2, attempt)));
-      attempt += 1;
-      continue;
-    }
-    clearTimeout(abortTimer);
-
-    // 5xx → 退避重試
-    if (resp.status >= 500 && resp.status < 600) {
-      await debugLog('warn', 'api', `openai-compat ${resp.status} server error`, { status: resp.status, attempt });
-      if (attempt >= maxRetries) {
-        let errMsg = `HTTP ${resp.status}`;
-        try { const j = await resp.json(); errMsg = j?.error?.message || errMsg; } catch { /* noop */ }
-        throw new Error(errMsg);
+      let resp;
+      try {
+        resp = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...headers },
+          body: JSON.stringify(body),
+          signal: controller.signal,
+        });
+      } catch (err) {
+        const isTimeout = err.name === 'AbortError';
+        const errMsg = isTimeout ? `逾時(${timeoutMs}ms)` : err.message;
+        await debugLog('error', 'api', isTimeout ? 'openai-compat fetch timeout' : 'openai-compat fetch network error', { error: err.message, attempt, timeoutMs: isTimeout ? timeoutMs : undefined });
+        if (attempt >= maxRetries) {
+          throw isTimeout
+            ? codedError('timeout', { ms: timeoutMs }, '網路錯誤：' + errMsg)
+            : codedError('network', { msg: err.message }, '網路錯誤：' + errMsg);
+        }
+        await sleep(Math.min(MAX_BACKOFF_MS, 500 * Math.pow(2, attempt)));
+        attempt += 1;
+        continue;
       }
-      await sleep(Math.min(MAX_BACKOFF_MS, 500 * Math.pow(2, attempt)));
+
+      // 5xx → 退避重試
+      if (resp.status >= 500 && resp.status < 600) {
+        await debugLog('warn', 'api', `openai-compat ${resp.status} server error`, { status: resp.status, attempt });
+        if (attempt >= maxRetries) {
+          let errMsg = `HTTP ${resp.status}`;
+          try { const j = await resp.json(); errMsg = j?.error?.message || errMsg; } catch { /* noop */ }
+          throw new Error(errMsg);
+        }
+        await sleep(Math.min(MAX_BACKOFF_MS, 500 * Math.pow(2, attempt)));
+        attempt += 1;
+        continue;
+      }
+
+      if (resp.status !== 429) {
+        // 成功 / 非 429 錯誤:body 在 timer 涵蓋下讀完(2-2)
+        let bodyText;
+        try {
+          bodyText = await resp.text();
+        } catch (err) {
+          const isTimeout = err.name === 'AbortError';
+          const errMsg = isTimeout ? `回應讀取逾時(${timeoutMs}ms)` : err.message;
+          await debugLog('error', 'api', isTimeout ? 'openai-compat body read timeout' : 'openai-compat body read error', { error: err.message, attempt });
+          if (attempt >= maxRetries) {
+            throw isTimeout
+              ? codedError('readTimeout', { ms: timeoutMs }, '網路錯誤：' + errMsg)
+              : codedError('network', { msg: err.message }, '網路錯誤：' + errMsg);
+          }
+          await sleep(Math.min(MAX_BACKOFF_MS, 500 * Math.pow(2, attempt)));
+          attempt += 1;
+          continue;
+        }
+        // bodyText 為空字串時傳 null(204 等 null-body status 帶 body 會 throw)
+        return new Response(bodyText || null, { status: resp.status, statusText: resp.statusText, headers: resp.headers });
+      }
+
+      // 429 退避（不依 quota dimension 細分，OpenAI 相容 provider 沒有統一的維度標記）
+      let bodyJson = null;
+      try { bodyJson = await resp.clone().json(); } catch { /* noop */ }
+      const retryAfterHeader = resp.headers.get('retry-after');
+      const retryAfterSec = retryAfterHeader ? parseInt(retryAfterHeader, 10) : NaN;
+
+      await debugLog('warn', 'api', 'openai-compat 429 rate limit', {
+        retryAfter: retryAfterHeader,
+        attempt,
+        error: bodyJson?.error?.message,
+      });
+
+      if (attempt >= maxRetries) {
+        const msg = bodyJson?.error?.message || `HTTP 429`;
+        throw new Error(msg);
+      }
+      const waitMs = Number.isFinite(retryAfterSec) && retryAfterSec > 0
+        ? Math.min(retryAfterSec * 1000 + 100, RETRY_AFTER_CAP_MS)
+        : Math.min(MAX_BACKOFF_MS, 500 * Math.pow(2, attempt));
+      await sleep(waitMs);
       attempt += 1;
-      continue;
+    } finally {
+      clearTimeout(abortTimer);
     }
-
-    if (resp.status !== 429) return resp;
-
-    // 429 退避（不依 quota dimension 細分，OpenAI 相容 provider 沒有統一的維度標記）
-    let bodyJson = null;
-    try { bodyJson = await resp.clone().json(); } catch { /* noop */ }
-    const retryAfterHeader = resp.headers.get('retry-after');
-    const retryAfterSec = retryAfterHeader ? parseInt(retryAfterHeader, 10) : NaN;
-
-    await debugLog('warn', 'api', 'openai-compat 429 rate limit', {
-      retryAfter: retryAfterHeader,
-      attempt,
-      error: bodyJson?.error?.message,
-    });
-
-    if (attempt >= maxRetries) {
-      const msg = bodyJson?.error?.message || `HTTP 429`;
-      throw new Error(msg);
-    }
-    const waitMs = Number.isFinite(retryAfterSec) && retryAfterSec > 0
-      ? retryAfterSec * 1000 + 100
-      : Math.min(MAX_BACKOFF_MS, 500 * Math.pow(2, attempt));
-    await sleep(waitMs);
-    attempt += 1;
   }
 }
 
@@ -113,7 +150,7 @@ async function fetchWithRetry(url, headers, body, { maxRetries = 3 } = {}) {
  *   "http://localhost:11434/v1"             → ".../chat/completions"（Ollama）
  */
 function resolveChatCompletionsUrl(baseUrl) {
-  if (!baseUrl) throw new Error('customProvider.baseUrl 未設定');
+  if (!baseUrl) throw codedError('baseUrlMissing', null, 'customProvider.baseUrl 未設定');
   const trimmed = String(baseUrl).trim().replace(/\/+$/, '');
   if (/\/chat\/completions$/.test(trimmed)) return trimmed;
   return trimmed + '/chat/completions';
@@ -139,10 +176,32 @@ export async function translateBatch(texts, settings, glossary, fixedGlossary, f
   const out = new Array(texts.length);
   const usage = { inputTokens: 0, outputTokens: 0, cachedTokens: 0 };
   let hadMismatch = false;
-  const chunks = packChunks(texts);
+  // 批次 5-3：帶使用者設定的分批上限（原本寫死 20 段／3500 字，調高設定無效）
+  const chunks = packChunks(texts, {
+    maxUnits: settings?.maxUnitsPerBatch,
+    maxChars: settings?.maxCharsPerBatch,
+  });
   for (const { start, end } of chunks) {
     const slice = texts.slice(start, end);
-    const result = await translateChunk(slice, settings, glossary, fixedGlossary, forbiddenTerms);
+    let result;
+    try {
+      result = await translateChunk(slice, settings, glossary, fixedGlossary, forbiddenTerms);
+    } catch (err) {
+      // 多 chunk 中途失敗：前面 chunk 已付費——把累積 usage 掛上 err 讓呼叫端記帳
+      // (對齊 lib/gemini.js translateBatch 的 err.usage 慣例，兩引擎對帳準確度一致)。
+      // v2.0.78:err.usage 已存在(perSegmentFallback 半途 throw 掛上該 chunk 的
+      // aggUsage）時仍須「相加」外層已完成 chunk 的累積——之前 `!err.usage` 直接跳過，
+      // 前面成功 chunk 的已付費 token 被丟棄（gemini.js:728 是相加，兩引擎 drift）
+      if (err && typeof err === 'object') {
+        const partial = err.usage || { inputTokens: 0, outputTokens: 0, cachedTokens: 0 };
+        err.usage = {
+          inputTokens: usage.inputTokens + (partial.inputTokens || 0),
+          outputTokens: usage.outputTokens + (partial.outputTokens || 0),
+          cachedTokens: usage.cachedTokens + (partial.cachedTokens || 0),
+        };
+      }
+      throw err;
+    }
     for (let j = 0; j < result.parts.length; j++) out[start + j] = result.parts[j];
     usage.inputTokens += result.usage.inputTokens;
     usage.outputTokens += result.usage.outputTokens;
@@ -190,10 +249,15 @@ async function translateChunk(texts, settings, glossary, fixedGlossary, forbidde
       { role: 'system', content: effectiveSystem },
       { role: 'user', content: joined },
     ],
-    temperature: typeof temperature === 'number' ? temperature : 0.7,
     stream: false,
     ...thinkingPayload,
   };
+  // v2.0.79:temperature 留空(存成 null)= 此 provider / model 不接受這個參數,body 一律
+  // 不送。部分 reasoning model 只吃自家預設值,帶任何 temperature 直接回 400
+  //(GitHub issue #60)。undefined(舊設定沒寫過這個欄位)維持既有 0.7 fallback。
+  if (temperature !== null) {
+    body.temperature = typeof temperature === 'number' ? temperature : 0.7;
+  }
   // v1.8.41:model 為空（llama.cpp / Ollama）時不送 model 欄位，讓 server 用啟動時鎖定的 model。
   if (model) body.model = model;
 
@@ -212,26 +276,63 @@ async function translateChunk(texts, settings, glossary, fixedGlossary, forbidde
 
   const t0 = Date.now();
   const maxRetries = typeof settings?.maxRetries === 'number' ? settings.maxRetries : 3;
-  const resp = await fetchWithRetry(url, headers, body, { maxRetries });
+  const fetchTimeoutSec = cp.fetchTimeoutSec;
+  const timeoutMs = (typeof fetchTimeoutSec === 'number' && fetchTimeoutSec > 0)
+    ? fetchTimeoutSec * 1000
+    : DEFAULT_FETCH_TIMEOUT_MS;
+  const resp = await fetchWithRetry(url, headers, body, { maxRetries, timeoutMs });
 
+  // 批次 8 E4:先 text() 再 JSON.parse(同 gemini.js——resp.json() 失敗後 body 已
+  // disturbed,resp.clone().text() 必 throw → rawPreview 恆空)
   let json;
+  let rawBody = '';
   try {
-    json = await resp.json();
+    rawBody = await resp.text();
+    json = JSON.parse(rawBody);
   } catch (parseErr) {
     const ms = Date.now() - t0;
-    let rawPreview = '';
-    try { rawPreview = await resp.clone().text().then(t => t.slice(0, 200)); } catch { /* noop */ }
+    const rawPreview = rawBody.slice(0, 200);
     await debugLog('error', 'api', 'openai-compat response not JSON', {
       status: resp.status, elapsed: ms, parseError: parseErr.message, rawPreview,
     });
-    throw new Error(`自訂 Provider 回應格式異常（非 JSON）：HTTP ${resp.status}。${rawPreview ? '前 200 字：' + rawPreview : ''}`);
+    throw codedError('customBadResponse', { status: resp.status, preview: rawPreview || 'N/A' },
+      `自訂 Provider 回應格式異常（非 JSON）：HTTP ${resp.status}。${rawPreview ? '前 200 字：' + rawPreview : ''}`);
   }
   const ms = Date.now() - t0;
 
   if (!resp.ok) {
     const errMsg = json?.error?.message || `HTTP ${resp.status}`;
-    await debugLog('error', 'api', 'openai-compat error', { status: resp.status, elapsed: ms, error: errMsg });
-    throw new Error(errMsg);
+    // 批次 8 E8（code review 2026-08-03）:reasoning 模型（OpenAI o 系列等）只吃自家預設
+    // temperature,帶值直接 400。v2.0.79 已提供「留空=不送」的設定逃生口;這裡補自動層:
+    // 400 且錯誤訊息點名 temperature、body 有送該欄位時,拿掉後原樣重打一次（僅一次,
+    // 非遞迴）。gemini.js 有 modelDropsSamplingParams gating,custom 路徑靠這條對齊。
+    if (resp.status === 400 && ('temperature' in body) && /temperature/i.test(errMsg)) {
+      await debugLog('warn', 'api', 'openai-compat 400 mentions temperature — retry once without it', {
+        model, error: errMsg,
+      });
+      delete body.temperature;
+      const retryResp = await fetchWithRetry(url, headers, body, { maxRetries, timeoutMs });
+      let retryRaw = '';
+      try {
+        retryRaw = await retryResp.text();
+        json = JSON.parse(retryRaw);
+      } catch (retryParseErr) {
+        throw codedError('customBadResponse',
+          { status: retryResp.status, preview: retryRaw.slice(0, 200) || 'N/A' },
+          `自訂 Provider 回應格式異常（非 JSON）：HTTP ${retryResp.status}。`);
+      }
+      if (!retryResp.ok) {
+        const retryErrMsg = json?.error?.message || `HTTP ${retryResp.status}`;
+        await debugLog('error', 'api', 'openai-compat error (after temperature retry)', {
+          status: retryResp.status, error: retryErrMsg,
+        });
+        throw new Error(retryErrMsg);
+      }
+      // 重試成功:後續流程只讀 json,直接落下去走正常解析
+    } else {
+      await debugLog('error', 'api', 'openai-compat error', { status: resp.status, elapsed: ms, error: errMsg });
+      throw new Error(errMsg);
+    }
   }
 
   const choice = json?.choices?.[0];
@@ -242,7 +343,8 @@ async function translateChunk(texts, settings, glossary, fixedGlossary, forbidde
     await debugLog('error', 'api', 'openai-compat empty content', {
       elapsed: ms, finishReason, choicesLength: json?.choices?.length || 0,
     });
-    throw new Error(`自訂 Provider 回傳空內容（finish_reason: ${finishReason}）。`);
+    throw codedError('customEmptyContent', { reason: finishReason },
+      `自訂 Provider 回傳空內容（finish_reason: ${finishReason}）。`);
   }
 
   // 抽 usage（OpenAI / OpenRouter 標準結構）
@@ -267,25 +369,61 @@ async function translateChunk(texts, settings, glossary, fixedGlossary, forbidde
 
   // 拆分對齊（與 Gemini 同邏輯：split by DELIMITER + 移除序號標記;用本批選的 marker.re）
   const parts = text.split(SEP_RE).map(s => s.trim().replace(marker.re, ''));
-  if (parts.length !== texts.length) {
-    await debugLog('warn', 'api', 'openai-compat segment count mismatch — fallback to per-segment', {
-      expected: texts.length, got: parts.length, elapsed: ms,
-    });
-    if (texts.length === 1) {
-      return { parts: [text.trim()], usage: chunkUsage, hadMismatch: false };
-    }
+
+  // 逐段 fallback（segment count mismatch 與輸出語言錯 chunk 共用,對齊 gemini.js）
+  const perSegmentFallback = async () => {
     const aligned = [];
     const aggUsage = { ...chunkUsage };
     for (let fi = 0; fi < texts.length; fi++) {
-      const r = await translateChunk([texts[fi]], settings, glossary, fixedGlossary, forbiddenTerms);
+      let r;
+      try {
+        r = await translateChunk([texts[fi]], settings, glossary, fixedGlossary, forbiddenTerms);
+      } catch (err) {
+        // 逐段 fallback 半途失敗：整批 + 已完成段的 usage 掛上 err(對齊 gemini.js 慣例)
+        if (err && typeof err === 'object' && !err.usage) err.usage = { ...aggUsage };
+        throw err;
+      }
       aligned.push(r.parts[0] || '');
       aggUsage.inputTokens += r.usage.inputTokens;
       aggUsage.outputTokens += r.usage.outputTokens;
       aggUsage.cachedTokens += r.usage.cachedTokens || 0;
     }
     return { parts: aligned, usage: aggUsage, hadMismatch: true };
+  };
+
+  // 段數不符先試序號標記二次對齊(v2.0.69,對齊 gemini.js;用本批選的 marker),
+  // 救不回才 fallback 逐段翻譯
+  let aligned = parts;
+  if (parts.length !== texts.length) {
+    if (texts.length === 1) {
+      // 批次 8 E5:同 gemini.js——單段 chunk 輸出含 SEP 字面時 strip 後 join,
+      // 不讓協定 token 進 DOM / 快取
+      const joinedSingle = parts.filter(Boolean).join('\n') || text.trim();
+      return { parts: [joinedSingle], usage: chunkUsage, hadMismatch: false };
+    }
+    const realigned = realignByMarkers(text, texts.length, marker);
+    if (!realigned) {
+      await debugLog('warn', 'api', 'openai-compat segment count mismatch — fallback to per-segment', {
+        expected: texts.length, got: parts.length, elapsed: ms,
+      });
+      return perSegmentFallback();
+    }
+    await debugLog('info', 'api', 'openai-compat segment count mismatch — realigned via seq markers', {
+      expected: texts.length, got: parts.length, elapsed: ms,
+    });
+    aligned = realigned;
   }
-  return { parts, usage: chunkUsage, hadMismatch: false };
+
+  // v2.0.52:段數對齊但整 chunk 輸出語言錯 → 逐段 fallback(對齊 gemini.js,
+  // 單段 chunk 不驗避免無限遞迴)
+  if (texts.length > 1 && detectOutputLangMismatch(aligned, settings.targetLanguage)) {
+    await debugLog('warn', 'api', 'openai-compat chunk output language mismatch — fallback to per-segment', {
+      segments: texts.length, elapsed: ms, targetLanguage: settings.targetLanguage,
+    });
+    return perSegmentFallback();
+  }
+
+  return { parts: aligned, usage: chunkUsage, hadMismatch: false };
 }
 
 /**
@@ -324,9 +462,12 @@ export async function extractGlossary(compressedText, settings) {
       { role: 'system', content: glossaryPrompt },
       { role: 'user', content: compressedText },
     ],
-    temperature,
     stream: false,
   };
+  // v2.0.79:術語表抽取打的是同一個 provider endpoint——自訂模型 temperature 留空
+  //(null)代表該 provider 不接受此參數,術語表路徑也必須不送,否則主翻譯正常、
+  // 一開術語表就 400(issue #60)。術語表自己的 temperature 設定只在有送時生效。
+  if (cp.temperature !== null) body.temperature = temperature;
   // v1.8.41 對齊:model 為空(llama.cpp / Ollama)時不送 model 欄位
   if (model) body.model = model;
 
@@ -354,14 +495,16 @@ export async function extractGlossary(compressedText, settings) {
     await debugLog('error', 'glossary', `openai-compat glossary extraction failed (${reason})`, { error: err.message, elapsed: Date.now() - t0 });
     return { glossary: [], usage: { inputTokens: 0, outputTokens: 0, cachedTokens: 0 }, _diag: `${reason}: ${err.message}` };
   }
-  clearTimeout(abortTimer);
-
+  // v1.10.46(批次 2-2):json 讀完才清 timer——body 中途吊住時 timer 到點 abort,
+  // resp.json() reject 走下方 catch 回 best-effort 空結果,不再無限 pending
   let json;
   try {
     json = await resp.json();
   } catch (parseErr) {
     await debugLog('error', 'glossary', 'openai-compat glossary response body parse failed', { status: resp.status, error: parseErr.message });
     return { glossary: [], usage: { inputTokens: 0, outputTokens: 0, cachedTokens: 0 }, _diag: `resp.json() failed: ${parseErr.message}` };
+  } finally {
+    clearTimeout(abortTimer);
   }
   const ms = Date.now() - t0;
   const u = json?.usage || {};
@@ -426,8 +569,9 @@ export async function extractGlossary(compressedText, settings) {
     return { glossary: [], usage, _diag: `entries array is empty (rawText first 500): ${rawText.slice(0, 500)}` };
   }
 
+  // v2.0.52:改共用 isValidGlossaryEntry(加擋「target 被填成分類代號」欄位錯置)
   const glossary = entries
-    .filter(e => e && typeof e.source === 'string' && typeof e.target === 'string' && e.source && e.target)
+    .filter(isValidGlossaryEntry)
     .slice(0, maxTerms);
 
   if (entries.length > 0 && glossary.length === 0) {

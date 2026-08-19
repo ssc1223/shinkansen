@@ -2,6 +2,10 @@
   /* 同 column 兄弟元件對齊基準寬（CLAUDE.md §1）——.display-mode-toggle + .row select
      共用同一寬，所有 locale 內 toggle 自然寬都 ≤ 此值（zh-TW 139px / en 132px 量過）。 */
   --popup-row-control-w: 140px;
+
+  /* issue #57：配色寫死淺色，宣告 light 讓 UA 不要用深色 appearance 畫原生控制項
+     （否則 select 的文字與下拉箭頭會被畫成白色 → 白底白字）。 */
+  color-scheme: light;
 }
 
 body {
@@ -22,9 +26,13 @@ header {
 
 header h1 { font-size: 16px; margin: 0; display: flex; align-items: center; gap: 8px; }
 header h1 .page-title-icon { width: 32px; height: 32px; flex-shrink: 0; }
-.version { font-size: 11px; color: #86868b; }
+.version { font-size: 11px; color: #86868b; text-decoration: none; }
+.version:hover { text-decoration: underline; }
 
-main { padding: 14px 16px; }
+/* 垂直節奏收斂(v1.10.31):瀏覽器 extension popup 有 ~600px 高度上限,全展開
+   (所有設定列顯示)會逼近上限。垂直 padding / margin 均勻壓窄、水平維持 16px
+   不動(保對齊 grid)。詳見 test/regression/popup-height-cap.spec.js。 */
+main { padding: 10px 16px; }
 
 button.primary {
   width: 100%;
@@ -57,7 +65,7 @@ button.secondary:hover { background: #f0f4ff; }
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-top: 14px;
+  margin-top: 10px;
   font-size: 13px;
 }
 /* v1.6.23：同 .update-dot / .update-banner 的 hidden 覆寫修法——
@@ -71,11 +79,13 @@ button.secondary:hover { background: #f0f4ff; }
   border-radius: 6px;
   font-size: 12px;
   background: #fff;
+  /* issue #57：背景鎖淺色就要連文字色一起鎖（第二層保險，同 options.css） */
+  color: #1d1d1f;
   width: var(--popup-row-control-w);
 }
 
 .status {
-  margin-top: 10px;
+  margin-top: 8px;
   font-size: 12px;
   color: #86868b;
   min-height: 16px;
@@ -100,6 +110,96 @@ footer > * {
   min-width: 0; /* 允許長 label 在欄內 wrap,不撐爆 grid */
 }
 
+/* iOS build（SPEC-PRIVATE §26）：translate-doc/ 已 build-time strip，
+   PDF 翻譯入口在 iOS 是死按鈕 → 隱藏。body.runtime-ios 由 popup.js 依
+   IS_IOS_BUILD（lib/distribution.js，iOS build script override 為 true）加上。
+   build 屬性 → 不論 host OS（含 iOS build 跑在 Mac）都隱藏，掛 runtime-ios。 */
+body.runtime-ios #translate-doc-btn {
+  display: none;
+}
+
+/* iOS popup 放大（sim 實測收斂結果，SPEC-PRIVATE §26.7）。
+   平台屬性 → 只在真觸控裝置（body.runtime-ios-touch，popup.js 依
+   isTouchScreenDevice() 加）放大；iOS build 跑在 macOS（無觸控）時不放大，
+   尊重桌面 popover 尺寸（見 lib/platform.js）。
+   iPad popover 寬度「跟著頁面內容寬度走」（不是固定 390pt）——固定 280px 版面
+   + zoom 1.5 → 內容視覺寬 420pt，popover 自己拉寬到 420，版面與桌面完全一致
+   不換行、字級 1.5 倍。
+   iPhone sheet 寬度固定 = 螢幕寬（依機型 390〜440pt），420 會橫向溢出 →
+   media query 降到 1.435（= 402 / 280）當 fallback；實際撐滿值由 popup.js
+   依 window.innerWidth 動態算（zoom = 寬 / 280，寫死 1.435 只在 402pt 機型
+   剛好，430 / 440pt 機型會右側留白）。media query 以 layout viewport 判：
+   iPad popover 的 device-width = popover 自身（~280）、iPhone sheet =
+   螢幕寬 ≥ 390，350 為分界。
+   高度模型（v1.10.35,對齊 JRead 實機驗證做法）：popover 寬度跟著內容走、但高度有
+   上限。舊做法（popup.js JS zoom = innerWidth/280 ≈ 1.5 + 固定 280px 窄版面）把內容
+   ×1.5 撐高,active（已翻譯：顯示原文 + 編輯譯文）狀態在 iPad mini 超過 popover 高度
+   上限 → 出捲軸（Jimmy 實機回報）。改成 JRead 那套：固定放大檔 zoom 1.35（不再 JS 算）
+   + 觸控且 viewport 已寬時 width:auto（版面比 280 寬 → 換行少、內容更矮）→ 高度落回
+   popover 上限內、寬度仍撐滿。
+   實測過的死路（沒有 min-width guard 時不要試）：
+   - width: 100% + zoom：layout viewport 被 zoom 反向壓窄,280pt popover 變 200px 版面全 wrap
+   - viewport width=280 fit-to-width：WebKit 觸發 font boosting,一樣 wrap
+   解法（JRead 同款）：width:auto 只在 @media (min-width: 350px) 內套——min-width guard
+   排除「popover 尚未定尺寸的早期窄 viewport」,避免 width:auto ↔ 視窗 sizing 互相循環 +
+   font-boosting。窄 viewport 時 fallback 回固定 280px。 */
+body.runtime-ios-touch {
+  width: 280px;
+  min-width: 0;
+  zoom: 1.35;
+}
+@media (min-width: 350px) {
+  body.runtime-ios-touch {
+    width: auto;
+    max-width: 480px;
+    margin: 0 auto;
+  }
+}
+
+/* 觸控版 popup 垂直節奏收斂(v1.10.37 起,SPEC-PRIVATE §26):觸控版 zoom 1.35〜1.5 把
+   桌面 ~600px 上限調校過的版面整體放大,兩個情境會撐爆可見範圍:
+   (1) iPad mini 直立 popover:YouTube 頁多三列(字幕翻譯 / 雙語對照 / 字幕大小)全展開
+       撐到 ~629px,超過 popover 上限 → footer 被切(v1.10.37 首次收斂)。
+   (2) iPhone sheet:Safari 把 popup 當底部 sheet 呈現,開啟時停在較矮的 detent(可手動
+       上拉,但 footer 在摺線下)。已翻譯 active 狀態(顯示原文 + 編輯譯文 + 累計列)在
+       zoom ~1.5 下高度超出開啟 detent 約一個 footer → 底部「設定 / 快速切換」看不到
+       (Jimmy 實機回報)。iPhone sheet 的 detent 高度 / 開啟位置由 Safari 決定,網頁端
+       無法控制(查證:Apple 開發者論壇多 thread + WWDC,iOS 無 web extension popup 的
+       sheet detent API)→ 唯一能做的是把版面壓矮,讓內容落進開啟 detent 內。
+   修法:只壓 runtime-ios-touch 的垂直節奏(margin / padding),不動字級(zoom / --sk-fz
+   保留 → 可讀性不變),水平 16px 不動(保對齊 grid,CLAUDE.md §1)。iPad popover 會跟著
+   內容縮(sized-to-content)→ 一起更緊湊、無副作用。量測(@1.35):iPad YT 629→~498px、
+   iPhone active 457→~417px(各 recover 一個 footer 以上)。桌面 / 非觸控走原節奏不受影響。 */
+body.runtime-ios-touch header { padding-top: 5px; padding-bottom: 5px; }
+body.runtime-ios-touch main { padding-top: 6px; padding-bottom: 6px; }
+body.runtime-ios-touch button.primary { padding: 6px; }
+body.runtime-ios-touch button.secondary { margin-top: 4px; padding: 6px; }
+body.runtime-ios-touch .row,
+body.runtime-ios-touch .display-mode-row { margin-top: 4px; }
+body.runtime-ios-touch .cache-row { margin-top: 4px; padding-top: 4px; }
+body.runtime-ios-touch .status { margin-top: 3px; }
+body.runtime-ios-touch footer { padding-top: 5px; padding-bottom: 5px; }
+
+/* iPad 字體放大（SPEC-PRIVATE §26.10）：大 iPad（12.9"）跟 iPad mini 共用同一個
+   popover 尺寸（都 ~420pt），但大螢幕檢視距離較遠 → 字看起來偏小。zoom 是整體
+   縮放、改不了「字相對箱子」的比例,故另用 --sk-fz（popup.js 依螢幕短邊設：iPad
+   mini → 1 不變、12.9" → ~1.35）只放大可讀文字,popup 箱子尺寸（zoom）不動。
+   寬度受限的 mode 切換鈕（.mode-btn,140px 內塞兩顆）刻意不套,避免文字溢出。
+   --sk-fz 預設 1 → 桌面 / iPhone / iPad mini 維持原字級。 */
+body.runtime-ios-touch header h1 { font-size: calc(16px * var(--sk-fz, 1)); }
+body.runtime-ios-touch .version { font-size: calc(11px * var(--sk-fz, 1)); }
+body.runtime-ios-touch button.primary { font-size: calc(14px * var(--sk-fz, 1)); }
+body.runtime-ios-touch button.secondary { font-size: calc(13px * var(--sk-fz, 1)); }
+body.runtime-ios-touch .row { font-size: calc(13px * var(--sk-fz, 1)); }
+body.runtime-ios-touch .row select { font-size: calc(12px * var(--sk-fz, 1)); }
+body.runtime-ios-touch .display-mode-row { font-size: calc(13px * var(--sk-fz, 1)); }
+body.runtime-ios-touch .status { font-size: calc(12px * var(--sk-fz, 1)); }
+body.runtime-ios-touch .cache-row { font-size: calc(12px * var(--sk-fz, 1)); }
+body.runtime-ios-touch .cache-info { font-size: calc(11px * var(--sk-fz, 1)); }
+body.runtime-ios-touch button.link { font-size: calc(12px * var(--sk-fz, 1)); }
+body.runtime-ios-touch button.link.small { font-size: calc(12px * var(--sk-fz, 1)); }
+body.runtime-ios-touch .hint { font-size: calc(11px * var(--sk-fz, 1)); }
+
 button.link {
   background: none;
   border: 0;
@@ -116,7 +216,7 @@ button.link {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-top: 14px;
+  margin-top: 10px;
   font-size: 13px;
 }
 .display-mode-label {
@@ -154,8 +254,8 @@ button.link {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-top: 12px;
-  padding-top: 10px;
+  margin-top: 10px;
+  padding-top: 8px;
   border-top: 1px solid #f0f0f0;
   font-size: 12px;
 }
@@ -172,6 +272,17 @@ button.link.small:hover { text-decoration: underline; }
   gap: 6px;
   font-size: 11px;
   color: #86868b;
+  /* v2.0.71:確認列(「確定清除？／歸零？」+ 是/否)不可換行——flex 擠壓時 CJK
+     短語會被拆成直式(iOS 觸控版字級放大時實測)。空間不足由 .cache-info 截斷讓位 */
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+/* 確認列展開時左側資訊文字讓位:可縮 + 省略號,不推擠確認列換行 */
+.cache-info {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .clear-cache-danger { color: #ff3b30; font-weight: 600; }
 

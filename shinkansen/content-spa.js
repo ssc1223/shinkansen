@@ -18,6 +18,20 @@
   let contentGuardInterval = null;
   const GUARD_SWEEP_INTERVAL_MS = 1000;
 
+  // v1.10.65: 外部暫停旗標——JRead 閱讀模式啟動時透過 'jread-reader-mode' CustomEvent
+  // 叫 Shinkansen 暫停 content guard。為什麼需要:JRead 進閱讀模式會把被翻譯的
+  // articleEl 重排成閱讀卡片,guard 每秒 sweep 會把它誤判成「譯文被 SPA 覆蓋」而重建
+  // 子節點 → 使用者畫面每秒閃一下(只在 translate-first 後進閱讀模式才發生)。閱讀卡片
+  // 就是 articleEl 本身、在 guard 管轄區內,JRead 端無法閃避,故由 guard 端在閱讀模式
+  // 期間讓位。runContentGuard / onSpaObserverMutations 入口都 check 此旗標。
+  // 退出閱讀模式時 JRead 送 active:false 恢復。SK.setContentGuardPaused 是唯一寫入點。
+  // v2.0.57: 讓位範圍收斂——只停會重建子樹的 innerHTML / dual 軌與 mutation reconcile,
+  // nv 軌(純 nodeValue 重套,不動結構不閃)在暫停期間保留 sweep(reapplyOnly);
+  // 恢復時 setContentGuardPaused(false) 立即跑一次全量 nv reconcile 補課。
+  // Why:閱讀模式期間 NYT React 對 figure 間歇 re-render 把圖說 text node 打回英文,
+  // 整段早退讓 guard 全盲、退出後也接不回(2026-07-16 JRead 端 cage probe 診斷)。
+  let contentGuardExternallyPaused = false;
+
   // v1.8.14: Guard sweep 改用 IntersectionObserver 維護「viewport 附近」的子集,
   // sweep 只走子集而非整份 STATE.translatedHTML。長文(Wikipedia 千段)從每秒
   // 1000 次字串相等比對 + 部分 rect 算降到通常 < 30 個 entry 的子集。
@@ -33,18 +47,67 @@
       STATE.translating = false;
       STATE.abortController = null;
     }
+    // v2.0.78（批次 3 B2）：編輯中發生 SPA 導航時先結束編輯模式（對照 restorePage
+    // 同款守門）。必須在下方 marker 剝除「之前」呼叫——toggleEditMode(false) 靠
+    // marker 找回要清 contenteditable / shinkansen-editable 的元素；殘存共用元素
+    // （header 等）的這些 attribute 不清，後續 sticky 續翻會被偵測層排除永不再翻
+    SK.exitEditModeIfActive?.();
     SK.cancelRescan();
+    // v1.10.46(批次 2-4):SPA 換頁時 abort in-flight 的 rescan 批次——舊頁 rescan 的
+    // 晚到回應不得注入新頁(translateUnitsByProvider 統一掛的 rescan signal 在此失效)
+    SK.abortRescanRuns?.();
     stopSpaObserver();
+    // v1.10.57: SPA 子頁導航時站點常保留部分舊節點(header / nav / 共用區塊)。這些節點仍
+    // 掛 marker + 顯示譯文,但下面馬上要 clear originalHTML/translatedHTML → 還原資料消失
+    // → 孤兒譯文。隨後 sticky 續翻時 collectParagraphs 看到的是譯文(isAlreadyInTarget 全跳)
+    // → 空翻 → STATE.translated 永遠回不來 → popup / icon 與畫面永久不一致(殭屍狀態,
+    // 「已翻譯頁面點 url 延伸子孫 url」實測重現)。解法:clear 之前先把仍 connected 的注入
+    // 節點還原回原文,讓續翻看到原文正常翻;已翻過的舊內容重翻走 cache hit(近乎零成本),
+    // 只有子頁真新內容才打 API。single / dual / nodeValue mutate 三種注入痕跡都要清。
+    // v2.0.85: detached el 也照樣還原（與 content.js restoreInjectedDom 同修法）——
+    // framework 可能 detach 後 reattach 同一節點,只還原 connected 會讓 reattach 回來的
+    // 節點帶著譯文 + marker 殭屍殘留
+    let _spaStripped = 0;
+    STATE.originalHTML.forEach((originalHTML, el) => {
+      // AMO source review: originalHTML 來自本 extension 翻譯前自存的原始 DOM 字串,純還原用。
+      el.innerHTML = originalHTML;
+      el.removeAttribute('data-shinkansen-translated');
+      SK.restoreLocaleStyling?.(el);
+      _spaStripped++;
+    });
+    // dual wrapper(同時清 data-shinkansen-dual-source attribute)
+    if (STATE.translatedMode === 'dual' || (STATE.translationCache && STATE.translationCache.size > 0)) {
+      SK.removeDualWrappers?.();
+    }
+    // framework-managed nodeValue mutate:還原 text node + 清 marker（v2.0.85: detached 也寫,同上）
+    if (STATE.nodeValueMutateBackup && STATE.nodeValueMutateBackup.size > 0) {
+      STATE.nodeValueMutateBackup.forEach((backup, el) => {
+        backup.forEach(({ node, originalValue }) => {
+          if (node) { try { node.nodeValue = originalValue; } catch (_) {} }
+        });
+        try {
+          el.removeAttribute('data-shinkansen-nodevalue-mutated');
+          SK.restoreLocaleStyling?.(el);
+        } catch (_) {}
+      });
+    }
     STATE.originalHTML.clear();
     STATE.translatedHTML.clear();
     STATE.translatedHTMLByText?.clear?.();
     STATE.originalText?.clear?.();
+    STATE.translationCache?.clear?.();
+    STATE.nodeValueMutateBackup?.clear?.();
+    STATE.originalLang?.clear?.();
+    STATE.originalFontFamily?.clear?.();
+    SK.restoreDocLang?.();  // v2.0.73:SPA 換頁後新內容是原文,<html lang> 還原原值
+    // v2.0.85: Map 已全清,掃掉簿記追不到的無主殭屍 marker(與 restoreInjectedDom 同)
+    SK.sweepOrphanTranslationMarkers?.();
     STATE.cache.clear();
     STATE.translated = false;
     STATE._glossaryPromise = null;
     SK.safeSendMessage({ type: 'CLEAR_BADGE' }).catch(() => {});
     SK.hideToast();
-    SK.sendLog('info', 'spa', 'SPA navigation detected, state reset', { url: location.href, stickyTranslate: STATE.stickyTranslate });
+    SK.sendLog('info', 'spa', 'SPA navigation detected, state reset', { url: location.href, stickyTranslate: STATE.stickyTranslate, strippedConnected: _spaStripped });
   }
 
   // ─── 自動翻譯網站名單比對 ────────────────────────────
@@ -53,18 +116,9 @@
     try {
       const { domainRules } = await browser.storage.sync.get('domainRules');
       if (!domainRules?.whitelist?.length) return false;
-      const hostname = location.hostname.toLowerCase();
-      // exact-match 兩邊都去掉開頭 `www.` 再比,讓 `culpium.com` 與 `www.culpium.com` 互通
-      // (要匹配所有子網域請用 `*.culpium.com`)。
-      const normHost = hostname.replace(/^www\./, '');
-      return domainRules.whitelist.some(raw => {
-        const pattern = String(raw).toLowerCase();
-        if (pattern.startsWith('*.')) {
-          const suffix = pattern.slice(1);
-          return hostname === pattern.slice(2) || hostname.endsWith(suffix);
-        }
-        return normHost === pattern.replace(/^www\./, '');
-      });
+      // 比對規則(含使用者貼整段網址時的正規化)統一走 lib/domain-utils.js 單一來源,
+      // 讓 `https://stratechery.com/`、`stratechery.com/`、`stratechery.com` 三者等價。
+      return window.__SKDomain.matchDomain(location.hostname, domainRules.whitelist);
     } catch (err) {
       SK.sendLog('warn', 'system', 'isDomainWhitelisted: failed to read storage', { error: err.message });
       return false;
@@ -73,10 +127,53 @@
 
   // ─── SPA 導航處理 ────────────────────────────────────
 
+  // v2.0.66：純 hash 變動的「內容換掉了」判別門檻——settle 後原已翻譯元素
+  // detach 比例 ≥ 此值視為視圖真的換掉（hash-router 導航），< 此值視為
+  // in-page 錨點（內容沒換）。取 0.2：hash-router 換視圖 detach 的是主內容區
+  // 的大宗翻譯單位，遠超 2 成；錨點場景則是 0。
+  const SPA_HASH_NAV_DETACH_RATIO = 0.2;
+
   async function handleSpaNavigation() {
     const newUrl = location.href;
     if (newUrl === spaLastUrl) return;
+    const prevUrl = spaLastUrl;
     spaLastUrl = newUrl;
+    // v2.0.66：純 hash 變動（pathname + search 都沒變）需要二段判別——不能一律
+    // 當導航，也不能一律跳過：
+    //   - in-page anchor / TOC 跳轉 / 站方 selection-share 錨點（archive 類雙擊
+    //     選字把選取範圍寫進 '#selection-…'；站方從 main world 呼叫 history API，
+    //     isolated world 的 history patch 攔不到，由 hashchange / URL 輪詢撿到）：
+    //     內容沒換，reset 會整頁還原譯文——編輯模式下段落是 contenteditable 被
+    //     偵測層排除 → sticky 重翻抓到 0 段 → 整頁卡原文、無法編輯（2026-07-27
+    //     archive 鏡像實測：雙擊選字 → 連續 6 次 state reset → translated=0）
+    //   - hash-routing SPA（Gmail `#inbox` → `#inbox/<id>`）：視圖整個換掉，必須
+    //     照舊 reset ＋ sticky 續翻（v1.0.23 既有行為，spa-sticky-translate /
+    //     spa-url-polling jest 鎖定）
+    // 判別器用「行為」不用 URL 形狀（§8）：等 SPA_NAV_SETTLE_MS 後看原本已翻譯的
+    // 元素還剩多少 connected——幾乎全數健在（detach 比例 < 門檻）= 內容沒換 =
+    // 錨點，跳過 reset；相當比例 detach = 視圖真的換掉 = 導航，落回 reset 流程。
+    // 頁面沒有任何翻譯痕跡時不等待、直接當導航（自動翻譯白名單的 hash-router
+    // 首翻不受影響）。search 有變仍一律視為導航（YouTube /watch?v=… 換片走 query）。
+    try {
+      const a = new URL(prevUrl);
+      const b = new URL(newUrl);
+      if (a.pathname === b.pathname && a.search === b.search) {
+        const tracked = Array.from(document.querySelectorAll(
+          '[data-shinkansen-translated], [data-shinkansen-dual-source]'));
+        if (tracked.length > 0) {
+          await new Promise(r => setTimeout(r, SK.SPA_NAV_SETTLE_MS));
+          if (spaLastUrl !== newUrl) return; // 期間又有新導航，交給較新的那輪處理
+          const detached = tracked.filter(el => !el.isConnected).length;
+          if (detached / tracked.length < SPA_HASH_NAV_DETACH_RATIO) {
+            SK.sendLog('info', 'spa', 'hash-only URL change with content intact, skipping SPA reset',
+              { newUrl, oldUrl: prevUrl, tracked: tracked.length, detached });
+            return;
+          }
+          SK.sendLog('info', 'spa', 'hash-only URL change with content swapped, treating as navigation',
+            { newUrl, oldUrl: prevUrl, tracked: tracked.length, detached });
+        }
+      }
+    } catch (_) { /* URL 解析失敗（理論上不會）→ 照舊當導航處理 */ }
     const wasSticky = STATE.stickyTranslate;
     const prevSlot = STATE.stickySlot;  // v1.4.12: 記錄續翻用的 preset slot
     resetForSpaNavigation();
@@ -103,7 +200,7 @@
     }
 
     try {
-      const { autoTranslate = false, autoTranslateSlot } = await browser.storage.sync.get(['autoTranslate', 'autoTranslateSlot']);
+      const { autoTranslate = false, autoTranslateSlot, autoConvertZh = false } = await browser.storage.sync.get(['autoTranslate', 'autoTranslateSlot', 'autoConvertZh']);
       if (autoTranslate && await SK.isDomainWhitelisted()) {
         // v1.6.13: 走指定 preset slot,讓 SPA 導航的白名單觸發跟使用者期待的快速鍵一致。
         const n = Number(autoTranslateSlot);
@@ -114,6 +211,13 @@
         } else {
           SK.translatePage();
         }
+        return;
+      }
+      // 簡繁自動互轉:SPA 導航後對新頁重跑本地轉換檢查(與初載路徑同語意;
+      // 不適用頁在 convertOnly 內靜默結束)
+      if (autoConvertZh) {
+        SK.sendLog('info', 'spa', 'SPA nav: autoConvertZh on, trying local zh-convert', { url: location.href });
+        SK.translatePage({ convertOnly: true });
         return;
       }
     } catch (err) {
@@ -153,7 +257,17 @@
   // ─── URL 輪詢（SPA 導航 safety net） ─────────────────
 
   const SPA_URL_POLL_MS = 500;
-  setInterval(() => {
+  let spaUrlPollTimer = setInterval(() => {
+    // v1.10.39(code review 2026-06-09 M1):本 interval 是模組唯一沒被 stopSpaObserver
+    // 收斂的週期工作。orphan content script(extension reload / 更新後舊腳本還活著)時
+    // context 失效,輪詢仍每 500ms 跑(handleSpaNavigation 內 storage / sendMessage 雖被
+    // try/catch 接住,但 timer 本身空轉耗電)。偵測到 context 失效就自我清除。
+    // 偵測法鏡像 content-ns.js safeSendMessage 的 orphan 判斷(chrome.runtime.id 失效變 undefined)。
+    if (!globalThis.chrome?.runtime?.id) {
+      clearInterval(spaUrlPollTimer);
+      spaUrlPollTimer = null;
+      return;
+    }
     // v1.6.10: 分頁隱藏時跳過 URL 輪詢——背景分頁不會由使用者觸發導航,
     // pushState patch + popstate + hashchange 三條 listener 仍活躍,真正
     // 主動觸發的 SPA 導航不會漏接。輪詢只是萬一上述 patch 沒套到的 safety
@@ -207,10 +321,19 @@
     }
     return true;
   }
+  // review B8:過期 entry 原本只在「同 text 再被 isSeenTextRecent 查到」時才 GC,
+  // X / Reddit 無限捲動長 session 累積數千條全文 key(多數不會再被查到)永不釋放。
+  // rescan 時順掃一輪整批清過期 entry(Map 迭代中 delete 是安全操作)。
+  function sweepExpiredSeenTexts(now) {
+    for (const [text, ts] of spaObserverSeenTexts) {
+      if (now - ts > SPA_OBSERVER_SEEN_TEXTS_TTL_MS) spaObserverSeenTexts.delete(text);
+    }
+  }
   // 給 spec 用
   SK._spaObserverSeenTexts = spaObserverSeenTexts;
   SK._isSeenTextRecent = isSeenTextRecent;
   SK._SPA_OBSERVER_SEEN_TEXTS_TTL_MS = SPA_OBSERVER_SEEN_TEXTS_TTL_MS;
+  SK._sweepExpiredSeenTexts = sweepExpiredSeenTexts;
 
   // Debug Bridge 用:暴露 SPA observer 內部狀態以判斷 rescan 是否 fire / 為何 silent
   SK._spaDebug = function _spaDebug() {
@@ -221,6 +344,7 @@
       rescanCount: spaObserverRescanCount,
       seenTextsSize: spaObserverSeenTexts.size,
       contentGuardActive: !!contentGuardInterval,
+      contentGuardExternallyPaused: contentGuardExternallyPaused, // v1.10.65: JRead 閱讀模式期間 true
       guardVisibleSetSize: guardVisibleSet ? guardVisibleSet.size : null,
       stateTranslated: STATE.translated,
       stateTranslating: STATE.translating,
@@ -230,14 +354,81 @@
       hasNewContentTrueCount: _dbgHasNewContentTrueCount,
       debounceArmedCount: _dbgDebounceArmedCount,
       earlyReturnNotTranslated: _dbgEarlyReturnNotTranslated,
-      earlyReturnMaxRescans: _dbgEarlyReturnMaxRescans,
     };
   };
+
+  // v1.10.65: 外部（JRead 閱讀模式）暫停 / 恢復 content guard 的唯一寫入點。
+  // paused=true:runContentGuard / onSpaObserverMutations 入口讓位（早退），停止把
+  // JRead 重排的 articleEl 誤判成「譯文被覆蓋」而每秒重建 → 消除畫面每秒閃動。
+  // 不停 interval / 不 stopSpaObserver（恢復後無需重建、立即接續）。idempotent。
+  SK.setContentGuardPaused = function setContentGuardPaused(paused) {
+    const wasPaused = contentGuardExternallyPaused;
+    contentGuardExternallyPaused = !!paused;
+    SK.sendLog('info', 'spa', 'content guard ' + (contentGuardExternallyPaused ? 'paused' : 'resumed') + ' (JRead reader mode)');
+    // v2.0.57(洞 2): unpause 補課——盲窗/暫停期間發生的 nv-mutate 回退,恢復當下
+    // 立即跑一次全量 reconcile(ignoreViewport=true,不等 viewport / 下一次 1s sweep)。
+    // 洞 1 的暫停期 nv sweep(reapplyOnly)已涵蓋大多數,這條是雙保險,同時接住
+    // reapplyOnly 刻意跳過的「內容已變」entry(此處走完整版,可 unmark+rescan)。
+    // 編輯模式 contenteditable 豁免在 runContentGuardNvMutate 迴圈內,不會被打破。
+    if (wasPaused && !contentGuardExternallyPaused && STATE.translated
+        && STATE.translatedMode !== 'dual') {
+      try { runContentGuardNvMutate(true); } catch (_) {}
+    }
+  };
+
+  // mousedown capture: framework 的 click handler 跑之前先把 nodeValue mutate
+  // 的 text node 還原為英文原文。React reconciliation 用 fiber 跟 DOM diff 決定要
+  // 更新什麼；nodeValue mutate 把 DOM text 改成中文,fiber 仍記「截斷英文」→
+  // reconcile 算出錯誤的 diff → 展開後中間段落消失。在 mousedown(早於 click)
+  // 還原,React 看到正確 DOM,reconcile 結果正確。還原後 SPA rescan 會重新翻譯。
+  let _preClickListenerAdded = false;
+  function addPreClickRestore() {
+    if (_preClickListenerAdded) return;
+    if (typeof window === 'undefined') return;
+    _preClickListenerAdded = true;
+    window.addEventListener('mousedown', (e) => {
+      if (!STATE.nodeValueMutateBackup || STATE.nodeValueMutateBackup.size === 0) return;
+      const target = e.target;
+      if (!target || target.nodeType !== Node.ELEMENT_NODE) return;
+      const nvEl = target.closest?.('[data-shinkansen-nodevalue-mutated]');
+      if (!nvEl) return;
+      // 編輯模式豁免(對齊三條 sweep 軌):編輯中的點擊是「放游標準備編輯」,
+      // 不是觸發 framework click handler(contenteditable 內連結/按鈕不作用,
+      // React diff 錯亂的前提不存在)。沒這條的話點一下譯文段就被還原成原文
+      // + unmark,編輯模式下 rescan 又排除 contenteditable → 永遠卡原文
+      if (nvEl.getAttribute('contenteditable') === 'true') return;
+      const backup = STATE.nodeValueMutateBackup.get(nvEl);
+      if (!backup) return;
+      for (const entry of backup) {
+        if (entry?.node?.isConnected && typeof entry.originalValue === 'string') {
+          entry.node.nodeValue = entry.originalValue;
+        }
+      }
+      nvEl.removeAttribute('data-shinkansen-nodevalue-mutated');
+      nvEl.removeAttribute('data-shinkansen-translated');
+      STATE.nodeValueMutateBackup.delete(nvEl);
+      STATE.originalText.delete(nvEl);
+      STATE.originalHTML?.delete?.(nvEl);
+      // 清 seenTexts entry（還原後 innerText 是英文原文）讓後續 rescan 能重翻
+      const _restoredText = (nvEl.innerText || '').trim();
+      if (_restoredText) spaObserverSeenTexts.delete(_restoredText);
+      SK.sendLog?.('info', 'spa', 'pre-click restore: nodeValue mutate backup restored for click target');
+      // 主動排程 rescan：pre-click restore 清掉所有 STATE 後 nodeValue mutate
+      // 元素完全失去 Content Guard 保護（不在 STATE.translatedHTML），且 React
+      // 的 click re-render 不一定產出 childList mutations 觸發 hasNewContent。
+      // 500ms 讓 React commit phase 完成後再 rescan + re-translate。
+      setTimeout(() => {
+        if (!STATE.translated) return;
+        triggerSpaObserverRescan();
+      }, 500);
+    }, { capture: true, passive: true });
+  }
 
   SK.startSpaObserver = function startSpaObserver() {
     if (spaObserver) return;
     spaObserverRescanCount = 0;
     spaObserverSeenTexts.clear();
+    addPreClickRestore();
     spaObserver = new MutationObserver(onSpaObserverMutations);
     // v1.9.27: 加 characterData 監聽,讓 framework 用 textNode.replaceData() partial
     // update text node 的場景(X 推文點「顯示更多」→ React 改 tweetText 子 text node
@@ -423,12 +614,23 @@
   // 之後 SPA observer rescan 看到 textContent 命中此 cache 的「全新 element」,直接 inject 既有譯文,
   // 不送 API、不重翻、譯文一致(典型場景:Twitter / Reddit / Threads / Mastodon virtualized timeline
   // 滑出 viewport 後使用者滑回頂,React unmount 原 element + 重 mount 全新 element)。
+  // review B8:byText cache 加條數上限(LRU)。每段存 originalText → innerHTML
+  // 永不修剪,無限捲動數小時累積數千條全文 + HTML 字串(可達數十 MB)。Map 迭代
+  // 序 = 插入序,重複 set 前先 delete、命中時 touch 重插 = 插入序即近期使用序,
+  // 超限淘汰最舊。
+  const TRANSLATED_BY_TEXT_MAX = 1000;
+  SK._TRANSLATED_BY_TEXT_MAX = TRANSLATED_BY_TEXT_MAX;  // 測試 seam
   SK._recordTranslatedByText = function _recordTranslatedByText(el, savedHTML) {
     if (!STATE.translatedHTMLByText) return;
     if (!el || !savedHTML) return;
     const orig = STATE.originalText && STATE.originalText.get(el);
     if (!orig) return;
-    STATE.translatedHTMLByText.set(orig, savedHTML);
+    const m = STATE.translatedHTMLByText;
+    if (m.has(orig)) m.delete(orig);
+    m.set(orig, savedHTML);
+    while (m.size > TRANSLATED_BY_TEXT_MAX) {
+      m.delete(m.keys().next().value);
+    }
   };
 
   // SPA observer rescan 收進的 newUnits 預檢:對 element unit 用 textContent 查 byText cache,
@@ -454,7 +656,15 @@
       const text = (unit.el.textContent || '').trim();
       const savedHTML = STATE.translatedHTMLByText.get(text);
       if (!savedHTML) { remaining.push(unit); continue; }
+      // LRU touch:命中即重插,讓熱 entry(virtualization 反覆 remount 的段)
+      // 不被容量淘汰(review B8)
+      STATE.translatedHTMLByText.delete(text);
+      STATE.translatedHTMLByText.set(text, savedHTML);
       try {
+        // 覆寫前先快照原文——此刻 el 顯示的正是 remount 後的原文。少這步的話
+        // restorePage / resetForSpaNavigation 都以 STATE.originalHTML 為迭代源，
+        // reuse 注入的元素不在其中 → 按還原後殘留殭屍譯文段
+        SK.snapshotOnce?.(unit.el);
         // AMO source review: savedHTML 來自 STATE.translatedHTMLByText(本 extension 自存
         // 的 inject 後 innerHTML),無 user input 流入。see BUILD.md §innerHTML
         unit.el.innerHTML = savedHTML;
@@ -516,6 +726,18 @@
     // (上百 entry) 在背景分頁是純浪費 CPU + 電力。切回前景時下一次 sweep
     // 在 1 秒內就會修復,使用者無感知差異。
     if (document.hidden) return;
+    // v2.0.57(洞 1): JRead 閱讀模式讓位從「整段早退」改成「只停 innerHTML / dual 軌,
+    // 保留 nv 軌」。v1.10.65 要防的每秒閃動來源是 innerHTML / dual 軌把 JRead 重排
+    // 誤判成「譯文被覆蓋」而重建子樹;nv 軌(runContentGuardNvMutate)是純 text node
+    // nodeValue 重套、不動元素結構,不會閃。整段早退會讓「閱讀模式期間 framework 把
+    // 譯文打回原文」(NYT React figcaption 實測)進入盲窗、英文一直掛在畫面上。
+    // reapplyOnly=true:暫停期間只做零 API 的原地重套,不走 unmark+rescan(rescan 是
+    // 完整 inject pipeline、會動結構);內容已變的 entry 留給 resume 補課
+    // (setContentGuardPaused(false) 的全量 reconcile)。
+    if (contentGuardExternallyPaused) {
+      if (STATE.translatedMode !== 'dual') runContentGuardNvMutate(false, true);
+      return;
+    }
     // v1.5.0: dual 模式分派——監看 wrapper 被 SPA 刪除後 re-append。
     if (STATE.translatedMode === 'dual') {
       runContentGuardDual(false);
@@ -527,6 +749,7 @@
     if (STATE.translationCache && STATE.translationCache.size > 0) {
       runContentGuardDual(false);
     }
+    runContentGuardNvMutate(false);
     let restored = 0;
     // v1.8.14: 優先走 IO subset(viewport 附近的 entry),沒 IO 時 fallback 全表
     const candidates = guardVisibleSet
@@ -554,6 +777,200 @@
       SK.sendLog('info', 'guard', `Content guard restored ${restored} overwritten nodes`);
     }
   }
+
+  // v1.10.49: nv-mutate 元素巡檢 — detectAndUnmarkExpandedNodeValueMutate Path E
+  // 的週期性補位。A4 是 observer batch 反應式:framework 還原譯文的 mutation 若落
+  // 在注入期間 / debounce 視窗外被漏看(2026-06-12 Medium 劃線 highlight hydration
+  // 實測:5 段 nv-mutate 元素被 React 整批換新 text node 還原成英文,attribute 留
+  // 在元素上,A4 沒收到 batch → 永遠卡「標 translated 但顯示原文」),需要跟
+  // innerHTML guard / dual wrapper guard 同等級的 1s sweep 兜底。
+  // 只處理「backup node 全部 detach」(framework 整批換新)——connected 但值變了
+  // 的場景留給 A4 Path B(batch 內有 characterData 事件,且 sweep 搶先重寫會跟
+  // X show-more 展開重翻打架,把完整原文蓋回截斷版譯文)。
+  // 兩條修復路徑(以「重 render 後的內容」分流):
+  //   1. 同內容重 render(current textContent === STATE.originalText)→ 直接把
+  //      STATE.nvMutateTranslation 記錄的譯文重套(nvReapplySaved:先試 raw+slots
+  //      A3 同構配對保留 inline 結構,配對不成 fallback 純文字 slots=[]),零 API、
+  //      冪等,sweep 每秒一次直到贏過 framework 的 hydration 波
+  //      (§15「reapply on detach+reattach」戰術)。unmark→rescan→重打 API 在
+  //      hydration 波內會反覆被還原直到重試上限耗盡,實測救不回來。
+  //   2. 內容已變(X show-more 展開等)→ unmark + rescan 重翻(不可重套舊譯文,
+  //      會把新內容蓋掉)。
+  // 每元素干預上限 8 次:防 framework 持續重 render 的無限 ping-pong(重套免
+  // API 成本低,上限放寬到足以撐過 Medium hydration 多波重 render)。
+  // v2.0.57(洞 3):上限從 lifetime 計數改「滾動停損」——距上次介入超過
+  // NV_GUARD_INTERVENE_DECAY_MS 就歸零重計。lifetime 上限在長閱讀 session 會被
+  // 偶發重繪慢慢耗盡(NYT 滾動 lazy-load 每次重繪吃 1 次),之後 sweep 永久跳過
+  // 該元素 =「標 translated、畫面永遠原文」終態;真正要防的「站方持續對抗」
+  // ping-pong 是高頻連續介入,60s 視窗內照樣 8 次就停。上限打滿後 lastT 不再更新,
+  // 60s 後自動重新放行 → 最壞情況從「無限迴圈」變「每分鐘最多 8 次」受控頻率,
+  // 終態也因此可自癒。
+  const NV_GUARD_INTERVENE_MAX = 8;
+  const NV_GUARD_INTERVENE_DECAY_MS = 60_000;
+  const nvGuardInterveneCount = new WeakMap(); // el → { n, lastT }
+  function nvGuardTryIntervene(el) {
+    const now = Date.now();
+    const rec = nvGuardInterveneCount.get(el);
+    const n = (rec && now - rec.lastT <= NV_GUARD_INTERVENE_DECAY_MS) ? rec.n : 0;
+    if (n >= NV_GUARD_INTERVENE_MAX) return false;
+    nvGuardInterveneCount.set(el, { n: n + 1, lastT: now });
+    return true;
+  }
+
+  // v2.0.57(洞 3):不依賴 backup node refs / 值的「回到原文」判準。
+  // backup 的 originalValue 在多輪 guard 重建後可能是 stale 混合值(重建當下畫面
+  // 是「部分英文 + 部分譯文」,originalValue 就存成那個混合態),之後 framework 再
+  // 用 reuse-node 方式把全段打回原文時:node 沒 detach(allDetached 不成立)、
+  // curText 也比對不到任何 stale originalValue(nvMutateRevertedToOriginal 不成立)
+  // → 舊閘門永久跳過,卡「標 translated、畫面英文」終態(NYT figcaption + JRead
+  // 閱讀模式實測)。本判準直接拿 el.textContent 對 STATE.originalText 全等(空白
+  // 正規化後),不經任何 node ref,framework 換新 node / reuse node / 部分重繪一律涵蓋。
+  function nvRevertedToOrigText(origText, curText) {
+    if (!origText || !curText) return false;
+    if (curText === origText) return true;
+    const norm = (s) => s.replace(/\s+/g, ' ').trim();
+    return norm(curText) === norm(origText);
+  }
+
+  // 2026-07-02: 判斷 nv-mutate 元素「譯文被 framework 打回原文(全部或部分)」。
+  // 以「症狀」為準,涵蓋 framework 重繪的各種節點處理方式:
+  //   - 換新 node(backup 全 detach)、reuse node 只 reset nodeValue(backup 仍 connected)、
+  //     只重繪「部分」text node(多 text node 元素常見:圖說「說明 span + 來源 span」,
+  //     framework 只把說明 span 打回英文,來源 span 仍是譯文 → 混合)。
+  // 判準:元素現在的可見文字含有「某個 backup 節點的原文值」(說明該段回到原文),
+  //   且整體長度沒明顯變長(排除 X show-more 這類「原文還在 + 新增大量內容」→ 那要重翻,
+  //   不是重套舊譯文)。健康譯文(顯示中文、無原文值)與換新內容(不含 backup 原文值)
+  //   都不會命中,故不會誤把好譯文或新內容重套。
+  // Why 不是只比 curText === origText:真實案例(NYT React figcaption)是「部分還原」,
+  //   curText 是「英文說明 + 中文來源」的混合,不等於全英文 origText,舊判準漏接 → 卡英文。
+  function nvMutateRevertedToOriginal(backup, origText, curText) {
+    if (!origText || !curText) return false;
+    if (curText.length > origText.length * 1.3) return false; // 明顯變長 = 展開/新增,非還原
+    return backup.some(e => {
+      const ov = (e && typeof e.originalValue === 'string') ? e.originalValue.trim() : '';
+      return ov.length >= 4 && curText.includes(ov);
+    });
+  }
+
+  // v2.0.59: 「現況即譯文」判準——現在的可見文字去除全部空白後與純文字譯文全等。
+  // Why:nvMutateRevertedToOriginal 以「curText 含 backup originalValue 片段」判 reverted,
+  // 譯文保留原文專有名詞(人名 / 品牌名逐字出現在譯文)時會對健康譯文誤報 → sweep
+  // 對「已是譯文」的 DOM 重套。首翻 A3 對齊過的段落在譯文態 DOM 上重跑 A3 配對
+  // 必失敗(真實 Verge probe:okOnOrig=true / okOnTranslated=false,frag 文字 run 與
+  // 譯文態 text node 分佈不同)→ fallback 純文字 flatten,好譯文的 <a> 被打成空殼。
+  // 健康譯文直接跳過不動才是 no-op 正解;空白分佈允許不同(A3 各 node 首尾空白保留
+  // 自原文、flatten 版無此空白),故去空白比對。
+  function nvTextEqualsPlain(curText, plain) {
+    if (!curText || !plain) return false;
+    return curText.replace(/\s+/g, '') === plain.replace(/\s+/g, '');
+  }
+
+  // v2.0.59: 健康譯文第一訊號——backup 完好:所有 backup text node 仍 connected 且
+  // nodeValue 就是當初寫入的譯文值。成立 = 譯文原封沒被 framework 動過,guard 不該
+  // 介入(reverted 的 includes 判準在此仍可能誤報,見 nvTextEqualsPlain 註解)。
+  // 重套成功後 backup 都會以新 refs 重建,故「剛重套完的下一輪 sweep」此判準即成立,
+  // 不受譯文變體(slot 去重 / 自由 text 捨棄)造成的字面差異影響。
+  function nvBackupIntact(backup) {
+    return !!(backup && backup.length > 0 && backup.every(e =>
+      e && e.node && e.node.isConnected &&
+      typeof e.translatedValue === 'string' && e.node.nodeValue === e.translatedValue));
+  }
+
+  // v2.0.59: nv 重套統一入口。rec 來自 STATE.nvMutateTranslation({ plain, raw, slots })。
+  // A3 同構注入成功的段落,framework 打回原文後結構與首翻相同——先以帶佔位符的
+  // 原始譯文 + slots 重走 A3 配對,text node 各自套譯文、<a> 等 inline 結構保留;
+  // 配對不成(部分還原的混合態等)才 fallback 純文字重套(slots=[] Case 3b flatten,
+  // 原行為)。修 The Verge「guard 補課後段落內連結消失」(2026-07-16 回報)。
+  function nvReapplySaved(el, rec) {
+    if (!rec) return false;
+    if (rec.raw && rec.slots
+        && SK.tryInjectNodeValueMutate?.(el, rec.raw, rec.slots)) return true;
+    return !!(rec.plain && SK.tryInjectNodeValueMutate?.(el, rec.plain, []));
+  }
+
+  function runContentGuardNvMutate(ignoreViewport, reapplyOnly) {
+    if (!STATE.nodeValueMutateBackup || STATE.nodeValueMutateBackup.size === 0) return 0;
+    let reapplied = 0;
+    let unmarked = 0;
+    for (const [el, backup] of STATE.nodeValueMutateBackup) {
+      if (!el || !el.isConnected) continue;
+      if (!backup || backup.length === 0) continue;
+      // v2.0.57: 編輯模式豁免(對齊 innerHTML / mutation-driven 軌)——使用者正在
+      // 編輯的元素不重套、不 unmark,否則 sweep 會把使用者剛改的字蓋回譯文。
+      if (el.getAttribute?.('contenteditable') === 'true') continue;
+      const origText = STATE.originalText?.get?.(el);
+      const savedTranslation = STATE.nvMutateTranslation?.get?.(el);
+      const curText = (el.textContent || '').trim();
+      // v2.0.59: 健康譯文守門(見 nvBackupIntact / nvTextEqualsPlain)——畫面已是
+      // 譯文就不介入,防 reverted 誤報(譯文保留原文專有名詞)把好譯文重套成 flatten
+      if (nvBackupIntact(backup)
+          || (savedTranslation && nvTextEqualsPlain(curText, savedTranslation.plain))) continue;
+      const allDetached = backup.every(entry => !entry?.node?.isConnected);
+      // reverted:譯文被 framework 打回原文(全部或部分,不論換新 node / reset nodeValue /
+      // 只重繪部分節點)。取代原本只認「backup 全 detach」的判準——後者漏掉多 text node
+      // 元素被「部分重繪 / reuse-node reset」打回原文的形(2026-07-02 NYT figcaption 實測)。
+      const reverted = nvMutateRevertedToOriginal(backup, origText, curText);
+      // v2.0.57(洞 3):revertedToOrig 完全不依賴 backup refs / 值——backup 在多輪
+      // 重建後 originalValue 可能 stale(見 nvRevertedToOrigText 註解),只靠上兩個
+      // 判準會永久跳過「畫面已回到原文」的元素。
+      const revertedToOrig = nvRevertedToOrigText(origText, curText);
+      // 介入條件:framework 換過整批 node(allDetached)或元素顯示出原文(reverted /
+      // revertedToOrig)。健康譯文(沒被框架動過、顯示中文)皆不成立 → 跳過維持 no-op。
+      // 「全 detach + 內容換新(非還原)」落到下方 path 2 unmark 重翻;
+      // 「部分 detach + 展開新內容(X show-more)」三判準皆 false → 跳過,交給 A4。
+      if (!allDetached && !reverted && !revertedToOrig) continue;
+      if (!ignoreViewport) {
+        const rect = el.getBoundingClientRect();
+        if (rect.bottom < -500 || rect.top > window.innerHeight + 500) continue;
+      }
+      if (!nvGuardTryIntervene(el)) continue;
+
+      if (savedTranslation && (reverted || revertedToOrig)) {
+        // 路徑 1:譯文被打回原文 → 重套譯文。先清 stale backup 讓
+        // tryInjectNodeValueMutate 以「現在的原文 node」重建 backup(新 refs)。
+        const prevBackup = STATE.nodeValueMutateBackup.get(el);
+        STATE.nodeValueMutateBackup.delete(el);
+        if (nvReapplySaved(el, savedTranslation)) {
+          el.setAttribute('data-shinkansen-nodevalue-mutated', '1');
+          el.setAttribute('data-shinkansen-translated', '1');
+          reapplied++;
+          continue;
+        }
+        // 重套失敗(結構特殊):reapplyOnly(JRead 暫停期間)把舊 backup 放回——
+        // 不放回的話 map entry 消失,resume 補課就看不到這個元素(新終態)。
+        if (reapplyOnly) {
+          STATE.nodeValueMutateBackup.set(el, prevBackup);
+          continue;
+        }
+        // 完整模式 → fall through 走 unmark 路徑
+      } else if (reapplyOnly) {
+        // 暫停期間不走 unmark+rescan(會動結構),留給 resume 補課
+        continue;
+      }
+      // 路徑 2:內容已變 / 無譯文紀錄 → unmark + rescan 重翻
+      el.removeAttribute('data-shinkansen-nodevalue-mutated');
+      el.removeAttribute('data-shinkansen-translated');
+      STATE.nodeValueMutateBackup.delete(el);
+      STATE.originalText?.delete?.(el);
+      STATE.originalHTML?.delete?.(el);
+      // 清 seenTexts entry(元素現在顯示原文)讓 rescan 能重翻
+      const txt = (el.innerText || '').trim();
+      if (txt) spaObserverSeenTexts.delete(txt);
+      unmarked++;
+    }
+    if (reapplied > 0 || unmarked > 0) {
+      SK.sendLog('info', 'guard',
+        `Content guard nv-mutate: ${reapplied} reapplied, ${unmarked} unmarked for retranslation`);
+    }
+    if (unmarked > 0) {
+      setTimeout(() => {
+        if (!STATE.translated) return;
+        triggerSpaObserverRescan();
+      }, 100);
+    }
+    return reapplied + unmarked;
+  }
+  SK._testRunContentGuardNvMutate = function(reapplyOnly) { return runContentGuardNvMutate(true, !!reapplyOnly); };
 
   /**
    * v1.5.0: 雙語模式 Content Guard——遍歷 STATE.translationCache，
@@ -583,7 +1000,14 @@
       } else if (insertMode === 'afterend-block-ancestor') {
         const blockAncestor = SK.findBlockAncestor?.(el);
         if (blockAncestor && blockAncestor !== el.ownerDocument.body) {
-          blockAncestor.insertAdjacentElement('afterend', wrapper);
+          const wrapperTagUpper = SK.TRANSLATION_WRAPPER_TAG.toUpperCase();
+          let insertPoint = blockAncestor;
+          let sib = blockAncestor.nextElementSibling;
+          while (sib && sib.tagName === wrapperTagUpper) {
+            insertPoint = sib;
+            sib = sib.nextElementSibling;
+          }
+          insertPoint.insertAdjacentElement('afterend', wrapper);
         } else {
           el.insertAdjacentElement('afterend', wrapper);
         }
@@ -634,11 +1058,28 @@
   let _dbgHasNewContentTrueCount = 0;
   let _dbgDebounceArmedCount = 0;
   let _dbgEarlyReturnNotTranslated = 0;
-  let _dbgEarlyReturnMaxRescans = 0;
+  // 批次 8 A7:「已翻譯容器」內晚載內容的 scoped rescan 佇列。
+  // 問題(2026-08-05 重現):容器經注入後帶 data-shinkansen-translated,SPA 之後
+  // append 進同容器的新段落被兩層吃掉——hasNewContent 過濾把 translated 容器內
+  // mutation 整批排除(rescan 不 arm),collectParagraphs walker 又在容器層 REJECT
+  // 整棵;容器若在 STATE.translatedHTML 內,guard 還會把 append 沖回 savedHTML。
+  // 修法(結構性通則,§8——描述「純 append 進已譯容器」的 mutation 形狀,不綁站點):
+  // 對「無 removedNodes 的純 append、added element 位於標記容器內、自身未帶標記、
+  // 有實質文字」的節點:
+  //   a. 立即 refreshAncestorSavedHTML(n) 讓 guard baseline 吸收 append(注入自身
+  //      的 mutation 帶 removedNodes 不會進來;framework 覆寫譯文也帶 removal /
+  //      characterData,guard 保護不受影響)
+  //   b. 節點進本佇列,rescan 以它為 root + includeRoot 跑 collectParagraphs 補收
+  //      (容器內既有已譯內容不在 root 子樹 → 零重翻 / 零 echo 風險)
+  const _scopedRescanRoots = new Set();
+  const SCOPED_RESCAN_MAX_ROOTS = 300; // 防暴長;超限的晚載內容等下輪 mutation 再收
   function onSpaObserverMutations(mutations) {
     _dbgMutationBatchesSeen++;
+    // v1.10.65: JRead 閱讀模式期間讓位（同 runContentGuard）——不 stopSpaObserver、
+    // 只跳過本批 reconcile，退出閱讀模式恢復後續 mutation 照常處理。也擋掉 JRead
+    // 進閱讀模式重排 articleEl 觸發的這批 mutation 被當成「譯文被覆蓋」回寫。
+    if (contentGuardExternallyPaused) return;
     if (!STATE.translated) { _dbgEarlyReturnNotTranslated++; stopSpaObserver(); return; }
-    if (spaObserverRescanCount >= SK.SPA_OBSERVER_MAX_RESCANS) { _dbgEarlyReturnMaxRescans++; return; }
 
     // mutation-driven 譯文守護(高頻路徑):
     // 框架(典型 YouTube yt-attributed-string)在 hover 觸發 re-render 時會在
@@ -684,6 +1125,30 @@
     // 對 single inject 的 element 不適用。
     const hadDualExpandedUnmark = detectAndUnmarkExpandedDual(mutations);
     const hadNvMutateExpandedUnmark = detectAndUnmarkExpandedNodeValueMutate(mutations);
+
+    // 批次 8 A7:純 append 進「已翻譯容器」→ scoped 佇列(詳見佇列宣告處註解)
+    let _scopedQueued = false;
+    for (const m of mutations) {
+      if (m.type !== 'childList' || m.addedNodes.length === 0) continue;
+      if (m.removedNodes.length > 0) continue; // 非純 append(注入 / re-render 都帶 removal)
+      const t = m.target;
+      if (!t || t.nodeType !== Node.ELEMENT_NODE) continue;
+      if (t.closest?.('.ytp-caption-window-container, .ytp-caption-segment')) continue;
+      if (!t.closest?.('[data-shinkansen-translated]')) continue; // 只補「標記容器內」缺口
+      for (const n of m.addedNodes) {
+        if (n.nodeType !== Node.ELEMENT_NODE) continue;
+        if ((n.textContent || '').trim().length <= 10) continue;
+        if (n.hasAttribute('data-shinkansen-translated')) continue; // 框架重掛已譯節點交給 guard
+        if (_scopedRescanRoots.size >= SCOPED_RESCAN_MAX_ROOTS) break;
+        SK.refreshAncestorSavedHTML?.(n); // guard baseline 吸收 append,rAF restore 不沖掉
+        _scopedRescanRoots.add(n);
+        _scopedQueued = true;
+      }
+    }
+    if (_scopedQueued) {
+      _dbgDebounceArmedCount++;
+      armSpaObserverRescan();
+    }
 
     const hasNewContent = hadDualExpandedUnmark || hadNvMutateExpandedUnmark || mutations.some(m =>
       m.type === 'childList' && m.addedNodes.length > 0 &&
@@ -736,6 +1201,9 @@
     let unmarked = 0;
     for (const el of candidates) {
       if (!el.isConnected) continue;
+      // 編輯模式豁免(對齊 nv 軌 A4 與三條 sweep 軌):編輯中的元素不 unmark,
+      // 使用者編輯造成的內容變動不是 framework 展開
+      if (el.getAttribute?.('contenteditable') === 'true') continue;
       const origText = STATE.originalText.get(el);
       if (!origText) continue;
       const currentText = (el.textContent || '').trim();
@@ -784,6 +1252,7 @@
     if (!STATE.originalText) return false;
 
     const candidates = new Set();
+    // 方法 1:從 mutation target 往上找 backup 元素(framework 在 element 自身或子樹改動)
     for (const m of mutations) {
       let t = m.target;
       if (!t) continue;
@@ -793,17 +1262,37 @@
         t = t.parentElement;
       }
     }
+    // 方法 2:mutation target 找不到時(framework 替換上層 wrapper,mutation target
+    // 在 backup 元素的祖先而非自身/後代),全量掃描 backup 元素的 textContent
+    // 是否顯著變長。典型案例:X 點「顯示更多」替換 article 級 wrapper,mutation
+    // target 是 article 的 parent,走不到 backup 裡的 tweetText。
+    if (candidates.size === 0) {
+      for (const [el] of STATE.nodeValueMutateBackup) {
+        if (!el.isConnected) continue;
+        const origText = STATE.originalText.get(el);
+        if (!origText) continue;
+        const curLen = (el.textContent || '').trim().length;
+        if (curLen > origText.length * 1.5) {
+          candidates.add(el);
+        }
+      }
+    }
     if (candidates.size === 0) return false;
 
     let unmarked = 0;
     for (const el of candidates) {
       if (!el.isConnected) continue;
+      // 編輯模式豁免(對齊三條 sweep 軌):使用者在 contenteditable 內打字會讓
+      // backup node 的 nodeValue ≠ translatedValue,被 Path B 誤判 partial-reset
+      // → 「還原為原文」迴圈把整段打回原文 + unmark(2026-08-05 編輯模式實測)。
+      // 編輯中的元素一律不 unmark / 不還原,離開編輯模式後恢復偵測
+      if (el.getAttribute?.('contenteditable') === 'true') continue;
       const origText = STATE.originalText.get(el);
       if (!origText) continue;
 
       let trigger = null;
 
-      // Path (A): full reset
+      // Path (A): full reset — framework 把整段 reset 回完整原文
       const currentText = (el.textContent || '').trim();
       if (currentText.length > origText.length * 1.5 && currentText.startsWith(origText)) {
         trigger = 'full-reset';
@@ -825,7 +1314,106 @@
         }
       }
 
+      // Path (C): textContent 顯著變長 + 至少一個 backup text node 仍保持
+      // translatedValue — framework 展開內容時只 append 新子元素,不 reset 已翻譯
+      // 的舊 text node。Path A 失敗(currentText 以翻譯語言開頭),Path B 失敗(舊
+      // text node 仍持 translatedValue)。「仍持 translatedValue」同時是 Path C 的
+      // 必要守門:區分「展開新內容」(舊翻譯保留 + 新原文加入)vs「完全替換成不同
+      // 文字」(舊翻譯不在了)。
+      if (!trigger && currentText.length > origText.length * 1.5) {
+        const backup = STATE.nodeValueMutateBackup.get(el);
+        if (backup && backup.length > 0) {
+          const hasRetainedTranslation = backup.some(entry =>
+            entry?.node?.isConnected &&
+            typeof entry.translatedValue === 'string' &&
+            entry.node.nodeValue === entry.translatedValue
+          );
+          if (hasRetainedTranslation) {
+            trigger = 'expanded-content';
+          }
+        }
+      }
+
+      // Path (D): attribute stripped — framework re-render 時把
+      // data-shinkansen-nodevalue-mutated attribute 拔掉(React reconciliation
+      // 不認識 custom attribute 會清除),但 DOM element ref 不變、
+      // STATE.nodeValueMutateBackup 仍有記錄。典型場景:X 推文點「顯示更多」
+      // React re-render 保留同一 element + 加 children + strip attributes。
+      // Path A/B/C 都可能不觸發(CJK 翻譯比英文短,length ratio 不到 1.5x;
+      // backup text node 仍持 translatedValue),attribute 消失是明確訊號。
+      if (!trigger && !el.hasAttribute('data-shinkansen-nodevalue-mutated')) {
+        trigger = 'attr-stripped';
+      }
+
+      // Path (E) v1.10.49: 整批 text node 被 framework 換新 — React 重 render
+      // 子樹時用「新的」text node 物件呈現原文(典型:Medium 劃線 highlight
+      // hydration 把段落子節點換成 <mark> 包裹的新 text node),當初 mutate 的
+      // node 全部 detach。Path B 對 !isConnected entry 直接 skip 看不到差異,
+      // element ref 沒變所以 attribute 也沒被 strip(Path D 不觸發),元素永遠卡
+      // 在「標 translated 但顯示英文原文」(2026-06-12 Medium Outkast 段實測,
+      // 含 3 個 <mark> 劃線)。判準取保守的「全部 detach」:部分 detach 的混合
+      // 場景交由 Path B/C 的值比對處理,避免誤殺 X show-more 部分重建。
+      if (!trigger) {
+        const backupE = STATE.nodeValueMutateBackup.get(el);
+        if (backupE && backupE.length > 0 &&
+            backupE.every(entry => !entry?.node?.isConnected)) {
+          trigger = 'nodes-replaced';
+        }
+      }
+
       if (!trigger) continue;
+
+      // v1.10.49: unmark 前先試「重套譯文」——framework 把譯文重 render 回原文
+      // (現在的 textContent 仍等於原文)時,直接把記錄的純文字譯文套回(零 API)。
+      // Medium 劃線 highlight hydration 實測:hydration 多波重 render,
+      // unmark→rescan→重打 API 的循環在波內反覆被還原直到重試上限耗盡,留下
+      // 「標 translated 但顯示英文」;重套是冪等操作,跟 guard 的 1s sweep
+      // (runContentGuardNvMutate)同款,sweep 到 framework 收手為止。
+      // 內容已變(X show-more 等)不重套——curText !== origText 自然走 unmark。
+      // 2026-07-02:重套判準改用 nvMutateRevertedToOriginal——不再硬要求 backup node
+      // 全 detach、也不再只認「全等於 origText」。framework 重用 node 只 reset nodeValue、
+      // 或只重繪「部分」text node(多 text node 圖說常見:說明 span 回英文、來源 span 仍中文)
+      // 時,舊條件(_allDetached / _cur === origText)都不成立 → 卡「標 translated 顯示原文」。
+      // v2.0.59: 健康譯文守門只加在 1s sweep(runContentGuardNvMutate),A4 這裡不加——
+      // Path C(展開內容 unmark 重翻)/ Path D(attr-stripped selective restore)的觸發
+      // 態 backup 可能仍完好,閘門會搶走這兩條設計語意(spa-detect-expanded-nv-mutate
+      // spec 鎖定);A4 必須先有 trigger(framework 真的動過 DOM)才會走到這,誤報面
+      // 遠小於每秒空轉的 sweep。
+      {
+        const _saved = STATE.nvMutateTranslation?.get?.(el);
+        const _cur = (el.textContent || '').trim();
+        const _backupNow = STATE.nodeValueMutateBackup.get(el);
+        // v2.0.57(洞 3):判準與停損跟 runContentGuardNvMutate 對齊——
+        // nvRevertedToOrigText 不依賴 backup 值;nvGuardTryIntervene 滾動停損。
+        if (_saved && _backupNow
+            && (nvRevertedToOrigText(origText, _cur) || nvMutateRevertedToOriginal(_backupNow, origText, _cur))
+            && nvGuardTryIntervene(el)) {
+          STATE.nodeValueMutateBackup.delete(el);
+          if (nvReapplySaved(el, _saved)) {
+            el.setAttribute('data-shinkansen-nodevalue-mutated', '1');
+            el.setAttribute('data-shinkansen-translated', '1');
+            SK.sendLog?.('info', 'spa', `detect-expanded-nv-mutate: reapplied translation (was ${trigger})`);
+            continue;
+          }
+          // 重套失敗 → fall through 走原 unmark 路徑(backup 已刪,下方還原迴圈自然跳過)
+        }
+      }
+
+      // 還原 backup text node 為原文,確保 collectParagraphs 收到乾淨的 source text。
+      // Selective restore:只還原仍持 translatedValue 的 node。如果 framework
+      // 已把 text node 改成展開後完整原文(nodeValue !== translatedValue),不覆蓋
+      // ——否則截斷版覆蓋完整版,中間段落消失(X 推文「顯示更多」真實案例)。
+      const _backup = STATE.nodeValueMutateBackup.get(el);
+      if (_backup) {
+        for (const entry of _backup) {
+          if (!entry?.node?.isConnected || typeof entry.originalValue !== 'string') continue;
+          if (typeof entry.translatedValue === 'string' &&
+              entry.node.nodeValue !== entry.translatedValue) {
+            continue;
+          }
+          entry.node.nodeValue = entry.originalValue;
+        }
+      }
 
       // unmark + clear STATE,讓 collectParagraphs / Layer A3 inject 重跑
       el.removeAttribute('data-shinkansen-nodevalue-mutated');
@@ -991,6 +1579,10 @@
       if (savedHTML == null) continue;
       if (!target.isConnected) continue;
       if (target.innerHTML === savedHTML) continue;
+      // v1.5.5 對齊 runContentGuard / testRunContentGuard：編輯模式元素不回寫——
+      // interaction blackout 只蓋得住「使用者打字引發」的 mutation，第三方 framework
+      // 背景 mutation 進到這裡會把使用者編輯內容整段蓋掉
+      if (target.getAttribute('contenteditable') === 'true') continue;
       // AMO source review: savedHTML 來自 STATE.translatedHTML(本 extension 自存),無 user input。
       target.innerHTML = savedHTML;
       _justRestoredAt.set(target, now);
@@ -1051,7 +1643,7 @@
    */
   function pickRescanToast({ done, failedCount, pageUsage, totalRequested, isTinyRescan }) {
     if (failedCount > 0) {
-      return { type: 'error', msg: `新內容翻譯部分失敗:${failedCount} / ${totalRequested} 段` };
+      return { type: 'error', msg: SK.t('toast.rescanPartialFailed', { failed: failedCount, total: totalRequested }) };
     }
     // v1.9.27:tiny rescan(1-2 unit 且 < 200 char)走靜默路徑。X / Threads / Reddit
     // 邊滑邊 lazy mount link card / OG preview / 推文 metadata 一直觸發迷你 rescan,
@@ -1065,7 +1657,7 @@
     // pageUsage.cacheHits === 0 才是真正「全新翻 N 段」場景,保留 success toast 通知。
     const hasAnyCacheHit = pageUsage && pageUsage.cacheHits > 0 && done > 0;
     if (hasAnyCacheHit) return { type: 'silent' };
-    return { type: 'success', msg: `已翻譯 ${done} 段新內容` };
+    return { type: 'success', msg: SK.t('toast.rescanDone', { done }) };
   }
   SK._pickRescanToast = pickRescanToast;
 
@@ -1084,6 +1676,22 @@
     return (unit.el?.innerText || '').trim();
   }
 
+  // v1.10.15:把「cap 到 MAX_UNITS + 標記 seen」抽成純函式,鎖住一條 invariant——
+  // 「被 cap 丟掉的 overflow unit 絕不可被標進 seenTexts」。
+  // 原 bug:rescan 先把「全部找到的 unit」標 seen,再 slice 到 MAX_UNITS。當一次
+  // collectParagraphs 抓到 > 50 個(典型:YouTube 留言批次 lazy-load,一次進來 64 則),
+  // 被 slice 丟掉的 14 則已經在 seenTexts 內 → 後續 rescan 被 isSeenTextRecent 擋住
+  // 30s TTL → 使用者停止捲動後那批永遠不翻,造成留言區交錯漏翻。
+  // 改成只把「本輪實際要翻的 ≤MAX_UNITS 個」標 seen;overflow 不標,下一輪 rescan
+  // 仍能重新收進來。
+  function capUnitsAndMarkSeen(units, now) {
+    const capped = units.length > SK.SPA_OBSERVER_MAX_UNITS;
+    const kept = capped ? units.slice(0, SK.SPA_OBSERVER_MAX_UNITS) : units;
+    kept.forEach(unit => spaObserverSeenTexts.set(unitText(unit), now));
+    return { kept, capped };
+  }
+  SK._capUnitsAndMarkSeen = capUnitsAndMarkSeen;
+
   async function spaObserverRescan() {
     spaObserverDebounceTimer = null;
     if (!STATE.translated) {
@@ -1095,13 +1703,40 @@
       SK.sendLog('info', 'spa', 'partialMode: skip SPA observer rescan');
       return;
     }
-    if (spaObserverRescanCount >= SK.SPA_OBSERVER_MAX_RESCANS) {
-      SK.sendLog('info', 'spa', 'SPA observer: reached max rescans, stopping NEW translations only', { maxRescans: SK.SPA_OBSERVER_MAX_RESCANS });
-      return;
-    }
     spaObserverRescanCount++;
+    // review B8:每輪 rescan 順掃 seenTexts 過期 entry,長 session Map 不無上限成長
+    sweepExpiredSeenTexts(Date.now());
 
     let newUnits = SK.collectParagraphs();
+    // 批次 8 A7:scoped 補收——以佇列節點為 root + includeRoot 跑 collectParagraphs,
+    // 繞過「已翻譯容器」層 REJECT(佇列見 onSpaObserverMutations)
+    if (_scopedRescanRoots.size > 0) {
+      const roots = [..._scopedRescanRoots];
+      _scopedRescanRoots.clear();
+      const seenEls = new Set(newUnits.map((u) => u.el));
+      let scopedAdded = 0;
+      for (const root of roots) {
+        if (!root.isConnected) continue;
+        if (root.hasAttribute('data-shinkansen-translated')) continue; // 已被前輪處理
+        // 標記已被清(restore / SPA reset / reconcile)→ 一般 collect 抓得到,避免重複
+        if (!root.parentElement?.closest?.('[data-shinkansen-translated]')) continue;
+        if (roots.some((r) => r !== root && r.contains && r.contains(root))) continue; // 巢狀 root 只走外層
+        let scoped = [];
+        try { scoped = SK.collectParagraphs(root, null, { includeRoot: true }) || []; } catch (_) { /* scoped root 異常不擋主 rescan */ }
+        for (const u of scoped) {
+          if (u.el && seenEls.has(u.el)) continue;
+          if (u.el) seenEls.add(u.el);
+          newUnits.push(u);
+          scopedAdded++;
+        }
+      }
+      if (scopedAdded > 0) {
+        SK.sendLog('info', 'spa', 'A7 scoped rescan: 已翻譯容器內晚載內容補收', { roots: roots.length, units: scopedAdded });
+      }
+    }
+    if (STATE.translatedMode === 'dual' && SK.consolidateDualInlineUnits) {
+      newUnits = SK.consolidateDualInlineUnits(newUnits);
+    }
     if (newUnits.length === 0) {
       SK.sendLog('info', 'spa', `SPA rescan #${spaObserverRescanCount}: collectParagraphs returned 0 units (all already attribute-marked or filtered)`);
       return;
@@ -1130,13 +1765,19 @@
       SK.sendLog('info', 'spa', 'SPA observer rescan: all units already seen in this session, skipping');
       return;
     }
-    // 在翻譯前先記錄,防止注入自身觸發的 mutation 再次進入迴圈;TTL 內第二次出現會被擋住
+    // 在翻譯前先記錄,防止注入自身觸發的 mutation 再次進入迴圈;TTL 內第二次出現會被擋住。
+    // v1.10.15:cap 與標記 seen 順序修正——只把「本輪實際要翻的 ≤MAX_UNITS 個」標進
+    // seenTexts(見 capUnitsAndMarkSeen),overflow 不標,留給下一輪 rescan。
     const now = Date.now();
-    newUnits.forEach(unit => spaObserverSeenTexts.set(unitText(unit), now));
-
-    if (newUnits.length > SK.SPA_OBSERVER_MAX_UNITS) {
-      SK.sendLog('warn', 'spa', 'SPA observer rescan capped', { found: newUnits.length, cap: SK.SPA_OBSERVER_MAX_UNITS });
-      newUnits = newUnits.slice(0, SK.SPA_OBSERVER_MAX_UNITS);
+    const totalFound = newUnits.length;
+    const { kept, capped } = capUnitsAndMarkSeen(newUnits, now);
+    newUnits = kept;
+    if (capped) {
+      SK.sendLog('warn', 'spa', 'SPA observer rescan capped', { found: totalFound, cap: SK.SPA_OBSERVER_MAX_UNITS });
+      // overflow 沒標 seen,但下一輪 rescan 仍要靠 mutation 觸發;使用者已停止捲動時
+      // 無新 mutation → overflow 卡住不翻。主動再 arm 一次 rescan 把剩下的接住
+      // (本輪 50 則注入完成 + 下一輪 collectParagraphs 會重新抓到那些未標記的 element)。
+      armSpaObserverRescan();
     }
 
     SK.sendLog('info', 'spa', `SPA observer rescan #${spaObserverRescanCount}`, { newUnits: newUnits.length });
@@ -1167,7 +1808,6 @@
     // 完全不彈 toast → silent timeout 8s 後悄悄收場,user 體感無干擾。
     let loadingShown = false;
     let watchdogTimer = null;
-    const loadingTimer = null; // 不再用 800ms 預先彈 toast,改 lazy
     const tryShowLoadingToast = (d, t) => {
       if (loadingShown || isTinyRescan) return;
       loadingShown = true;
@@ -1214,7 +1854,6 @@
         new Promise((_, rej) => setTimeout(() => rej(new Error('SK_RESCAN_TIMEOUT')), _RESCAN_TIMEOUT_MS)),
       ]);
       _progressClosed = true;
-      clearTimeout(loadingTimer);
       if (watchdogTimer) { clearTimeout(watchdogTimer); watchdogTimer = null; }
       if (!STATE.translated) return;
       if (done > 0) {
@@ -1232,12 +1871,15 @@
       }
     } catch (err) {
       _progressClosed = true;
-      clearTimeout(loadingTimer);
       if (watchdogTimer) { clearTimeout(watchdogTimer); watchdogTimer = null; }
       if (err.message === 'SK_RESCAN_TIMEOUT') {
         // SW sleep / stream hang 兜底:silent hide,不彈 error toast(假錯誤體感差)。
         // 下一次 SPA mutation 觸發 rescan + by-text reuse 命中可補上。
-        SK.sendLog('warn', 'spa', 'SPA rescan 30s timeout, silent hide', { units: newUnits.length });
+        // 注意(批次 8 B9):這裡只收 toast、不 abort 底層 translateUnitsByProvider——
+        // race 輸掉的那條 run 仍在跑,之後 settle 時 _progressClosed 已 true 不會再動
+        // toast;結果若成功仍會注入(晚到的譯文照上,無害)。診斷 log 時別把「timeout」
+        // 誤讀成「該輪翻譯已被取消」。
+        SK.sendLog('warn', 'spa', `SPA rescan ${_RESCAN_TIMEOUT_MS / 1000}s timeout, silent hide`, { units: newUnits.length });
         if (loadingShown) SK.hideToast();
       } else {
         SK.sendLog('warn', 'spa', 'SPA observer rescan failed', { error: err.message });
