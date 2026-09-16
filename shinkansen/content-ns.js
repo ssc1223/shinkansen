@@ -116,7 +116,6 @@ if (window.__shinkansen_loaded) {
     translating: false,      // v0.80: 翻譯進行中（防止重複觸發 + 支援中途取消）
     translatingConvertOnly: false, // 2026-08-20: 本輪是否為背景簡繁轉換 run(手動翻譯可靜默擠掉它,不被 toggle 吃)
     abortController: null,   // v0.80: AbortController，翻譯中按 Alt+S 或離開頁面時 abort
-    cache: new Map(),       // 段落文字 → 譯文
     // 記錄每個被替換過的元素與它原本的 innerHTML，供還原使用。
     // v0.36 起改為 Map，key 是 element，value 是 originalHTML。這樣同一個
     // element 被多個 fragment 單位改動時，只會快照一次「真正的原始 HTML」，
@@ -150,11 +149,10 @@ if (window.__shinkansen_loaded) {
     // null = 非 preset 觸發（例如 autoTranslate 白名單、popup 按鈕舊路徑）。
     stickySlot: null,
     // v1.5.0: 雙語對照模式
-    // displayMode：本次翻譯要用的模式（'single' 覆蓋 / 'dual' 雙語對照），讀自 storage 的設定值
-    // translatedMode：本次實際翻譯時用的模式（restorePage 依此分派 single / dual 還原邏輯）
+    // translatedMode：本次實際翻譯時用的模式（restorePage 依此分派 single / dual 還原邏輯；
+    // 讀自 storage 的 displayMode 設定值，2026-09-12 批次 6 起不再另存一份只寫不讀的 STATE.displayMode）
     // translationCache：dual 模式下，原段落 → wrapper 的對照表，供 Content Guard 在 SPA 刪掉
     //   wrapper 時 re-append 用。Map<originalEl, wrapperEl>
-    displayMode: 'single',
     translatedMode: null,
     translationCache: new Map(),
     // P1 (v1.8.59): 翻譯目標語言。content.js translatePage 開始時從 storage 注入。
@@ -226,7 +224,7 @@ if (window.__shinkansen_loaded) {
   //   兩份完全相反——storage 未寫入的窗口按快速鍵，實際模型與 UI 顯示相反。
   //   一致性由 test/jest-unit/default-presets-mirror.test.cjs 鎖住）。
   SK.DEFAULT_PRESETS = [
-    { slot: 1, engine: 'gemini', model: 'gemini-3-flash-preview', label: 'Flash' },
+    { slot: 1, engine: 'gemini', model: 'gemini-3.8-flash', label: 'Flash' },
     { slot: 2, engine: 'gemini', model: 'gemini-3.1-flash-lite', label: 'Flash Lite' },
     { slot: 3, engine: 'google', model: null, label: 'Google MT' },
   ];
@@ -289,6 +287,13 @@ if (window.__shinkansen_loaded) {
   SK.ASR_CUE_MAX_CHARS = 40;
   // 拆分後每片最短顯示時長;cue 時長不夠拆 N 片時自動減片數,避免字幕閃跳
   SK.ASR_CUE_MIN_PIECE_MS = 1200;
+  // 2026-09-11（dev tail 2.4.13.4）：ASR 顯示 cue 統一提前量。cue 起點在 parseJson3
+  // perLineTiming 修正後已對齊真實語音起點（real-data 平均早 0.1s），但譯文字幕慣例是
+  // 略早於語音出現（讀者要先讀完整句譯文），修正前兩行合一 event 的第二行句子系統性
+  // 提早 1.3–2.6s 出現、平均早 1s，使用者習慣了那個節奏，對齊後反而感覺「落後 1–2 秒」。
+  // 改為所有 cue 統一提前 1s：_findActiveCue 以 currentTime + 此值查表，iOS 原生字幕軌
+  // 的 VTTCue 時間軸整體前移同值，兩條顯示路徑一致。
+  SK.ASR_CUE_LEAD_MS = 1000;
   if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
     const markInteraction = () => { SK._lastInteractionT = Date.now(); };
     // capture phase + passive: 確保最早 fire,不阻塞網頁 listener。
@@ -339,8 +344,31 @@ if (window.__shinkansen_loaded) {
   //      仍能被 caller 看到； 只把 invalidated 錯誤吞掉
   //
   // caller 端 invalidated 時拿到 undefined, 配合 `if (!res?.ok)` 防禦即可。
+  // extension context 是否還活著：reload / 停用後的 orphan content script 這裡回 false
+  //（chrome.runtime.id 變 undefined）。safeSendMessage 的 fast path 與 instance 選舉的
+  // ping listener 共用同一判準；spec 可覆寫模擬 orphan。
+  SK.isExtensionContextAlive = function isExtensionContextAlive() {
+    return !!globalThis.chrome?.runtime?.id;
+  };
+
+  // 是否 dev tail build（manifest version 四段 = unpacked working tree）。Debug Bridge
+  // 行為開關 / 隱私敏感 action 只對 dev tail 開放，商店版（三段）拒絕。每次呼叫都重讀
+  // getManifest（spec 覆寫 getManifest 即生效；取不到版本的 orphan context 視同商店版）。
+  // 另認 manifest.version_name 帶 'test-build' 標記：release 輪 full test gate 跑在三段
+  // manifest 上，test/fixtures/extension.js 會複製一份 extension 加上這個標記（version 本身
+  // 不動，version-check.spec 才對得上），讓 bridge 驅動的 spec 在三段版本下照常可用。
+  // 商店 / 打包 build 永遠沒有 version_name。
+  SK.isDevTailBuild = function isDevTailBuild() {
+    try {
+      const rt = (typeof browser !== 'undefined' && browser.runtime) || (typeof chrome !== 'undefined' && chrome.runtime);
+      const m = rt?.getManifest?.() || {};
+      if (String(m.version || '').split('.').length >= 4) return true;
+      return /\btest-build\b/.test(String(m.version_name || ''));
+    } catch (_) { return false; }
+  };
+
   SK.safeSendMessage = function safeSendMessage(msg) {
-    if (!globalThis.chrome?.runtime?.id) return Promise.resolve(undefined);
+    if (!SK.isExtensionContextAlive()) return Promise.resolve(undefined);
     try {
       return browser.runtime.sendMessage(msg).catch((err) => {
         const m = String(err?.message || err);
@@ -515,15 +543,16 @@ if (window.__shinkansen_loaded) {
   // ─── 翻譯流程常數 ─────────────────────────────────────
   // 注意：content script 無法 import ES module，以下兩個值鏡像 lib/constants.js，
   // 修改時必須同步更新 lib/constants.js（lib/gemini.js 與 lib/storage.js 的單一來源）。
-  SK.DEFAULT_UNITS_PER_BATCH = 20;
-  SK.DEFAULT_CHARS_PER_BATCH = 3500;
+  // 2026-09-14：20 / 3500 → 40 / 7000（固定 prompt 開銷佔 input 65%，翻倍批次省三成 input token；量測見 lib/constants.js 註解）
+  SK.DEFAULT_UNITS_PER_BATCH = 40;
+  SK.DEFAULT_CHARS_PER_BATCH = 7000;
   SK.DEFAULT_MAX_CONCURRENT = 10;
   SK.DEFAULT_MAX_TOTAL_UNITS = 1000;
   // v1.7.2: batch 0 專用較小 limit;batch 1+ 仍用 DEFAULT_*_PER_BATCH 維持並行吞吐。
   // v1.8.0: streaming 路徑下 batch 0 size 不影響首字延遲（實測 10/20/30u 的 first_slot_close
   // 都在 1.0-1.2 秒，差距 < 100ms)。擴大到 25 unit / 3700 chars 涵蓋更多文章開頭——
   // 使用者首字看到的譯文範圍從「H1 + 副標 + 開頭幾段」變成「H1 + 副標 + 整段內文前 25 段」。
-  // 完整實測見 reports/streaming-probe-2026-04-28.md §2-§5。
+  // 完整實測見 docs/excluded/planning/reports/streaming-probe-2026-04-28.md §2-§5。
   SK.BATCH0_UNITS = 25;
   SK.BATCH0_CHARS = 3700;
 
@@ -531,9 +560,25 @@ if (window.__shinkansen_loaded) {
   // 「整篇文章塞在一個 <div> 用 <br><br> 分段」(Christie's 拍品專文等)原本整塊當單一
   // element 單元 → 變成 2 萬字單一 streaming segment,Gemini flash/flash-lite 串流極慢
   // 甚至 stall「無法結束」。文字超過此值且能按段落切出 ≥2 段時,改切成多個 fragment 平行翻。
-  // 取 DEFAULT_CHARS_PER_BATCH:超過單批 char 上限的單元本來就無法併批、只能自己一批,
+  // 原取 DEFAULT_CHARS_PER_BATCH（3500）:超過單批 char 上限的單元本來就無法併批、只能自己一批,
+  // 2026-09-14 批次預算調成 7000 後此值刻意維持 3500——切分門檻是「單元多大才值得拆」,
+  // 與批次預算脫鉤,避免 detect-br-block-* 系列行為變動。
   // 切分後反而能塞回正常批次平行吞吐。
   SK.BR_BLOCK_SPLIT_CHARS = 3500;
+
+  // 2026-09-14：頁面只被背景簡繁本地轉換標成已翻譯時，使用者按翻譯要「翻外語內容」還是
+  // 「還原轉換」的判準——未翻候選段落的原文總字元數達此門檻即視為有外語內容要翻
+  // （約一個正文段落；避免整頁簡體頁上零星的英文按鈕 / 標籤把 toggle 還原變成整頁送翻）。
+  SK.CONVERTED_PAGE_RETRANSLATE_MIN_CHARS = 200;
+  SK.hasSubstantialUntranslated = function hasSubstantialUntranslated() {
+    const units = SK.collectParagraphs();
+    let chars = 0;
+    for (const u of units) {
+      chars += ((u.el?.innerText || u.text || '') + '').trim().length;
+      if (chars >= SK.CONVERTED_PAGE_RETRANSLATE_MIN_CHARS) return true;
+    }
+    return false;
+  };
 
   // SPA 動態載入常數
   SK.SPA_OBSERVER_DEBOUNCE_MS = 1000;
@@ -729,8 +774,6 @@ if (window.__shinkansen_loaded) {
     const n = parseInt(hex.slice(1), 16);
     return { r: (n >> 16) & 0xff, g: (n >> 8) & 0xff, b: n & 0xff };
   };
-  // 顯示模式合法值
-  SK.VALID_DISPLAY_MODES = new Set(['single', 'dual']);
   // 計算「最近的 block 祖先」用的 display 值（雙語模式 inline 段落 wrapper 用）
   SK.BLOCK_DISPLAY_VALUES = new Set([
     'block', 'flex', 'grid', 'table', 'list-item', 'flow-root',
@@ -747,11 +790,34 @@ if (window.__shinkansen_loaded) {
       .join('');
   };
 
+  // ─── computed style 單輪快取（2026-09-14 code review 批次 7 §6.2）────────
+  // 一輪 collectParagraphs 對同一元素平均呼叫 getComputedStyle 3.8 次（Wikipedia
+  // 長文實測 62K 次 / 16K 元素：acceptNode font-size:0 守門、isVisible、isCodeContainer、
+  // Case F display 判斷各自取一次）。getComputedStyle 每次都建新的 CSSStyleDeclaration
+  // wrapper，wrapper 建立成本佔偵測總時間約 7%。宣告物件是 live 的——讀屬性永遠反映
+  // 當下樣式，快取 wrapper 本身不改變任何讀值，語意完全等價。
+  // 只在 beginStyleMemo / endStyleMemo 之間生效（collectParagraphs、序列化迴圈這類
+  // 同步、不改 DOM 的區段）；區段外直接 getComputedStyle，行為與從前相同。
+  let _styleMemo = null;
+  SK.beginStyleMemo = function beginStyleMemo() { _styleMemo = new WeakMap(); };
+  SK.endStyleMemo = function endStyleMemo() { _styleMemo = null; };
+  SK.getCS = function getCS(el) {
+    if (!el) return null;
+    if (_styleMemo) {
+      const hit = _styleMemo.get(el);
+      if (hit !== undefined) return hit;
+    }
+    let cs = null;
+    try { cs = el.ownerDocument?.defaultView?.getComputedStyle?.(el) || null; } catch (_e) { cs = null; }
+    if (_styleMemo) _styleMemo.set(el, cs);
+    return cs;
+  };
+
   // 過濾隱藏元素
   SK.isVisible = function isVisible(el) {
     if (!el) return false;
     if (el.tagName === 'BODY') return true;
-    const style = el.ownerDocument?.defaultView?.getComputedStyle?.(el);
+    const style = SK.getCS(el);
     if (style) {
       if (style.visibility === 'hidden' || style.display === 'none') return false;
     }
@@ -812,7 +878,11 @@ if (window.__shinkansen_loaded) {
   // 只有拉丁 / 西里爾 / 漢字 / 數字,純假名文字(日文小說對白「いえ、いいんです」)
   // 被判「無實質文字」:EPUB 錨點政策把帶 id 的純假名元素當原子保留 ⟦*N⟧(整段
   // 永不送翻),網頁路徑純假名 inline run 也不收集。
-  SK.SUBSTANTIVE_CHAR_RE = /[A-Za-zÀ-ÿ\u0400-\u04FF\u3040-\u30FF\u31F0-\u31FF\u3400-\u9fff\uAC00-\uD7A3\uFF66-\uFF9D0-9]/;
+  // 2026-09-11 code review P1-3：手寫區段漏掉希臘 / 阿拉伯 / 希伯來 / 泰 / 印度系等整個
+  // 文字系統（純希臘文段被判「無實質文字」）。改用 Unicode 屬性：\p{L} 任何文字系統的
+  // 字母 + \p{N} 數字。translate-doc 各引擎的 HAS_LETTER_RE 同步改 \p{L}（那邊刻意不含
+  // 數字：純數字段落不送翻）。
+  SK.SUBSTANTIVE_CHAR_RE = /[\p{L}\p{N}]/u;
 
   SK.hasSubstantiveText = function hasSubstantiveText(txt) {
     return SK.SUBSTANTIVE_CHAR_RE.test(txt || '');
@@ -823,11 +893,53 @@ if (window.__shinkansen_loaded) {
     return SK.hasSubstantiveText(el.innerText || el.textContent || '');
   };
 
+  // ─── v2.4.13: 「不翻譯」結構訊號（偵測層 isInsideExcludedContainer 與序列化層
+  // isAtomicPreserve 共用同一組判斷，單一資料源，避免兩條 path drift）───
+  //
+  // (1) HTML 標準 `translate="no"` 屬性 / `notranslate` class（後者是 Google Translate
+  //     的既定慣例，Google 自家站全站用它標人名與 icon）。這是頁面作者對「這段不是
+  //     可翻譯內容」的明確宣告，比任何 selector 黑名單都可靠。
+  //     例外：標在 <html> / <body> 上的文件級宣告不採信——那多半是 SPA 為了避開
+  //     Google Translate 改 DOM 造成 React 崩潰的 workaround，不代表內容不該翻；
+  //     採信會讓整站翻不到。呼叫端（isInsideExcludedContainer 走到 body 前停、
+  //     isAtomicPreserve 只看 inline child）自然不會碰到 html / body。
+  // (2) icon 字型 ligature：Material Icons / Google Symbols 這類字型用「文字」當
+  //     icon 名（<i class="material-icons">star</i> 渲染成 ★），送 LLM 會被翻成
+  //     「星號」，字型比對不到 ligature 就直接顯示中文字、icon 消失、工具列爆寬。
+  //     判準是 computed font-family 第一個字型名含 icon / symbol / glyph（結構性
+  //     CSS 特徵，不綁站點）+ 文字是單一 token（ligature 名一定是 `expand_more`
+  //     這種無空白識別字），token 限制讓 getComputedStyle 只在極少數候選上跑。
+  SK.isNoTranslateMarked = function isNoTranslateMarked(el) {
+    if (!el || el.nodeType !== Node.ELEMENT_NODE) return false;
+    const tr = el.getAttribute('translate');
+    if (tr != null && tr.trim().toLowerCase() === 'no') return true;
+    return !!(el.classList && el.classList.contains('notranslate'));
+  };
+
+  const _ICON_FONT_RE = /icon|symbol|glyph/i;
+  const _LIGATURE_TOKEN_RE = /^[A-Za-z0-9_-]{1,40}$/;
+  SK.isIconFontLigature = function isIconFontLigature(el) {
+    if (!el || el.nodeType !== Node.ELEMENT_NODE) return false;
+    if (el.children.length > 0) return false;
+    const txt = (el.textContent || '').trim();
+    if (!txt || !_LIGATURE_TOKEN_RE.test(txt)) return false;
+    const _cs = SK.getCS(el);
+    if (!_cs) return false;
+    let ff = '';
+    try { ff = _cs.fontFamily || ''; } catch (_e) { return false; }
+    const first = (ff.split(',')[0] || '').replace(/^["'\s]+|["'\s]+$/g, '');
+    return _ICON_FONT_RE.test(first);
+  };
+
   // 「原子保留」子樹
   SK.isAtomicPreserve = function isAtomicPreserve(el) {
     if (el.tagName === 'SUP' && el.classList && el.classList.contains('reference')) return true;
     // v1.4.10: <hr> 是區塊分隔線，序列化時保留為 ⟦*N⟧，避免 clean slate 注入後丟失
     if (el.tagName === 'HR') return true;
+    // v2.4.13: 段落內 inline 的 translate="no" / notranslate / icon ligature 整顆
+    // 保留為 ⟦*N⟧ 不送 LLM（人名、icon 名）。偵測層對同樣訊號整顆 skip，見
+    // content-detect.js isInsideExcludedContainer。
+    if (SK.isNoTranslateMarked(el) || SK.isIconFontLigature(el)) return true;
     return false;
   };
 
@@ -886,20 +998,10 @@ if (window.__shinkansen_loaded) {
   //
   // 結構性通則(§8):依「無 translatable 文字 + 含保留媒體 + block-level display」判斷,
   // 不綁站點 / class / hostname。任何用 block 容器分組頭像 / 縮圖 / icon 列的站點都套用。
-  SK.isTextlessBlockMediaGroup = function isTextlessBlockMediaGroup(el) {
-    if (!el || el.nodeType !== Node.ELEMENT_NODE) return false;
-    if ((el.textContent || '').trim().length > 0) return false;
-    if (!SK.containsMedia(el)) return false;
-    const cs = el.ownerDocument?.defaultView?.getComputedStyle?.(el);
-    if (!cs) return false;
-    const d = cs.display;
-    // inline-level display → 行內媒體,不排除;其餘(block-level)→ 媒體群組,排除
-    if (d === 'inline' || d === 'inline-block' || d === 'inline-flex'
-        || d === 'inline-grid' || d === 'inline-table' || d === 'contents') return false;
-    return true;
-  };
+  // （2026-09-12 批次 6：v2.0.6 的 isTextlessBlockMediaGroup 自 v2.0.61 起無呼叫端，已移除；
+  //   判斷本體由下方 isBlockMediaGroup 承接）
 
-  // v2.0.61:isBlockMediaGroup——isTextlessBlockMediaGroup 的放寬版,允許帶文字。
+  // v2.0.61:isBlockMediaGroup——原 isTextlessBlockMediaGroup 的放寬版,允許帶文字。
   // 「block-level display + 含 media-like」= 圖(或 widget)+ 圖說的結構群組,不是
   // 行內文字流;被 extractInlineFragments 併進 run 的話,fragment 注入 startNode..
   // endNode 整段移除重建會把整顆群組(含媒體)換成純譯文 text node
@@ -923,7 +1025,7 @@ if (window.__shinkansen_loaded) {
     if (SK.HARD_EXCLUDE_TAGS.has(child.tagName)) return false;
     if (SK.BLOCK_TAGS_SET.has(child.tagName)) return false;
     if (SK.containsBlockDescendant(child)) return false;
-    // v2.0.61:從 isTextlessBlockMediaGroup 換成放寬版 isBlockMediaGroup
+    // v2.0.61:從(已移除的)isTextlessBlockMediaGroup 換成放寬版 isBlockMediaGroup
     //(帶圖說文字的媒體群組也要斷 run;textless 版為其子集,語意見各自註解)
     if (SK.isBlockMediaGroup(child)) return false;
     return true;
@@ -1280,4 +1382,73 @@ if (window.__shinkansen_loaded) {
       text,
     };
   };
+
+  // ─── 同頁單一 instance 選舉（2026-09-11） ─────────────────────────
+  // Why：使用者同時裝了兩份 Shinkansen（商店版 + unpacked dev、或兩個瀏覽器 profile 共用
+  //   分頁）時，兩份 content script 各自翻譯（API 費用雙倍）、各自維護字幕 cue，卻共用
+  //   同一個 DOM（YouTube overlay 以 tag 名找既有 host），每次 timeupdate 互相覆寫 →
+  //   使用者看到字幕在兩個譯本之間閃動（real-data 2026-09-11：2.4.13.x + 2.4.0 同頁）。
+  // How：所有 instance 共用 window CustomEvent 通道。要開始翻譯（整頁 / YouTube 字幕）前
+  //   派 ping，其他 instance 同步回 pong（DOM 事件跨 isolated world 同步派送，Debug Bridge
+  //   同機制），大家依「版本高者優先，同版本 extension id 小者優先」排序，只有第一名動手。
+  //   後載入的較高版 instance 派 ping 時，正在翻譯的較低版 instance 收到即讓位（停掉字幕
+  //   翻譯、之後所有觸發都靜默結束）。單一 instance 的一般情境：ping 無人回，零影響。
+  const _INSTANCE_PING = 'shinkansen-instance-ping';
+  const _INSTANCE_PONG = 'shinkansen-instance-pong';
+  SK.INSTANCE = {
+    id: (globalThis.chrome?.runtime?.id) || ('anon-' + Math.random().toString(36).slice(2)),
+    version: (() => { try { return browser.runtime.getManifest().version || '0'; } catch (_) { return '0'; } })(),
+    stoodDown: false,
+  };
+  // 版本比較：逐段數值比，缺段視為 -1（dev tail 四段 > 同號商店版三段）；同版本比 id 字串
+  function _instanceCmp(a, b) {
+    const va = String(a.version || '0').split('.').map(Number);
+    const vb = String(b.version || '0').split('.').map(Number);
+    const n = Math.max(va.length, vb.length);
+    for (let i = 0; i < n; i++) {
+      const x = Number.isFinite(va[i]) ? va[i] : -1;
+      const y = Number.isFinite(vb[i]) ? vb[i] : -1;
+      if (x !== y) return y - x;   // 版本高者排前
+    }
+    return String(a.id).localeCompare(String(b.id));
+  }
+  SK._instanceCmp = _instanceCmp;   // regression spec 用
+  function _instanceStandDown(reason, other) {
+    if (SK.INSTANCE.stoodDown) return;
+    SK.INSTANCE.stoodDown = true;
+    SK.sendLog('info', 'system', 'instance stood down (another Shinkansen on this page wins)', {
+      reason, me: SK.INSTANCE.version, other: other ? `${other.version}@${other.id}` : null,
+    });
+    try { if (SK.YT?.active) SK.stopYouTubeTranslation?.(); } catch (_) {}
+  }
+  window.addEventListener(_INSTANCE_PING, (e) => {
+    const d = e.detail;
+    if (!d || !d.id || d.id === SK.INSTANCE.id) return;
+    // orphan 不參選（2026-09-11 code review）：extension 被停用 / reload 後，舊 content
+    // script 的 isolated world 不會被銷毀，這個 listener 仍在。若照回 pong，「停用 dev
+    // 版想測商店版」時 dev 的 orphan 仍以較高版本壓制商店版 → 該分頁直到重新整理前
+    // 沒人翻譯、也沒有任何提示。context 死掉的 instance 一律靜默。
+    if (!SK.isExtensionContextAlive()) return;
+    window.dispatchEvent(new CustomEvent(_INSTANCE_PONG, {
+      detail: { id: SK.INSTANCE.id, version: SK.INSTANCE.version, replyTo: d.id },
+    }));
+    // 對方排在我前面 → 我讓位（對方接手翻譯）
+    if (_instanceCmp(d, SK.INSTANCE) < 0) _instanceStandDown('higher-ranked instance pinged', d);
+  });
+  // 翻譯入口呼叫：true = 本 instance 是同頁第一名，可以動手；false = 靜默結束
+  SK.isInstanceLeader = function isInstanceLeader() {
+    if (SK.INSTANCE.stoodDown) return false;
+    const me = { id: SK.INSTANCE.id, version: SK.INSTANCE.version };
+    const others = [];
+    const onPong = (e) => { if (e.detail && e.detail.replyTo === me.id) others.push(e.detail); };
+    window.addEventListener(_INSTANCE_PONG, onPong);
+    try { window.dispatchEvent(new CustomEvent(_INSTANCE_PING, { detail: me })); }
+    finally { window.removeEventListener(_INSTANCE_PONG, onPong); }
+    if (others.length === 0) return true;
+    const winner = [me, ...others].sort(_instanceCmp)[0];
+    if (winner.id === me.id) return true;
+    _instanceStandDown('lost election', winner);
+    return false;
+  };
+
 }

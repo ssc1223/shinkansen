@@ -174,7 +174,9 @@
       const video = document.querySelector('video');
       const currentMs = video ? Math.floor(video.currentTime * 1000) : 0;
       const cue = _findActiveCue(currentMs);
-      return !!(cue && inTarget(cue.text));
+      // displayCues 的譯文欄位是 targetText（舊寫 cue.text 永遠 undefined → ASR 路徑永遠判
+      // 「畫面沒中文」，拖進度條後「翻譯中…」先閃出來再被 overlay 蓋掉，2026-09-11 修）
+      return !!(cue && inTarget(cue.targetText));
     }
     const segs = document.querySelectorAll('.ytp-caption-segment');
     for (const s of segs) {
@@ -360,12 +362,30 @@
 
   // input 可為 JSON 字串(YouTube 路徑,XHR responseText)或已 parse 的 object
   // (Drive 路徑,background fetch 後已 res.json() 過)。
-  function parseJson3(input) {
+  //
+  // opts.perLineTiming（ASR 軌用，v2.4.14）：同一 event 內多行各自推算獨立且嚴格遞增的 startMs。
+  //   Why：YouTube ASR 軌的 json3 常以「兩行合一 event」滾動輸出（segs 只有一條、無
+  //   tOffsetMs，例「controls on the right hand side. Yeah.\nFor example,」共用 tStartMs），
+  //   舊做法兩行同 startMs → ASR 協定以 startMs 當片段身份（LLM 輸入 s / displayCues
+  //   upsert key / 子批切分 / _findActiveCue 鄰接 clamp）全部撞名：子批邊界落在兩行之間時，
+  //   前後兩批 LLM 各回一條 s 相同的 entry，後寫的 upsert 把前一句整句蓋掉（real-data
+  //   uJKt432tWM4 5:42「putting all the controls on the right hand side」整句消失）；
+  //   同批內兩行也只能合成一句（LLM 無法用相同 s 表達兩句），且第一行送 LLM 的 e 等於 s
+  //   （零長度片段）。
+  //   How：有 word-level tOffsetMs 時用各行第一個 seg 的 offset（真實 onset）；沒有時把
+  //   [event start, min(下一 event start, start + dDurationMs)) 依行數等分——兩行事件的
+  //   第二行實測誤差 < 0.6s（real-data 343759/345600 → 推算 345240），遠勝原本的 0 偏移。
+  //   最後全軌做嚴格遞增保證（相同 startMs 的不同 event 也 +1ms 錯開），讓「startMs 唯一」
+  //   成為 ASR 協定可依賴的不變量。非 ASR（人工字幕）不套用：兩行本就同時顯示，同 startMs
+  //   語意正確，且 groupId 整組送翻依賴兩行落在同一視窗。
+  function parseJson3(input, opts) {
     const json = typeof input === 'string' ? JSON.parse(input) : input;
+    const perLineTiming = !!(opts && opts.perLineTiming);
+    const events = (json.events || []).filter(ev => ev && ev.segs);
     const segments = [];
     let groupCounter = 0;
-    for (const ev of (json.events || [])) {
-      if (!ev.segs) continue;
+    for (let i = 0; i < events.length; i++) {
+      const ev = events[i];
       const full = ev.segs.map(s => s.utf8 || '').join('');
       // YouTube 以 \n 分隔同一 event 內的多行歌詞；DOM 每行獨立渲染為一個 .ytp-caption-segment
       // 拆行後分別建立條目，確保 normText 與 DOM 字幕對齊，避免落入 on-the-fly
@@ -375,12 +395,67 @@
       // ASR displayCues 出現空窗。重複文字落到 captionMap 是同 key 覆寫，本來就安全。
       const lines = full.split('\n').map(l => l.trim()).filter(Boolean);
       const groupId = lines.length > 1 ? groupCounter++ : null;
-      for (const line of lines) {
-        segments.push({ text: line, normText: normText(line), startMs: ev.tStartMs || 0, groupId });
+      const lineStarts = perLineTiming
+        ? _json3LineStarts(ev, lines.length, events[i + 1])
+        : lines.map(() => ev.tStartMs || 0);
+      lines.forEach((line, k) => {
+        segments.push({ text: line, normText: normText(line), startMs: lineStarts[k], groupId });
+      });
+    }
+    segments.sort((a, b) => a.startMs - b.startMs);   // stable sort：同 startMs 保留原順序
+    if (perLineTiming) {
+      for (let i = 1; i < segments.length; i++) {
+        if (segments[i].startMs <= segments[i - 1].startMs) segments[i].startMs = segments[i - 1].startMs + 1;
       }
     }
-    return segments.sort((a, b) => a.startMs - b.startMs);
+    return segments;
   }
+
+  // 同一 json3 event 內各行的 startMs（perLineTiming 用，詳見 parseJson3 註解）。
+  //   1. word-level 格式：segs 各帶 tOffsetMs,'\n' 之後第一個 seg 的 offset = 該行 onset
+  //   2. 行合一格式（segs 無 offset）：event 時段依行數等分
+  function _json3LineStarts(ev, lineCount, nextEv) {
+    const base = ev.tStartMs || 0;
+    if (lineCount <= 1) return [base];
+    // 1. word-level offset
+    //   lines（呼叫端）是 split('\n') 後 trim + 過濾空行的結果，所以「第 k 個 \n」不等於
+    //   「第 k 行」——event 開頭 / 中間有空行（"\nHello\nWorld"）時 raw 行號會跟 lines 索引
+    //   錯位，把上一行的 onset 套到下一行。先把 raw 行號對映到過濾後索引（空行 → -1）。
+    const rawLines = ev.segs.map(s => String(s.utf8 || '')).join('').split('\n');
+    const lineIdxOfRaw = [];
+    { let k = 0; for (const l of rawLines) lineIdxOfRaw.push(l.trim() ? k++ : -1); }
+    const offsets = new Array(lineCount).fill(null);
+    let rawIdx = 0;
+    let nonEmptySeen = false;   // 行首空白 seg 不算 onset
+    for (const seg of ev.segs) {
+      const utf8 = String(seg.utf8 || '');
+      const parts = utf8.split('\n');
+      for (let p = 0; p < parts.length; p++) {
+        if (p > 0) { rawIdx++; nonEmptySeen = false; }
+        const lineIdx = lineIdxOfRaw[rawIdx];
+        if (lineIdx == null || lineIdx >= lineCount) break;
+        if (lineIdx < 0) continue;   // 空行：不是任何一行的 onset
+        if (!nonEmptySeen && parts[p].trim()) {
+          nonEmptySeen = true;
+          if (offsets[lineIdx] == null && Number.isFinite(seg.tOffsetMs)) offsets[lineIdx] = seg.tOffsetMs;
+        }
+      }
+    }
+    if (offsets.slice(1).every(o => o != null)) {
+      const starts = [base];
+      for (let k = 1; k < lineCount; k++) starts.push(base + offsets[k]);
+      return starts;
+    }
+    // 2. 等分 event 時段
+    let spanEnd = Infinity;
+    if (nextEv && Number.isFinite(nextEv.tStartMs) && nextEv.tStartMs > base) spanEnd = nextEv.tStartMs;
+    if (Number.isFinite(ev.dDurationMs) && ev.dDurationMs > 0) spanEnd = Math.min(spanEnd, base + ev.dDurationMs);
+    if (!Number.isFinite(spanEnd) || spanEnd - base < lineCount) spanEnd = base + lineCount;
+    const starts = [];
+    for (let k = 0; k < lineCount; k++) starts.push(base + Math.floor((spanEnd - base) * k / lineCount));
+    return starts;
+  }
+  SK._json3LineStarts = _json3LineStarts;   // regression spec 直接驅動用
 
   // ─── 字幕解析：XML/TTML（含時間戳）────────────────────────
 
@@ -400,9 +475,9 @@
 
   // ─── 自動偵測格式並解析 ────────────────────────────────────
 
-  function parseCaptionResponse(responseText) {
+  function parseCaptionResponse(responseText, opts) {
     if (!responseText) return [];
-    try { return parseJson3(responseText); } catch (_) {}
+    try { return parseJson3(responseText, opts); } catch (_) {}
     try { return parseTtml(responseText); } catch (_) {}
     return [];
   }
@@ -438,7 +513,29 @@
     const { url, responseText } = e.detail || {};
     if (!responseText) return;
 
-    const segments = parseCaptionResponse(responseText);
+    // 2026-09-14（code review §8 runtime 驗證）：SPA 切影片後，前一支影片的 timedtext
+    // XHR 仍可能完成（cage 實測：舊片 XHR 在 yt-navigate-start 後 31ms 才 loadend，
+    // 此時 location 已是新片）。下方 sourceId 用「當前 URL 的 videoId」組身份 →
+    // 舊片字幕被當成新片來源收下、立即對舊片內容發翻譯批次（實測多打一筆 Gemini
+    // 請求記在新片名下）；若落在 yt-navigate-finish 的 SPA reset 之後，舊片的
+    // translatedWindows 還會讓新片同時段視窗被誤跳過。timedtext URL 自帶 v=<videoId>，
+    // 與 URL videoId 不符即為 stale 回應，一律忽略（兩者任一取不到時不擋，維持舊行為）。
+    {
+      let _xhrVideoId = null;
+      try { _xhrVideoId = new URL(url, location.href).searchParams.get('v'); } catch (_) {}
+      const _urlVideoId = getVideoIdFromUrl();
+      if (_xhrVideoId && _urlVideoId && _xhrVideoId !== _urlVideoId) {
+        SK.sendLog('info', 'youtube', 'XHR captions ignored (stale videoId)', {
+          xhrVideoId: _xhrVideoId, urlVideoId: _urlVideoId,
+        });
+        return;
+      }
+    }
+
+    // ASR 軌先從 URL 判定，parse 時套 perLineTiming（多行 event 各行獨立 startMs，見 parseJson3）
+    let _isAsrUrl = false;
+    try { _isAsrUrl = new URL(url, location.href).searchParams.get('kind') === 'asr'; } catch (_) {}
+    const segments = parseCaptionResponse(responseText, { perLineTiming: _isAsrUrl });
     if (segments.length === 0) return;
 
     const YT = SK.YT;
@@ -756,6 +853,53 @@
     return parsed;
   }
 
+  // 2026-09-15：ASR LLM 傳輸格式改「編號|片段」逐行，取代逐片段 JSON {s,e,t}。
+  // 量測（countTokens）：舊格式每個 1–3 字的片段包成 {"s":12000,"e":12400,"t":"the"} 約 21 token，
+  // 純文字只佔 input 4%；一個 8 秒子批 1,044 token 裡真正內容 40 token。真 API 實測新格式
+  // input −32%～−43%、output −48%，模型服從度 100%（涵蓋所有編號、順序正確、逐行可解析）。
+  // 時間軸不再送 LLM：顯示區間由片段時刻表決定（_resolveAsrEntryTimeline 本來就不採信 LLM 的 e），
+  // 輸出以「起始編號-結束編號|譯文」回，content 端把編號對回 startMs 再走同一條 timeline 解析。
+  // 片段間 start-to-start 間隔達門檻時插入空行當停頓提示（原本 LLM 從 s/e 隱含看到的資訊）。
+  // YT _runAsrSubBatch 與 Drive _runOneBatchLlm 共用（SK.ASR.buildLlmInput / parseLlmOutput）。
+  SK.ASR_LLM_PAUSE_GAP_MS = 1500;
+  function _buildAsrLlmInput(segs) {
+    const lines = [];
+    for (let i = 0; i < segs.length; i++) {
+      const seg = segs[i];
+      if (!seg) continue;
+      if (i > 0 && segs[i - 1] && seg.startMs - segs[i - 1].startMs >= SK.ASR_LLM_PAUSE_GAP_MS) lines.push('');
+      const text = String(seg.text || '').replace(/[\r\n]+/g, ' ').replace(/\|/g, '/').trim();
+      lines.push(`${i + 1}|${text}`);
+    }
+    return lines.join('\n');
+  }
+  const _ASR_LLM_LINE_RE = /^\s*(\d+)\s*(?:[-–~]\s*(\d+))?\s*[|｜]\s*(.+?)\s*$/;
+  // 回傳與舊協定同形的 entries [{s, e, t}]，下游 _resolveAsrEntryTimeline 不變。
+  // 模型無視格式回舊 JSON 時走 _parseAsrResponse fallback；編號超出範圍的行以 s=NaN 進 entries，
+  // 由 resolveEntryTimeline 計入 droppedCount（與舊協定的幻覺 s 同一路徑）。
+  function _parseAsrLlmOutput(text, segs, batchEndMs) {
+    const stripped = _stripJsonFence(text || '');
+    if (/^\s*\[/.test(stripped)) return _parseAsrResponse(stripped);
+    const entries = [];
+    let matched = 0;
+    for (const line of stripped.split('\n')) {
+      if (!line.trim()) continue;
+      const m = line.match(_ASR_LLM_LINE_RE);
+      if (!m) continue;
+      matched++;
+      let a = Number(m[1]);
+      let b = m[2] != null ? Number(m[2]) : a;
+      if (b < a) [a, b] = [b, a];
+      const segA = segs[a - 1];
+      const segB = segs[b - 1];
+      if (!segA || !segB) { entries.push({ s: NaN, e: NaN, t: m[3] }); continue; }
+      const next = segs[b];
+      entries.push({ s: segA.startMs, e: next ? next.startMs : batchEndMs, t: m[3] });
+    }
+    if (matched === 0) throw new Error('ASR response: no parsable lines');
+    return entries;
+  }
+
   // v2.0.54(症狀:句尾詞跨視窗重複,例「…181 匹馬力」/「馬力,但…」):
   // ASR 視窗是純時間對齊切分(floor 到 windowSizeMs),邊界常落在句中;前後視窗
   // 各自獨立送 LLM、互看不到——前窗看到殘句會腦補句尾(「It makes 181」→
@@ -900,13 +1044,16 @@
   const _ASR_SENTENCE_MIN_WORD = 20;    // 合句總條數上限(吞併用)
   const _ASR_MAX_WORDS = 30;            // Ile 合併後 word 上限
 
-  function _heuristicMergeAsr(rawSegments) {
+  // lang：字幕軌語言（決定行間接合字元，見 joinSegTexts）；省略 = 目前 YT 字幕軌語言
+  function _heuristicMergeAsr(rawSegments, lang) {
+    if (lang === undefined) lang = SK.YT?.captionLang || null;
     if (!rawSegments?.length) return [];
 
     // 統一格式:每條包 utf8 / tStartMs / isBreak / 原始 ref(供組裝結果用)
     const events = rawSegments.map(s => ({
       utf8: s.text,
       tStartMs: s.startMs,
+      groupId: s.groupId,
       isBreak: false,
       _src: s,
     }));
@@ -921,7 +1068,11 @@
       for (let i = 0; i < evs.length; i++) {
         const c = evs[i];
         const next = evs[i + 1];
-        const m = c.tStartMs - baseMs;
+        // 同一 json3 event 的多行（同 groupId）視為零間隔：perLineTiming 給各行推算 onset 後，
+        // 行與行之間的時間差是推算值，不能拿來當「自然停頓」證據切句（維持舊行為：同 event 必同句）
+        const prev = evs[i - 1];
+        const sameEvent = c.groupId != null && prev && prev.groupId === c.groupId;
+        const m = sameEvent ? 0 : c.tStartMs - baseMs;
         const cTrim = c.utf8.trim().toLowerCase();
         if (_ASR_BREAK_WORDS.has(cTrim) && m > _ASR_BREAK_MINI_TIME) {
           pushBreak(c, [c]); continue;
@@ -957,7 +1108,7 @@
         const gap = nextFirst.tStartMs - last.tStartMs;
         const matched = nextFirst.utf8.match(startRe) || last.utf8.match(endRe);
         if (matched && !nextFirst.isBreak && gap <= _ASR_MIN_INTERVAL) {
-          const wordCount = [...cur, ...groups[u + 1]].map(e => e.utf8).join('').split(/\s+/).filter(Boolean).length;
+          const wordCount = joinSegTexts([...cur, ...groups[u + 1]].map(e => e.utf8), lang).split(/\s+/).filter(Boolean).length;
           if (wordCount <= _ASR_MAX_WORDS) {
             cur.push(...groups[u + 1]);
             continue;
@@ -989,7 +1140,9 @@
     const compact  = Lle(merged);
 
     return compact.map((group, idx) => {
-      const text = group.map(e => e.utf8).join('').replace(/\n/g, ' ').trim();
+      // 片段是 parseJson3 trim 過的整行，行與行之間必須補空白再合句（原 join('') 讓跨行單字
+      // 黏在一起送 LLM,real-data:「a little bit moretime?」)
+      const text = joinSegTexts(group.map(e => e.utf8), lang).replace(/\n/g, ' ').replace(/\s+/g, ' ').trim();
       const startMs = group[0].tStartMs;
       const next = compact[idx + 1];
       const endMs = next ? next[0].tStartMs : group[group.length - 1].tStartMs + SK.ASR_LAST_CUE_FALLBACK_MS;
@@ -1811,8 +1964,15 @@
   //
   // v1.6.21:effectiveEnd clamp 到「下一個 cue 的 startMs」,避免閱讀補償延長(_upsertDisplayCue
   // 內) 造成的 endMs 跟下一句重疊;若無下一句,沿用 cue.endMs。
-  function _findActiveCue(currentMs) {
-    const cues = SK.YT.displayCues;
+  // 2026-09-11：加 SK.ASR_CUE_LEAD_MS 統一提前量（見 content-ns.js 該常數註解）——整條顯示
+  // 時間軸提前，cue 起點與終點一起前移，鄰接 clamp 語意不變。
+  // YT overlay / Drive 浮層共用的「目前該顯示哪條 cue」查表（2026-09-11 code review：原本
+  // Drive 端 _findActiveEntryIdx 是本函式的手抄鏡像，ASR_CUE_LEAD_MS 一加進來就 drift——
+  // YT 提前 1s、Drive 貼齊語音；邊界 `<=` vs `<` 也不同。收成單一實作，兩邊只傳自己的陣列）。
+  // cues 元素需有 startMs / endMs；sparse / null 元素跳過。回傳索引，-1 = 無。
+  function _findActiveCueIdx(cues, currentMs) {
+    if (!cues || !cues.length) return -1;
+    currentMs = currentMs + (SK.ASR_CUE_LEAD_MS || 0);
     // v1.8.14: _upsertDisplayCue 已用 findIndex upsert + sort,同 startMs 只留一筆,
     // 所以 cues[i+1].startMs 必嚴格大於 cues[i].startMs(若 i+1 存在)。
     // 從原本 O(N²) 內 loop 簡化為 O(N) 線性掃描。
@@ -1823,12 +1983,39 @@
       const next = cues[i + 1];
       const nextStart = (next) ? next.startMs : Infinity;
       const effectiveEnd = Math.min(c.endMs, nextStart);
-      if (currentMs >= c.startMs && currentMs <= effectiveEnd) return c;
+      if (currentMs >= c.startMs && currentMs <= effectiveEnd) return i;
     }
-    return null;
+    return -1;
+  }
+  function _findActiveCue(currentMs) {
+    const cues = SK.YT.displayCues;
+    const idx = _findActiveCueIdx(cues, currentMs);
+    return idx >= 0 ? cues[idx] : null;
   }
 
+  // ASR 片段合句時的行間接合（2026-09-11 code review）：英文等以空白分詞的語言行與行之間
+  // 必須補空白（join('') 會讓跨行單字黏成「moretime」），但 ja / zh / th 等不分詞語言補了
+  // 反而在句中塞進空格（送 LLM 的原文與雙語 .src 顯示都帶空格）。依字幕軌語言決定接合字元。
+  // chooser 會切到影片原語 ASR 軌，ASR 已非 en-only。
+  const _ASR_NO_SPACE_LANG_RE = /^(ja|zh|th|lo|km|my|bo)(-|_|$)/i;
+  function joinSegTexts(texts, lang) {
+    const sep = (lang && _ASR_NO_SPACE_LANG_RE.test(String(lang))) ? '' : ' ';
+    return texts.join(sep);
+  }
+
+  // 批次 7 量測用（2026-09-14）：dev tail 下累積 _updateOverlay 呼叫數 / 總耗時 / 最大單次，
+  // GET_STATE 的 yt.overlayProf 回報。flag 載入時算一次，商店版零成本。
+  const _OVERLAY_PROF = (() => { try { return !!SK.isDevTailBuild?.(); } catch (_) { return false; } })();
   function _updateOverlay() {
+    if (!_OVERLAY_PROF) return _updateOverlayImpl();
+    const t0 = performance.now();
+    try { return _updateOverlayImpl(); } finally {
+      const dt = performance.now() - t0;
+      const P = SK.YT._overlayProf || (SK.YT._overlayProf = { calls: 0, totalMs: 0, maxMs: 0 });
+      P.calls++; P.totalMs += dt; if (dt > P.maxMs) P.maxMs = dt;
+    }
+  }
+  function _updateOverlayImpl() {
     const YT = SK.YT;
     if (!YT.active || !YT.isAsr) return;
     // CC 關閉時清空 overlay(避免最後一條中文 cue 卡在畫面上)。
@@ -1988,6 +2175,7 @@
     return _clampCuesToDuration(cues, YT.videoEl ? YT.videoEl.duration : NaN);
   }
   SK._buildIosFsTrackCues = _buildIosFsTrackCues;   // regression spec 用
+  SK._findActiveCue = _findActiveCue;               // regression spec 用（youtube-asr-cue-lead）
 
   // 純函式:cue endSec clamp 到影片長度。duration 非有限值(NaN / Infinity,
   // metadata 未載入或直播)不動;clamp 後區間退化(end <= start)的 cue 移除。
@@ -2015,7 +2203,12 @@
       if (!(endMs > c.startMs)) continue;     // 退化區間跳過(VTTCue 要 end > start)
       let text = String(c.targetText);
       if (isBilingual && c.sourceText) text = String(c.sourceText) + '\n' + text;
-      out.push({ startSec: c.startMs / 1000, endSec: endMs / 1000, text });
+      // 統一提前量（同 _findActiveCue）：整條時間軸前移，起點不得為負
+      const lead = SK.ASR_CUE_LEAD_MS || 0;
+      const startSec = Math.max(0, c.startMs - lead) / 1000;
+      const endSec = (endMs - lead) / 1000;
+      if (!(endSec > startSec)) continue;
+      out.push({ startSec, endSec, text });
     }
     return out;
   }
@@ -2042,7 +2235,7 @@
         const group = [seg];
         let j = i + 1;
         while (j < segs.length && segs[j] && segs[j].groupId === seg.groupId) { group.push(segs[j]); j++; }
-        units.push({ startMs: group[0].startMs, srcText: group.map(s => s.text).join(' '), key: group[0].normText });
+        units.push({ startMs: group[0].startMs, srcText: joinSegTexts(group.map(s => s.text), YT.captionLang), key: group[0].normText });
         i = j;
       } else {
         units.push({ startMs: seg.startMs, srcText: seg.text, key: seg.normText });
@@ -2408,6 +2601,9 @@
         const span = segs[i].startMs - baseMs;
         if (span < minSpanMs) continue;
         if (span > maxSpanMs) break;
+        // 同一 json3 event 的多行（同 groupId）行間差是 perLineTiming 推算值，不是自然停頓，
+        // 不可當切點（同 kle 的 sameEvent 零間隔原則；2026-09-11 code review）
+        if (segs[i].groupId != null && segs[i].groupId === segs[i - 1].groupId) continue;
         const gap = segs[i].startMs - segs[i - 1].startMs;
         if (gap >= GAP_MS && gap > bestGap) {
           bestGap = gap;
@@ -2481,12 +2677,8 @@
     // v2.0.54:子批末條 e 改用 rawSegments 真實後繼片段起點(下一子批首條 = 本值,
     // 子批間仍不重疊),不再固定 +1500ms——固定值讓 LLM 對末句時距的認知系統性偏短
     const batchEndMs = _asrBatchEndMs(lastSeg.startMs, YT.rawSegments);
-    const inputArr = subSegs.map((seg, i) => {
-      const next = subSegs[i + 1];
-      const endMs = next ? next.startMs : batchEndMs;
-      return { s: seg.startMs, e: endMs, t: seg.text };
-    });
-    const inputJson = JSON.stringify(inputArr);
+    // 2026-09-15：傳輸格式改「編號|片段」逐行（見 _buildAsrLlmInput 註解）
+    const inputJson = _buildAsrLlmInput(subSegs);
 
     // 依 ytSubtitle.engine 路由：openai-compat → CUSTOM，其餘(含 google，因 Google MT
     // 不支援 JSON timestamp 模式) → Gemini ASR handler
@@ -2515,7 +2707,7 @@
     _logWindowUsage(subSegs.length, res.usage);
 
     const rawText = res.result?.[0] || '';
-    const entries = _parseAsrResponse(rawText);
+    const entries = _parseAsrLlmOutput(rawText, subSegs, batchEndMs);
 
     // v2.0.54:顯示時間軸改由 _resolveAsrEntryTimeline 以片段時間軸分割(不採信 LLM 的 e),
     // 修「AI 分句字幕太早消失 / 下一句太晚出現」:LLM 挑錯句中片段的 e 時,舊邏輯讓
@@ -2535,7 +2727,7 @@
       // G 路徑:寫 displayCues 給 overlay 用(progressive 模式覆蓋 heuristic 寫的同 startMs)。
       // v2.0.54:超長合句先過 _splitLongAsrCue 保底拆分(只拆顯示 cue,上面 captionMap
       // 已寫整句;拆出的每片各自 replaceRange 清掉自己區間內的 heuristic 殘留)
-      const sourceText = covered.map(seg => seg.text).join(' ');
+      const sourceText = joinSegTexts(covered.map(seg => seg.text), YT.captionLang);
       const _segStarts = covered.map(seg => seg.startMs);
       for (const piece of _splitLongAsrCue(cue.startMs, cue.endMs, cue.text, _segStarts)) {
         _upsertDisplayCue(piece.startMs, piece.endMs, sourceText, piece.text, { replaceRange: true });
@@ -2585,10 +2777,15 @@
     const _t0 = Date.now();
     const _batchApiMs = new Array(subBatches.length).fill(0);
 
-    if (subBatches.length === 0) return;
+    if (subBatches.length === 0) return 0;
 
+    // 2026-09-11 code review §3.4-2：回傳「res.ok 的子批數」給 translateWindowFrom 判
+    // 視窗成功——視窗內 unit 全是 captionMap 已有的 key（副歌 / 重複字幕）時 captionMap
+    // size 不會長，靠 size 判斷會誤判失敗 → 永遠不進 translatedWindows → 每次 seek 重送。
+    let _okBatches = 0;
     try {
       await _runAsrSubBatch(subBatches[0], 0, _t0, _batchApiMs);
+      _okBatches++;
       YT.lastApiMs = _batchApiMs[0]; // 第一批 = 最快字幕回填
     } catch (err) {
       SK.sendLog('error', 'youtube', 'asr sub-batch 0 failed', { error: err.message });
@@ -2596,7 +2793,7 @@
     }
     if (!YT.active) {
       YT.batchApiMs = _batchApiMs;
-      return;
+      return _okBatches;
     }
     if (subBatches.length > 1) {
       const settled = await Promise.allSettled(
@@ -2607,6 +2804,8 @@
           SK.sendLog('error', 'youtube', `asr sub-batch ${i + 1} failed`, {
             error: r.reason?.message || String(r.reason),
           });
+        } else {
+          _okBatches++;
         }
       });
     }
@@ -2619,7 +2818,9 @@
       sessionOffsetMs: Date.now() - YT.sessionStartTime,
       subBatchTimings: _batchApiMs,
       captionMapSize: YT.captionMap.size,
+      okBatches: _okBatches,
     });
+    return _okBatches;
   }
 
   // ─── F 模式:啟發式合句後逐句翻譯(reuse 既有 batch streaming pattern) ─────
@@ -2744,15 +2945,19 @@
         });
       });
 
+    // 2026-09-11 code review §3.4-2：回傳 res.ok 的批數（同 _runAsrWindow），供
+    // translateWindowFrom 的視窗成功判斷用
+    let _okBatches = 0;
     if (batches.length > 0) {
       try {
         await _runBatch(batches[0], 0);
+        _okBatches++;
         YT.lastApiMs = _batchApiMs[0];
       } catch (err) {
         SK.sendLog('error', 'youtube', 'asr heuristic batch 0 failed', { error: err.message });
         _notifyTranslationError(err.message);
       }
-      if (!YT.active) { YT.batchApiMs = _batchApiMs; return; }
+      if (!YT.active) { YT.batchApiMs = _batchApiMs; return _okBatches; }
       if (batches.length > 1) {
         const settled = await Promise.allSettled(
           batches.slice(1).map((bu, i) => _runBatch(bu, i + 1))
@@ -2762,6 +2967,8 @@
             SK.sendLog('error', 'youtube', `asr heuristic batch ${i + 1} failed`, {
               error: r.reason?.message || String(r.reason),
             });
+          } else {
+            _okBatches++;
           }
         });
       }
@@ -2773,7 +2980,9 @@
       totalElapsedMs: Date.now() - _t0,
       sessionOffsetMs: Date.now() - YT.sessionStartTime,
       captionMapSize: YT.captionMap.size,
+      okBatches: _okBatches,
     });
+    return _okBatches;
   }
   // 暴露給 spec 端直接驅動 heuristic 批次路徑(M8 res.result 缺失防禦回歸測試用),
   // 不影響 production behaviour。
@@ -2843,12 +3052,20 @@
     if (_hasVisibleTargetCaption()) return false;
     return true;
   }
+  SK._shouldShowTranslatingStatus = _shouldShowTranslatingStatus;   // regression spec 用
+  // 2026-09-11：暴露給 regression spec（youtube-error-notify-hides-status.spec.js）直接驅動
+  // status show → error notify 的順序，不必繞整條視窗翻譯路徑
+  SK._showCaptionStatus = showCaptionStatus;
+  SK._notifyTranslationError = _notifyTranslationError;
 
   function _notifyTranslationError(errorMessage) {
     const YT = SK.YT;
+    // 2026-09-11 code review §3.4-1：hide 必須在 _errorNotified guard 之前——guard 只是
+    // 「同 session 不重複彈 toast」，但每次視窗失敗都可能又 show 過「翻譯中…」status，
+    // 第二次以後的失敗若被 guard 早退，status 會卡住直到 stop。
+    hideCaptionStatus();
     if (YT._errorNotified) return;
     YT._errorNotified = true;
-    hideCaptionStatus();
     SK.showToast('error', SK.t('toast.translateFailed', { error: errorMessage }), { autoHideMs: 8000 });
   }
 
@@ -2908,6 +3125,12 @@
     // 空白(status 不顯示因 !translatedWindows.has=false,翻譯不重試因同 guard)。
     const _cmSizeBefore = YT.captionMap.size;
     const _cuesCountBefore = YT.displayCues.length;
+    // 2026-09-11 code review §3.4-2：size 比對對「視窗內 unit 全是 captionMap 既有 key」
+    // （副歌 / 重複字幕 / seek 回已翻區）的視窗會誤判失敗——captionMap.set 同 key 不長
+    // size、displayCues 非 ASR 路徑也不長 → 永遠不進 translatedWindows → 每次 seek
+    // 回來重送 API + 閃「翻譯中…」。改以「至少一批 res.ok」計數器為主判斷，size 比對
+    // 保留為輔（partial 成功仍算成功，與原語意一致）。
+    let _okBatchCount = 0;
 
     // 找出本視窗內的字幕（[windowStartMs, windowEndMs)）。
     // v2.0.54:ASR 走 _collectAsrWindowSegs——尾端延伸到句尾標點(邊界不切在句中)
@@ -2961,7 +3184,7 @@
 
       if (asrMode === 'heuristic' || asrMode === 'progressive') {
         try {
-          await _runAsrHeuristicWindow(windowSegs, windowStartMs, { isUrgent: _isUrgent });
+          _okBatchCount += (await _runAsrHeuristicWindow(windowSegs, windowStartMs, { isUrgent: _isUrgent })) || 0;
         } catch (err) {
           SK.sendLog('error', 'youtube', 'asr heuristic translation failed', { error: err.message });
         }
@@ -2980,7 +3203,7 @@
           });
         } else {
           try {
-            await _runAsrWindow(windowSegs, windowStartMs, windowEndMs);
+            _okBatchCount += (await _runAsrWindow(windowSegs, windowStartMs, windowEndMs)) || 0;
           } catch (err) {
             SK.sendLog('error', 'youtube', 'asr window translation failed', { error: err.message });
           }
@@ -3111,6 +3334,7 @@
             const elapsed = Date.now() - _t0;
             _batchApiMs[b] = elapsed;
             if (!res?.ok) throw new Error(SK.i18n.bgErrorMessage(res) || SK.t('common.errorUnknown'));
+            _okBatchCount++;
             _logWindowUsage(batchUnits.length, res.usage);
             _injectBatchResult(batchUnits, res.result || [], b, elapsed);
           });
@@ -3245,7 +3469,8 @@
                 ? Promise.allSettled(batches.slice(1).map((bu, i) => _runBatch(bu, i + 1)))
                 : Promise.resolve([]);
               try {
-                await stream.donePromise;
+                const _doneRes = await stream.donePromise;
+                if (_doneRes?.ok) _okBatchCount++;
                 YT.lastApiMs = _batchApiMs[0];
               } catch (streamErr) {
                 SK.sendLog('warn', 'youtube', 'streaming mid-failure, retrying batch 0 non-streaming', { error: streamErr.message });
@@ -3328,14 +3553,14 @@
       SK.sendLog('info', 'youtube', 'window finished after caption source switch — not marking translated', {
         windowStartMs, gen: _myCaptionGen, currentGen: YT.captionSourceGen,
       });
-    } else if (windowSegs.length === 0 || _windowProducedTranslation) {
+    } else if (windowSegs.length === 0 || _okBatchCount > 0 || _windowProducedTranslation) {
       YT.translatedWindows.add(windowStartMs); // Set 精確記錄,供 seek-back 跳過判斷用
     } else {
       // v2.0.54:視窗沒產出 → 釋放本視窗取走的片段,retry 時重新收集(含尾端延伸)。
       // 不釋放的話片段永遠掛在 asrSegConsumed,重試視窗收不到片段 → 永久空白。
       if (_myConsumedSet) windowSegs.forEach(s => _myConsumedSet.delete(s.startMs));
       SK.sendLog('warn', 'youtube', 'window translation produced nothing — leaving open for retry', {
-        windowStartMs, segCount: windowSegs.length,
+        windowStartMs, segCount: windowSegs.length, okBatchCount: _okBatchCount,
         captionMapSize: YT.captionMap.size,
         displayCuesLen: YT.displayCues.length,
       });
@@ -4037,6 +4262,13 @@
       return;
     }
 
+    // 同頁單一 instance 選舉（content-ns.js SK.isInstanceLeader）：另一份 Shinkansen 排名
+    // 較高時靜默讓位，避免兩份各自翻譯又共寫同一個 overlay 造成閃動
+    if (SK.isInstanceLeader && !SK.isInstanceLeader()) {
+      SK.sendLog('info', 'youtube', 'activation skipped (another instance leads)', { source });
+      return;
+    }
+
     YT.active  = true;
     YT.videoId = getVideoIdFromUrl();
     YT.config  = null; // 強制重新讀取設定
@@ -4382,6 +4614,9 @@
     parseJson3,
     mergeAsr: _heuristicMergeAsr,
     parseAsrResponse: _parseAsrResponse,
+    // 2026-09-15：「編號|片段」傳輸格式（YT / Drive 共用；parseLlmOutput 對舊 JSON 回應仍 fallback）
+    buildLlmInput: _buildAsrLlmInput,
+    parseLlmOutput: _parseAsrLlmOutput,
     // v2.0.54: entry 驗證 + 顯示時間軸分割（YT / Drive 共用,取代 normalizeAsrEntry
     // 逐條驗證——LLM 的 e 不再採信,詳見 _resolveAsrEntryTimeline 註解)
     resolveEntryTimeline: _resolveAsrEntryTimeline,
@@ -4389,6 +4624,10 @@
     // v2.0.54: 超長合句 code 端保底拆分(YT overlay / Drive 浮層共用,詳見
     // _splitLongAsrCue 註解)
     splitLongCue: _splitLongAsrCue,
+    // 2026-09-11 code review：YT overlay / Drive 浮層共用的 active cue 查表（含 ASR_CUE_LEAD_MS）
+    // 與 ASR 片段行間接合（依語言決定是否補空白）
+    findActiveCueIdx: _findActiveCueIdx,
+    joinSegTexts,
   };
 
 })(window.__SK);

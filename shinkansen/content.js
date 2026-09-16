@@ -2,7 +2,7 @@
 // 職責：Debug Bridge、translatePage、restorePage、translateUnits、
 // 編輯模式、訊息處理、Debug API、初始化。
 // 注意：content script 不支援 ES module import。
-// v1.1.9: 拆分為 7 個檔案，本檔為主協調層，依賴 content-ns/toast/detect/serialize/inject/spa。
+// v1.1.9 起拆成多個 content script 檔（完整清單與各檔職責見 SPEC.md §6），本檔為主協調層。
 
 (function(SK) {
   if (!SK || SK.disabled) return;  // v1.5.2: iframe gate（見 content-ns.js）
@@ -31,6 +31,21 @@
     const respond = (detail) => {
       window.dispatchEvent(new CustomEvent('shinkansen-debug-response', { detail }));
     };
+
+    // 2026-09-11 code review S-1（隱私 / 安全 gate，預設全關）：bridge 對任意網頁常開，
+    // 任何頁面 JS 都能 dispatch 這個事件並監聽回應。原本只有 GET_CACHE_PEEK /
+    // TOGGLE_EDIT_MODE 逐條加 dev tail gate，其餘商店版照開——GET_STORAGE 回整包
+    // storage.sync（曾含 Instapaper OAuth token）、GET_LOGS 帶其他分頁 URL 與段落片段、
+    // TRANSLATE* 用使用者金鑰翻惡意頁塞的內容、CLEAR_CACHE / RELOAD_EXTENSION 破壞狀態。
+    // 改成「預設只在 dev tail（四段版本 = unpacked working tree）開放」，商店版白名單只留
+    // GET_STATE（唯讀、無敏感資料；cage 驗版本用）與 GET_CACHE_STATS（只有條數 / bytes）。
+    // 除錯本來就跑 dev tail，除錯能力不受影響。
+    // GET_CACHE_STATS 只回條數 / bytes / 時間戳，無內容，既有 spec 鎖定商店版可用（診斷 LRU）
+    const _RELEASE_SAFE_ACTIONS = new Set(['GET_STATE', 'GET_CACHE_STATS']);
+    if (!_RELEASE_SAFE_ACTIONS.has(action) && !SK.isDevTailBuild()) {
+      respond({ ok: false, error: `${action} disabled in release build (dev tail only)` });
+      return;
+    }
 
     // v1.5.4: 全部走 Promise 風格——Chrome 88+ 跟 Firefox 全版本都支援，
     // 而 callback 風格 Firefox 不認；此前混用會在 Firefox 直接壞。
@@ -82,19 +97,10 @@
       // Debug Bridge:切換編輯譯文模式(等同 popup 按鈕)。cage / harness 進不了
       // extension 的 popup 頁,沒這條就無法自動化驗編輯模式相關 bug(例 Content
       // Guard 編輯豁免與 framework revert 的互動)。僅 dev tail(四段版本)啟用,
-      // 與 GET_CACHE_PEEK 同款 gate——bridge 對任意網頁常開,行為開關不對商店版
-      // 開放。detail.force = true/false 指定開關,省略 = toggle
-      let _editDevTail = false;
-      try {
-        const _rt = (typeof browser !== 'undefined' && browser.runtime) || (typeof chrome !== 'undefined' && chrome.runtime);
-        _editDevTail = String(_rt?.getManifest?.().version || '').split('.').length >= 4;
-      } catch (_) { /* orphan context 取不到版本 → 視同商店版拒絕 */ }
-      if (!_editDevTail) {
-        respond({ ok: false, error: 'TOGGLE_EDIT_MODE disabled in release build (dev tail only)' });
-      } else {
-        const _force = (e.detail && typeof e.detail.force === 'boolean') ? e.detail.force : undefined;
-        respond(toggleEditMode(_force));
-      }
+      // 商店版由 listener 頂端的統一 gate 擋掉（2026-09-11 起全 bridge 預設 dev tail only）。
+      // detail.force = true/false 指定開關，省略 = toggle
+      const _force = (e.detail && typeof e.detail.force === 'boolean') ? e.detail.force : undefined;
+      respond(toggleEditMode(_force));
     } else if (action === 'GET_PERSISTED_LOGS') {
       // v1.2.52: 讀取跨 service worker 重啟仍保留的持久化 log
       forwardToBackground('GET_PERSISTED_LOGS');
@@ -122,13 +128,15 @@
       if (SK.isYouTubePage?.() && SK.YT) {
         out.yt = {
           active:          SK.YT.active,
-          translating:     SK.YT.translating,
+          // YT 沒有單一 translating 旗標，以「有視窗翻譯中」推導（2026-09-11 review §3.1-8）
+          translating:     (SK.YT.translatingWindows?.size ?? 0) > 0,
           rawCount:        SK.YT.rawSegments?.length ?? 0,
           captionMapSize:  SK.YT.captionMap?.size ?? 0,
           captionLang:     SK.YT.captionLang,
           isAsr:           SK.YT.isAsr,
           displayCuesLen:  SK.YT.displayCues?.length ?? 0,
           ytConfig:        SK.YT.config,
+          overlayProf:     SK.YT._overlayProf || null,   // 批次 7 量測（dev tail 才累積）
         };
       }
       respond(out);
@@ -146,8 +154,12 @@
         if (!_storage || !_storage.sync) {
           respond({ ok: false, error: 'storage.sync unavailable in this context' });
         } else {
-          _storage.sync.get(keys)
-            .then((data) => respond({ ok: true, sync: data }))
+          // 固定術語表 / 禁用詞 2026-09-12 起存 local（lib/storage.js LOCAL_SETTINGS_KEYS），
+          // 為了 cage 除錯一致性一併讀出覆蓋進回應（欄位名維持 sync 向下相容）
+          const LARGE_LOCAL = ['fixedGlossary', 'forbiddenTerms'];
+          const wantLocal = keys === null ? LARGE_LOCAL : LARGE_LOCAL.filter((k) => keys.includes(k));
+          Promise.all([_storage.sync.get(keys), wantLocal.length ? _storage.local.get(wantLocal) : Promise.resolve({})])
+            .then(([data, local]) => respond({ ok: true, sync: { ...data, ...local } }))
             .catch((err) => respond({ ok: false, error: err?.message || String(err) }));
         }
       } catch (err) {
@@ -238,16 +250,7 @@
       // Gmail / 內部文件等其他站翻過的內容全文)——惡意頁 dispatch bridge 事件
       // 換關鍵字反覆探測即可跨站撈譯文。僅 dev tail 版本(四段版本號 = unpacked
       // working tree）啟用；商店版（三段）直接回 error。除錯本來就跑 dev tail，
-      // 除錯能力不受影響。
-      let _isDevTail = false;
-      try {
-        const _rt = (typeof browser !== 'undefined' && browser.runtime) || (typeof chrome !== 'undefined' && chrome.runtime);
-        _isDevTail = String(_rt?.getManifest?.().version || '').split('.').length >= 4;
-      } catch (_) { /* orphan context 等取不到版本 → 視同商店版拒絕 */ }
-      if (!_isDevTail) {
-        respond({ ok: false, error: 'GET_CACHE_PEEK disabled in release build (dev tail only)' });
-        return;
-      }
+      // 除錯能力不受影響。（2026-09-11 起 gate 統一移到 listener 頂端，全 bridge 適用）
       const _contains = String((e.detail && e.detail.contains) || '');
       const _limit = Math.max(1, Math.min(20, (e.detail && e.detail.limit) || 5));
       try {
@@ -282,7 +285,8 @@
       // / byModel——對帳 Google 帳單 + 看有沒有套 cache 折扣(input vs billedInput 差)用。
       forwardToBackground('QUERY_USAGE_STATS', { from: e.detail?.from, to: e.detail?.to });
     } else if (action === 'YT_TRANSLATE') {
-      // Debug Bridge:觸發 YouTube 字幕翻譯(等同 Alt+S 在 YT 頁的行為)
+      // Debug Bridge:觸發 YouTube 字幕翻譯(等同 popup 字幕翻譯開關 / autoTranslate 啟動路徑；
+      // Alt+S 是頁面文字翻譯,與字幕翻譯無關)
       if (!SK.isYouTubePage?.()) {
         respond({ ok: false, error: 'not on YouTube page' });
       } else {
@@ -300,6 +304,60 @@
       // background 重啟 SW；此 tab 的 content script 會變成 orphan，下次 navigate
       // 重新注入新 code。
       forwardToBackground('RELOAD_EXTENSION');
+    } else if (action === 'PROFILE_DETECT' || action === 'PROFILE_SERIALIZE') {
+      // 效能 profile（2026-09-14 code review 批次 7）：dev tail 專用。
+      // PROFILE_DETECT：重跑 collectParagraphs N 次量耗時，回每輪 ms + 最後一輪 skipStats
+      //   + 單元簽章（kind|tag|textLength|前 40 字），供改動前後等價比對。
+      // PROFILE_SERIALIZE：對全部單元序列化（含 fragment）再以「譯文 = 原序列化字串」
+      //   反序列化（identity round-trip），量兩段耗時，回序列化簽章（text + slots 數）。
+      //   反序列化只組 fragment 不注入 DOM，頁面不變。
+      // 不進商店版（走預設 dev tail gate），純唯讀。
+      try {
+        const d = e.detail || {};
+        const runs = Math.max(1, Math.min(20, Number(d.runs) || 5));
+        const times = [];
+        let units = [];
+        let stats = {};
+        for (let i = 0; i < runs; i++) {
+          stats = {};
+          const t0 = performance.now();
+          units = SK.collectParagraphs(document.body, stats);
+          times.push(Math.round((performance.now() - t0) * 100) / 100);
+        }
+        const summary = units.map((u) => {
+          const s = unitSummary(u, 0);
+          return `${s.kind}|${s.tag}|${s.textLength}|${s.textPreview.slice(0, 40)}`;
+        });
+        if (action === 'PROFILE_DETECT') {
+          respond({ ok: true, runs, timesMs: times, unitCount: units.length, skipStats: stats, summary });
+          return;
+        }
+        const serTimes = [];
+        const deserTimes = [];
+        let serialized = [];
+        for (let i = 0; i < runs; i++) {
+          const t0 = performance.now();
+          serialized = units.map((u) => {
+            if (u.kind === 'fragment') return SK.serializeFragmentWithPlaceholders(u);
+            if (!SK.hasPreservableInline(u.el)) return { text: (u.el.innerText ?? u.el.textContent ?? '').trim(), slots: [] };
+            return SK.serializeWithPlaceholders(u.el);
+          });
+          serTimes.push(Math.round((performance.now() - t0) * 100) / 100);
+          const t1 = performance.now();
+          for (const s of serialized) {
+            if (!s.text) continue;
+            SK.deserializeWithPlaceholders(s.text, s.slots, { cloneReuse: true });
+          }
+          deserTimes.push(Math.round((performance.now() - t1) * 100) / 100);
+        }
+        const serSummary = serialized.map((s) => `${s.slots.length}|${s.text.length}|${s.text.slice(0, 60)}`);
+        respond({
+          ok: true, runs, unitCount: units.length,
+          detectTimesMs: times, serializeTimesMs: serTimes, deserializeTimesMs: deserTimes,
+          totalSlots: serialized.reduce((a, s) => a + s.slots.length, 0),
+          serSummary,
+        });
+      } catch (err) { respond({ ok: false, error: err?.message || String(err) }); }
     } else if (action === 'GET_YT_DEBUG') {
       // 暴露 YT 字幕翻譯的內部狀態，供除錯比對用
       const YT = SK.YT;
@@ -314,7 +372,7 @@
       respond({
         ok: true,
         active:           YT.active,
-        translating:      YT.translating,
+        translating:      (YT.translatingWindows?.size ?? 0) > 0,
         rawCount:         YT.rawSegments.length,
         rawNormTexts:     rawNorms,
         rawTexts:         rawTexts,
@@ -658,6 +716,9 @@
       inputTokens: 0, outputTokens: 0, cachedTokens: 0, costUSD: 0,
       billedInputTokens: 0, billedCostUSD: 0,
       cacheHits: 0,
+      // §3.6-1：任一批次 usage 沒帶 logged（background 落地失敗 / 舊協定）才需要整頁
+      // LOG_USAGE 補記；全部已由 background 逐批落地時 content 不再發，避免重複計
+      unlogged: false,
     };
     // v1.8.3: partialMode 啟用時，第一批 limit 用使用者設定的 maxUnits;chars 仍用 BATCH0_CHARS 內部限制
     // v1.8.8: ignorePartialMode 路徑（「翻譯剩餘段落」按鈕）走全頁翻譯，batch 0 用標準 BATCH0_UNITS
@@ -718,6 +779,7 @@
           pageUsage.billedInputTokens += response.usage.billedInputTokens || 0;
           pageUsage.billedCostUSD += response.usage.billedCostUSD || 0;
           pageUsage.cacheHits += response.usage.cacheHits || 0;
+          if (!response.usage.logged) pageUsage.unlogged = true;
         }
         if (response.hadMismatch) hadAnyMismatch = true;
         // v1.8.10 A:strip LLM 偷懶殘留的 SEP / «N» 標記
@@ -757,12 +819,22 @@
               for (const origIdx of allOrigIndices) {
                 const u = units[origIdx];
                 if (shouldSkipDupInject(u)) { injectedThisBatch++; continue; }  // 跳過注入但計入進度
-                SK.injectTranslation(u, sanitized, slotsList[origIdx]);
+                // 2026-09-11 code review §3.1-3：per-unit try/catch（對齊 streaming 路徑）——
+                // 一段 inject throw 不得讓該批剩餘 unit 全部不注入、整批標失敗、進度倒退
+                try {
+                  SK.injectTranslation(u, sanitized, slotsList[origIdx]);
+                } catch (injectErr) {
+                  SK.sendLog('warn', 'translate', 'inject failed (unit skipped)', { batch: batchIdx + 1, origIdx, error: injectErr.message });
+                }
                 injectedThisBatch++;
               }
             } else {
               // 防呆 fallback:dedup map 沒命中（理論上不會發生）→ 退回單次 inject
-              SK.injectTranslation(job.units[j], sanitized, job.slots[j]);
+              try {
+                SK.injectTranslation(job.units[j], sanitized, job.slots[j]);
+              } catch (injectErr) {
+                SK.sendLog('warn', 'translate', 'inject failed (unit skipped)', { batch: batchIdx + 1, j, error: injectErr.message });
+              }
               injectedThisBatch++;
             }
           });
@@ -786,7 +858,7 @@
     // first_chunk / segment / done / error / aborted 訊息。回傳兩個 promise 讓主流程協調：
     //   firstChunkPromise：第一個 SSE chunk 抵達時 resolve（主流程在此時同步 dispatch batch 1+)
     //   donePromise:streaming 完整結束（成功/失敗/abort）時 resolve/reject
-    // v1.9.21: timeout 從 1.5s → 3s。原 1.5s 來自 reports/streaming-probe Flash first_chunk
+    // v1.9.21: timeout 從 1.5s → 3s。原 1.5s 來自 docs/excluded/planning/reports/streaming-probe Flash first_chunk
     // 實測 936-991ms + 50% margin,但偶發網路 / API 高峰 / Pro 模型 TTFT 1-3s 容易誤判
     // fallback(浪費已產生 token + 多等 ~1.5s)。3s 留 200% margin,真正卡死的 case 也只
     // 多等 1.5s 才 fallback 接住,trade-off 划算。
@@ -948,12 +1020,17 @@
           // v1.8.10 B:hadMismatch=true(LLM 偷懶把 N 段合併成 1 段）時 reject,
           // 觸發既有 mid-failure catch 重翻 batch 0 走 non-streaming（整批 resolve 後一次 split)。
           // segment 0 可能已被 streaming 注入合併譯文（A 已 sanitize),retry 會用乾淨版本覆蓋。
-          if (message.payload.hadMismatch) {
+          // 2026-09-11 code review §3.5-1：finishReason MAX_TOKENS = 輸出被截斷，末段殘缺，
+          // 與 hadMismatch 同款處理（reject → non-streaming 重翻，該路徑有 packChunks + 逐段
+          // fallback）。background 已把 MAX_TOKENS 併進 hadMismatch（不寫快取 + discard 記帳），
+          // 這裡再讀 finishReason 是雙保險——背景漏折時 content 端仍不會把截斷譯文當完成。
+          const truncated = message.payload.finishReason === 'MAX_TOKENS';
+          if (message.payload.hadMismatch || truncated) {
             // _anomaly：進低流量異常 ring（lib/logger.js），供「翻好的字被另一版
             // 中文覆蓋」類回報事後排查（2026-07-27 scotto.me 排查缺口——一般
             // persisted ring 100 筆數小時內被日常 log 擠光）。injectedSoFar =
             // 已串流上屏、即將被 non-streaming 重翻覆蓋的段數
-            SK.sendLog('warn', 'translate', `batch 1/${jobs.length} stream DONE with hadMismatch, triggering retry`, { elapsed, totalSegments: message.payload.totalSegments, injectedSoFar: batch0StreamDone, _anomaly: true });
+            SK.sendLog('warn', 'translate', `batch 1/${jobs.length} stream DONE with hadMismatch, triggering retry`, { elapsed, totalSegments: message.payload.totalSegments, injectedSoFar: batch0StreamDone, truncated, finishReason: message.payload.finishReason, _anomaly: true });
             _clearIdleWatchdog();
             browser.runtime.onMessage.removeListener(onMessage);
             firstChunkResolve(true);
@@ -969,6 +1046,7 @@
           // 沒帶 cacheHits 的真送 API streaming 視為 0 hit。漏接此欄位會讓 pickRescanToast 判定不到
           // 純 cache hit,SPA rescan toast 一律跳「已翻 N 段新內容」誤導使用者以為又花了 token。
           pageUsage.cacheHits += usage.cacheHits || 0;
+          if (!usage.logged) pageUsage.unlogged = true;
           SK.sendLog('info', 'translate', `batch 1/${jobs.length} stream done`, { elapsed, totalSegments: message.payload.totalSegments, hadMismatch: false });
           _clearIdleWatchdog();
           browser.runtime.onMessage.removeListener(onMessage);
@@ -1010,7 +1088,7 @@
         doneReject(err);
       });
 
-      // first_chunk 1.5 秒 timeout fallback
+      // first_chunk 3 秒 timeout fallback（FIRST_CHUNK_TIMEOUT_MS）
       const firstChunkOrTimeout = Promise.race([
         firstChunkPromise.then((v) => ({ kind: v ? 'first_chunk' : 'failed' })),
         new Promise((r) => setTimeout(() => r({ kind: 'timeout' }), FIRST_CHUNK_TIMEOUT_MS)),
@@ -1178,6 +1256,11 @@
       SK.sendLog('info', 'translate', 'embedded player frame, skip translate', { url: location.href });
       return;
     }
+    // 同頁單一 instance 選舉（content-ns.js）：另一份 Shinkansen 排名較高時靜默讓位
+    if (SK.isInstanceLeader && !SK.isInstanceLeader()) {
+      SK.sendLog('info', 'translate', 'skip translate (another instance leads)', { url: location.href });
+      return;
+    }
 
     // v1.8.8 instrumentation: 入口 STATE 狀態
     SK.sendLog('info', 'translate', 'translatePage entry', {
@@ -1197,8 +1280,19 @@
         SK.sendLog('info', 'translate', 'convertOnly: page already translated, silent exit');
         return;
       }
-      restorePage();
-      return;
+      // 2026-09-14：頁面若只是被背景簡繁本地轉換標成已翻譯（translatedBy 'opencc-local'，
+      // 例如英文條目的資訊框有幾段簡體），使用者按翻譯的意圖是「翻這頁的外語內容」，
+      // 不是還原那幾段轉換——舊行為第一下變成 toggle 還原、整頁英文不翻、要按第二次
+      // （harness 實測 en.wikipedia 條目：資訊框 8 段轉換後 TRANSLATE 只還原了 8 段）。
+      // 仍有夠份量的未翻候選（已轉換段落帶 data-shinkansen-translated 不會被重收）→
+      // 視為未翻譯往下走整頁翻譯；沒有（整頁本來就是簡體）才維持 toggle 還原。
+      if (STATE.translatedBy === 'opencc-local' && SK.hasSubstantialUntranslated()) {
+        SK.sendLog('info', 'translate', 'page only locally converted, proceed to full translate instead of toggle restore');
+        STATE.translated = false;
+      } else {
+        restorePage();
+        return;
+      }
     }
     // ignorePartialMode 路徑：STATE.translated=true 進來時，先靜默重置 translated state
     // 讓後續流程能跑完整翻譯（否則 STATE.translated=true 會讓 translateUnits 內 inject 邏輯異常）
@@ -1316,7 +1410,6 @@
     {
       const mode = settings.displayMode;
       STATE.translatedMode = (mode === 'dual') ? 'dual' : 'single';
-      STATE.displayMode = STATE.translatedMode;
       // 雙語視覺標記樣式
       const ms = settings.translationMarkStyle;
       SK.currentMarkStyle = (ms && SK.VALID_MARK_STYLES.has(ms)) ? ms : SK.DEFAULT_MARK_STYLE;
@@ -1342,6 +1435,18 @@
     }
 
     const translateStartTime = Date.now();
+
+    // 批次 7（2026-09-14）：convertOnly 輕量預檢——整頁（含 open shadow root）文字若連一個
+    // 來源變體特徵字都沒有（cn2twp：簡體獨有字；twp2cn：任何 CJK 字），collectParagraphs
+    // 後的 isConvertibleVariant 過濾必為 0 段（判準需要該類字元 ≥ 1），直接靜默結束，
+    // 省掉英文頁上首跑 + 晚 render 補課最多 5 次的整頁偵測（Wikipedia 長文每次 ~110ms）。
+    // 預檢是過濾條件的嚴格超集（見 content-detect.js pageHasConvertibleSignal），結果等價。
+    if (convertOnly && SK.pageHasConvertibleSignal && !SK.pageHasConvertibleSignal(convertDirection)) {
+      SK.sendLog('info', 'translate', 'convertOnly: no source-variant chars on page, silent exit (precheck)', { direction: convertDirection });
+      releaseRunState(myAbortController);
+      SK.safeSendMessage({ type: 'CLEAR_BADGE' }).catch(() => {});
+      return;
+    }
 
     const t_collect_start = Date.now();
     let units = SK.collectParagraphs();
@@ -1576,7 +1681,13 @@
       STATE._glossaryPromise = null;
     }
 
-    SK.showToast('loading', SK.t('toast.translateProgress', { prefix: labelPrefix, done: 0, total }), {
+    // 簡繁自動互轉（convertOnly）用獨立的進度文案——「翻譯中⋯」會讓使用者以為觸發了 LLM 翻譯
+    //（2026-09-14 Jimmy 回報）；本地字典轉換不打 API，文案明示「不使用 AI 翻譯」
+    //（字面 key 保留給 i18n-key-references forcing function 掃描）
+    const progressText = (d, t) => (convertOnly
+      ? SK.t('toast.zhConvertProgress', { prefix: labelPrefix, done: d, total: t })
+      : SK.t('toast.translateProgress', { prefix: labelPrefix, done: d, total: t }));
+    SK.showToast('loading', progressText(0, total), {
       progress: 0,
       startTimer: true,
     });
@@ -1600,7 +1711,7 @@
         ignorePartialMode: !!options.ignorePartialMode,
         onProgress: (d, t, mismatch) => {
           if (_progressClosed) return;
-          SK.showToast('loading', SK.t('toast.translateProgress', { prefix: labelPrefix, done: d, total: t }), {
+          SK.showToast('loading', progressText(d, t), {
             progress: d / t,
             mismatch: !!mismatch,
           });
@@ -1688,7 +1799,8 @@
         // v1.8.7: partialMode + 有剩餘未翻段落 → 訊息對齊「節省模式」語意
         let successMsg;
         if (convertOnly) {
-          // 簡繁自動互轉:標示「免費、未使用 API」——讓使用者每次都看見這個價值
+          // 簡繁自動互轉:文案明示「本地轉換、未觸發 AI 翻譯」——與 LLM 翻譯完成的 toast 區分
+          //（2026-09-14 Jimmy 回報兩者容易混淆）
           successMsg = SK.t('toast.zhConvertDone', { total });
         } else if (pmActive && pmSkippedCount > 0) {
           successMsg = SK.t('toast.donePartial', { total, all: total + pmSkippedCount });
@@ -1779,7 +1891,10 @@
 
       // 記錄用量到 IndexedDB(convertOnly 純本地轉換零 API 用量,不寫紀錄——
       // usage-db 是 API 對帳工具,0 token entry 只會稀釋統計)
-      if (done > 0 && !convertOnly) {
+      // 2026-09-11 code review §3.6-1：網頁路徑成功批次已由 background 逐批落地
+      //（usage.logged），這裡只補「沒帶 logged」的情況（背景落地失敗）；否則整頁再發
+      // 一筆會重複計。關分頁 / SPA 導航 / 中途 throw 不再漏帳的保證來自背景那側
+      if (done > 0 && !convertOnly && pageUsage.unlogged) {
         SK.safeSendMessage({
           type: 'LOG_USAGE',
           payload: {
@@ -1827,7 +1942,7 @@
   // `isPageTranslated()` = true 而 `STATE.translated` = false（v1.10.57 要消滅的殭屍態）；
   // 殘留 data-shinkansen-dual-source 讓下一輪 injectDual 對這些段落早退。收斂成單一
   // 函式雙路徑共用。回傳 skip 掉的 detached 數供 caller log。
-  // SPA reset（content-spa.js:resetForSpaNavigation）另有 STATE.cache / badge / toast
+  // SPA reset（content-spa.js:resetForSpaNavigation）另有 badge / toast
   // 生命週期差異，維持獨立實作不抽進來。
   function restoreInjectedDom() {
     // dual wrapper（同時清原段落的 data-shinkansen-dual-source attribute）。
@@ -1865,7 +1980,11 @@
       if (!el.isConnected) detached++;
       // AMO source review: originalHTML 來自 STATE.originalHTML（本 extension 翻譯前用
       // el.innerHTML 讀出來自存的原始 DOM 字串），純還原用，無 user input 流入。
-      el.innerHTML = originalHTML;
+      // 2026-09-11 code review §3.1-2：innerHTML 從未被動過的元素（dual 原段落、
+      // nv-mutate 已由上方 backup 逐 text node 寫回的元素、snapshotOnce 收進來但最終
+      // 沒注入的段落）不重寫——重 parse 會讓站方掛在子節點上的 listener 全丟、
+      // framework 持有的 text node ref 變孤兒。
+      if (el.innerHTML !== originalHTML) el.innerHTML = originalHTML;
       el.removeAttribute('data-shinkansen-translated');
       SK.restoreLocaleStyling?.(el);
     });
@@ -1947,6 +2066,11 @@
     const _noRestoreData = STATE.originalHTML.size === 0
       && (!STATE.translationCache || STATE.translationCache.size === 0)
       && (!STATE.nodeValueMutateBackup || STATE.nodeValueMutateBackup.size === 0);
+    if (_noRestoreData && SK.INSTANCE?.stoodDown) {
+      // 讓位的 instance 沒有還原素材是正常的（marker 是 leader 的），不可 reload 把 leader 譯文炸掉
+      SK.sendLog?.('info', 'system', 'restorePage ignored (instance stood down, markers belong to leader)');
+      return;
+    }
     if (_noRestoreData && SK.isPageTranslated()) {
       SK.sendLog?.('warn', 'system', 'restorePage: markers present but no restore data, reloading to original');
       // reload 前先清 marker,避免重載前的瞬間 isPageTranslated 仍判為已翻譯
@@ -2076,7 +2200,12 @@
           if (slots?.length && SK.ensureCJKSlotSpacing) {
             restored = SK.ensureCJKSlotSpacing(restored);
           }
-          SK.injectTranslation(unit, restored, slots || []);
+          // 2026-09-11 code review §3.1-3：per-unit try/catch（同 Gemini 非 streaming 路徑）
+          try {
+            SK.injectTranslation(unit, restored, slots || []);
+          } catch (injectErr) {
+            SK.sendLog('warn', 'translate', 'google inject failed (unit skipped)', { batch: batchIdx + 1, j, error: injectErr.message });
+          }
         });
         done += job.texts.length;
         if (onProgress) onProgress(done, total);
@@ -2229,6 +2358,10 @@
       SK.sendLog('info', 'translate', 'embedded player frame, skip translate (google)', { url: location.href });
       return;
     }
+    if (SK.isInstanceLeader && !SK.isInstanceLeader()) {
+      SK.sendLog('info', 'translate', 'skip translate (another instance leads, google)', { url: location.href });
+      return;
+    }
     // 若同一引擎已翻譯 → 還原（toggle）
     // v1.8.7: ignorePartialMode 豁免，讓「翻譯剩餘段落」按鈕能在已翻譯狀態重觸發
     if (STATE.translated && STATE.translatedBy === 'google' && !gtOptions.ignorePartialMode) {
@@ -2286,7 +2419,6 @@
     {
       const mode = settings.displayMode;
       STATE.translatedMode = (mode === 'dual') ? 'dual' : 'single';
-      STATE.displayMode = STATE.translatedMode;
       const ms = settings.translationMarkStyle;
       SK.currentMarkStyle = (ms && SK.VALID_MARK_STYLES.has(ms)) ? ms : SK.DEFAULT_MARK_STYLE;
       SK.currentDualAccent = SK.sanitizeDualAccent?.(settings.dualAccentColor) ?? 'auto';
@@ -2668,6 +2800,14 @@
     // opts.force（懸浮按鈕長按選單選引擎時帶）：直接用指定 preset 重新翻譯，而非 toggle 還原。
     // 一般入口（短按 / 快速鍵 / popup）維持 toggle 語意：已譯 → 還原。
     const force = opts.force === true;
+    // 同頁單一 instance 選舉（content-ns.js）：已讓位的 instance 所有觸發靜默結束。
+    // 不只擋翻譯入口——本函式接著會用 DOM marker 判「已翻譯 → restorePage」，而 marker 是
+    // leader 注入的，讓位方的還原資料 Map 全空 → restorePage 殭屍保底會 location.reload()
+    // 把 leader 的譯文整頁重載掉（2026-09-11 code review）。
+    if (SK.INSTANCE?.stoodDown) {
+      SK.sendLog('info', 'translate', 'preset ignored (this instance stood down)', { slot });
+      return;
+    }
     // v1.10.57: 翻譯中判斷必須在「已翻譯」之前 —— 已翻譯改以 DOM marker 為準
     // (SK.isPageTranslated),而翻譯途中譯文是逐段注入的,marker 會提前出現,
     // 若先判 isPageTranslated 會把「翻譯中按鍵取消」誤導成 restorePage。
@@ -2676,8 +2816,17 @@
     // （translatePage / translatePageGoogle 入口會同步接管 run state）
     if (STATE.translating) {
       if (STATE.abortController && !STATE.abortController.signal.aborted) {
-        abortInProgressTranslation();
-        return;
+        // 2026-09-11 code review §3.1-1：in-flight 的是背景 convertOnly run（autoConvertZh
+        // 頁面載入 / SPA nav 的簡繁轉換）→ 靜默擠掉、往下照常開新一輪，不當成「翻譯中
+        // 按鍵 = 取消」。translatePage 內雖有同款判斷，但快速鍵 / popup / 懸浮 / SPA
+        // sticky 全部先進本函式，之前在這裡就 non-silent abort + return，永遠到不了那條。
+        if (STATE.translatingConvertOnly) {
+          abortInProgressTranslation({ silent: true });
+          // fall through：下方 isPageTranslated 看到的是已還原的原文，接著開新一輪
+        } else {
+          abortInProgressTranslation();
+          return;
+        }
       }
     }
     // 已翻譯（以 DOM 注入痕跡為準，不信 STATE.translated）：
@@ -2961,7 +3110,6 @@
         translating: STATE.translating,
         stickyTranslate: STATE.stickyTranslate,
         replacedCount: STATE.originalHTML.size,
-        cacheSize: STATE.cache.size,
         guardCacheSize: STATE.translatedHTML.size,
       };
     },

@@ -4,10 +4,10 @@
 
 - 文件版本：v2.0
 - 建立日期：2026-04-08
-- 最後更新：2026-08-06（v2.0.85，文件瘦身改版）
+- 最後更新：2026-09-14（v2.4.19，對照程式碼校正）
 - 目標平台：Chrome（Manifest V3）
 - 作業系統：macOS 26
-- 目前 Extension 版本：2.4.3
+- 目前 Extension 版本：2.5.0
 
 ---
 
@@ -32,17 +32,17 @@ Shinkansen 是一款 Chrome 擴充功能，將英文（或其他外語）網頁�
 
 ## 2. 功能範圍
 
-### 2.1 已實作（v2.4.3 為止）
+### 2.1 已實作（v2.5.0 為止）
 
 詳細版本歷史見 [`CHANGELOG.md`](CHANGELOG.md)。
 
 | 功能區塊 | 狀態 | 簡述 |
 |---------|------|------|
-| 網頁翻譯 | ✅ | Option+S（Gemini）/ Option+G（Google Translate）切換；單語覆蓋 / 雙語對照雙模式；漸進分批注入；還原原文 |
+| 網頁翻譯 | ✅ | Option+S / Option+A（Gemini）/ Option+D（Google Translate）三組快速鍵；單語覆蓋 / 雙語對照雙模式；漸進分批注入；還原原文 |
 | 雙語對照模式 | ✅ | 譯文以 wrapper 形式附在原段落後；4 種視覺標記；顯示模式同時決定字幕雙語與否 |
-| YouTube 字幕翻譯 | ✅ | 自動偵測字幕即時翻譯；ASR（自動字幕）AI 分句；時間視窗批次；雙語 overlay；字幕大小與顏色跟隨原生設定；行動版 `m.youtube.com` 支援；`/watch` 與 `/live/<id>`（直播 / 直播存檔分享連結）路徑皆支援 |
+| YouTube 字幕翻譯 | ✅ | 自動偵測字幕即時翻譯；ASR（自動字幕）AI 分句，譯文字幕統一比語音提前 1 秒出現；時間視窗批次；雙語 overlay；字幕大小與顏色跟隨原生設定；行動版 `m.youtube.com` 支援；`/watch` 與 `/live/<id>`（直播 / 直播存檔分享連結）路徑皆支援 |
 | SPA 支援 | ✅ | 站內導航自動偵測；動態載入內容補翻；譯文防覆蓋保護；續翻模式 |
-| 段落偵測 | ✅ | 結構化 DOM walker；技術性排除（code / 表單 / 站底 footer）；內容品味判斷交給 system prompt |
+| 段落偵測 | ✅ | 結構化 DOM walker；技術性排除（code / 表單 / 站底 footer）；尊重頁面宣告的 `translate="no"` / `notranslate` 與 icon 字型；內容品味判斷交給 system prompt |
 | 佔位符序列化 | ✅ | 行內元素（連結 / 粗斜體等）與媒體在譯文中完整保留 |
 | 並行翻譯 | ✅ | 併發批次池（`maxConcurrentBatches`）；429 退避重試 |
 | 自動術語擷取 | ✅ | 預翻前擷取全文專有名詞對照表；長度三級策略；術語快取 |
@@ -51,7 +51,7 @@ Shinkansen 是一款 Chrome 擴充功能，將英文（或其他外語）網頁�
 | 設定頁 | ✅ | 8 Tab：一般設定 / YouTube 字幕 / Gemini / 自訂模型 / 術語表 / 禁用詞清單 / 用量紀錄 / Debug；匯入匯出 |
 | Popup 面板 | ✅ | 翻譯/還原；快取/費用統計；自動翻譯開關；YouTube 字幕 toggle |
 | Toast 提示 | ✅ | 進度條 + 計時器；可調透明度與位置；`toastAutoHide` 自動關閉選項 |
-| 懸浮按鈕 | ✅ | 頁面邊緣可拖移「新」icon；短按翻譯、長按選引擎或功能選單；可調透明度與大小；手機／平板預設開、桌面預設關 |
+| 懸浮按鈕 | ✅ | 頁面邊緣可拖移「新」icon；短按翻譯、長按選引擎或功能選單；可調透明度與大小；全平台預設開 |
 | 用量紀錄 | ✅ | IndexedDB + 折線圖 + CSV 匯出；日期/模型/網域/文字搜尋篩選 |
 | Debug 工具 | ✅ | Log buffer 1000 筆 + 持久化 100 筆（跨 SW 重啟）；設定頁 Debug 分頁瀏覽 |
 | Google Docs 支援 | ✅ | 偵測編輯頁自動導向 `/mobilebasic` 閱讀版再翻譯 |
@@ -60,14 +60,14 @@ Shinkansen 是一款 Chrome 擴充功能，將英文（或其他外語）網頁�
 | 自動翻譯網站 | ✅ | 網域白名單（支援萬用字元）；`autoTranslate` 總開關 |
 | 簡繁本地互轉 | ✅ | 簡繁段落走本地 OpenCC 字典轉換，免費零 API；`autoConvertZh` 自動模式 |
 | 送到 Instapaper | ✅ | 把已翻譯整頁存進 Instapaper（含 AI 摘要）；popup 按鈕 + Alt+I 快速鍵 |
-| 文件翻譯（PDF / EPUB / TXT / Markdown / HTML / 字幕檔） | ✅ | 上傳整份翻譯；PDF 保留版面輸出譯文 PDF；EPUB 全書術語表 / 章節選翻 / 預覽編輯 / 雙語譯本；TXT / Markdown / HTML 沿用章節管線，譯文輸出格式 = 輸入格式；字幕檔（SRT / WebVTT / ASS）每則字幕為翻譯單位、時間軸原樣保留、可輸出雙語字幕；詳見 §17 |
+| 文件翻譯（PDF / EPUB / Word / TXT / Markdown / HTML / 字幕檔） | ✅ | 上傳整份翻譯；PDF 保留版面輸出譯文 PDF；EPUB 全書術語表 / 章節選翻 / 預覽編輯 / 雙語譯本；Word（.docx）譯文寫回原檔格式與版面全保留、可輸出雙語對照；TXT / Markdown / HTML 沿用章節管線，譯文輸出格式 = 輸入格式；字幕檔（SRT / WebVTT / ASS）每則字幕為翻譯單位、時間軸原樣保留、可輸出雙語字幕；詳見 §17 |
 | iOS／iPadOS Safari | ✅ | 已上架 App Store（app ID 6776958298「Shinkansen Web Translator」）；四指輕點觸發；popup／options 觸控調整；不含 PDF 翻譯 |
 
 ### 2.3 明確不做
 
 滑鼠懸停顯示、原文樣式客製、輸入框翻譯、劃詞翻譯、DeepL / Yandex 等第三方付費翻譯服務、影片字幕（YouTube 除外，已支援）、延遲載入、淺色/深色主題切換。
 
-> 備注：v1.4.0 起已加入 Google Translate 非官方免費端點（Opt+G，不需 API Key），同時保留 Gemini（Opt+S）。Google 官方 Cloud Translation v2 API（付費）不在支援範圍內。
+> 備注：v1.4.0 起已加入 Google Translate 非官方免費端點（Opt+D，不需 API Key），同時保留 Gemini（Opt+S）。Google 官方 Cloud Translation v2 API（付費）不在支援範圍內。
 
 ---
 
@@ -86,14 +86,13 @@ API key 一律走 `x-goog-api-key` request header，不放 URL query string（�
 - `model`：模型名稱（預設 `gemini-3.1-flash-lite`，與主要預設 slot 2 一致；可改為其他 Gemini 模型或自行輸入模型 ID）
 - `serviceTier`：推論層級（DEFAULT / FLEX / STANDARD / PRIORITY），設定頁存大寫短形式，API 送出時轉小寫，DEFAULT 時不送此欄位
 - `temperature`：創造性，範圍 0–2，預設 1.0（Gemini 3 官方建議值）
-- `topP`：核採樣，預設 0.95
-- `topK`：預設 40
+- `topP` / `topK`：保留欄位（預設 0.95 / 40），僅對仍接受取樣參數的舊模型送出；設定頁已無輸入欄，使用者不可編輯
 - **取樣參數模型 gating**：官方已淘汰取樣參數的新模型（Gemini 3.6 Flash／3.5 Flash-Lite 起）一律不送 `temperature`／`topP`／`topK`；Gemini 3 世代維持只送 `temperature`。設定欄位保留，對淘汰取樣參數的模型不生效
 - `maxOutputTokens`：最大輸出長度，預設 8192
 - `systemInstruction`：系統提示詞（見 3.3）
 - `safetySettings`：安全過濾等級（預設 BLOCK_NONE 四大類別全開）
 
-> **Thinking 功能**：固定關閉（`thinkingBudget: 0`），不開放使用者設定。思考 token 會吃掉 `maxOutputTokens` 額度，導致譯文被截斷。
+> **Thinking 功能**：不開放使用者設定，由模型版本自動決定最低合法的 `thinkingLevel`（Pro 系列與 3.7 以上世代送 `low`，其餘送 `minimal`；`minimal` 不保證零思考 token）。思考 token 計入 output 計費，也會吃掉 `maxOutputTokens` 額度。
 
 ### 3.3 預設 System Prompt
 
@@ -110,7 +109,7 @@ API key 一律走 `x-goog-api-key` request header，不放 URL query string（�
 
 ### 3.4 分段請求協定
 
-多段文字以內部分隔符串接後一次送出，回應拆分對齊。分批走「字元預算 + 段數上限」雙門檻 greedy 打包：`maxCharsPerBatch`（預設 3500）與 `maxUnitsPerBatch`（預設 20）皆可在設定頁調整，任一觸發即封口；超大段落獨佔一批，不切段落本身。回傳段數不符時有兩層自動救回（段序號標記二次對齊 → 逐段單獨重呼叫）。協定與對齊演算法細節見 SPEC-PRIVATE §32。
+多段文字以內部分隔符串接後一次送出，回應拆分對齊。分批走「字元預算 + 段數上限」雙門檻 greedy 打包：`maxCharsPerBatch`（預設 7000）與 `maxUnitsPerBatch`（預設 40）皆可在設定頁調整，任一觸發即封口；超大段落獨佔一批，不切段落本身。回傳段數不符時有兩層自動救回（段序號標記二次對齊 → 逐段單獨重呼叫）。協定與對齊演算法細節見 SPEC-PRIVATE §32。
 
 ### 3.5 429 與重試處理
 
@@ -142,7 +141,7 @@ client 端不做預防性節流，配額由 API 端 429 回應把關：
 針對 AI 模型容易漏網的非台灣慣用譯法、或使用者不希望出現在譯文中的詞彙，建立可編輯的禁用清單，以 prompt 注入方式要求模型遵守（content 端不做事後 regex replace）。
 
 - **替換詞可留空**：填了替換詞 → 要求模型改用指定詞；留空 → 只要求不可使用該詞，由模型自行改寫
-- **預設清單**：25 條（`DEFAULT_FORBIDDEN_TERMS`），涵蓋視頻/軟件/數據/網絡/質量/用戶等常見對映；僅 target = zh-TW 時套用，其他 target 預設空清單
+- **預設清單**：26 條（`DEFAULT_FORBIDDEN_TERMS`），涵蓋視頻/軟件/數據/網絡/質量/用戶等常見對映；僅 target = zh-TW 時套用，其他 target 預設空清單
 - **設定 UI**：獨立「禁用詞清單」分頁，三欄表格（禁用詞 / 替換詞 / 備註）＋新增/還原預設/刪除；匯入匯出支援
 - 模型漏網案例會記入 Debug log（純記錄、不修改譯文）；清單變更後快取自動分區失效
 
@@ -157,6 +156,7 @@ client 端不做預防性節流，配額由 API 端 429 回應把關：
 - **API 逾時** `fetchTimeoutSec`（預設 90 秒，範圍 5–600）：本機 LLM 冷啟動可調高
 - **API Key**：存 `chrome.storage.local`，不跨裝置同步、不在匯出範圍
 - 固定術語表與禁用詞清單自動共用（改一處兩引擎同步生效）；術語表抽取也支援此引擎（不需 Gemini Key）
+- 與 Gemini 引擎共用同一套引擎層（`lib/llm-common.js`）：API 逾時與 429 / 5xx 退避重試、輸出截斷不採信、段數對齊與序號標記二次對齊、逐段 fallback、輸出語言驗證、術語表 JSON 剝殼皆為單一實作，兩引擎對同一種回應行為一致（僅錯誤 code 的文案依引擎區分）
 
 ### 3.9 翻譯目標語言（Target Language）
 
@@ -168,7 +168,7 @@ client 端不做預防性節流，配額由 API 端 429 回應把關：
 
 | navigator.language | 推導 target |
 |---|---|
-| `zh-TW` / `zh-Hant` / `zh-HK` 系 | `zh-TW` |
+| `zh-TW` / `zh-Hant` / `zh-HK` / `zh-MO` 系 | `zh-TW` |
 | 其他 `zh-*` | `zh-CN` |
 | `ja*` / `ko*` / `es*` / `fr*` / `de*` | 對應語言 |
 | 其他 | `en` |
@@ -179,7 +179,7 @@ client 端不做預防性節流，配額由 API 端 429 回應把關：
 
 **YouTube 字幕「已是目標語言」跳過**：字幕語言命中 target 對應集合時不啟動翻譯（target=zh-TW 時簡中字幕也跳——繁中使用者可直讀，不花 API；僅字幕路徑，整頁翻譯的簡中段落照翻或走本地轉換）。
 
-**禁用詞清單依 target 預設**：未客製時 zh-TW 吃 25 條預設清單、其他 target 空清單；使用者編輯過則完全尊重 saved 值。
+**禁用詞清單依 target 預設**：未客製時 zh-TW 吃 26 條預設清單、其他 target 空清單；使用者編輯過則完全尊重 saved 值。
 
 **Cache key 區隔**：不同 target 的譯文快取自動分區（§9.1）。
 
@@ -188,7 +188,7 @@ client 端不做預防性節流，配額由 API 端 429 回應把關：
 擴充功能 UI 字串支援 8 語（與翻譯目標語種對齊）。UI 語言由獨立的 `settings.uiLanguage` 偏好控制，**跟翻譯目標解耦**——可以「英文介面 + 翻譯目標繁中」等任意組合。
 
 - `uiLanguage = 'auto'`（預設）：依 `navigator.language` 推導；或強制鎖任一語言
-- 自製 dict（`lib/i18n.js`，約 880 條 entry × 8 語，zh-TW 為 source of truth）而非 `chrome.i18n`（後者綁瀏覽器 locale 無法獨立切換）；缺 key 三層 fallback 保證不顯示空字串
+- 自製 dict（`lib/i18n.js`，約 950 條 entry × 8 語，zh-TW 為 source of truth）而非 `chrome.i18n`（後者綁瀏覽器 locale 無法獨立切換）；缺 key 三層 fallback 保證不顯示空字串
 - `_locales/` 8 語 `messages.json`（`extName` / `extDescription`）：manifest 的 `name` / `description` 以 `__MSG_*__` 引用，瀏覽器擴充功能管理頁、Safari 設定頁與商店 listing 短描述隨系統 / 瀏覽器語言顯示；`default_locale: zh_TW` 為 fallback。`extDescription` 每語 ≤ 112 字元（各平台取最嚴：Apple 驗 112、Chrome 為 132）
 - popup / options / content toast / 文件翻譯頁全面走 dict；regression 由 `test/regression/i18n-*.spec.js` 8 檔覆蓋
 
@@ -197,7 +197,7 @@ client 端不做預防性節流，配額由 API 端 429 回應把關：
 把目前（已就地翻譯）的整頁送進使用者自己的 Instapaper 帳號。選用功能，**預設關**。
 
 - **引擎**：Instapaper Full API（OAuth 1.0a + xAuth）——走 Full API 是為了把抽好的乾淨譯文正文直接送出，存進去的是譯文版文章（Simple API 只吃網址會讓 Instapaper 重抓未翻譯的原文）
-- **連結**：options 頁填 Instapaper email + 密碼一次換取 OAuth token；只存 token，密碼用完即丟
+- **連結**：options 頁填 Instapaper email + 密碼一次換取 OAuth token；只存 token（`storage.local`，不跨裝置同步、不在匯出範圍），密碼用完即丟
 - **正文擷取**：vendored Readability 抽正文，標題取譯文標題；細節見 SPEC-PRIVATE §32
 - **文章摘要**（`instapaperSummaryEnabled`，預設開）：送出時一併生成翻譯目標語言的文章摘要上傳（固定走 Gemini Flash Lite，與主翻譯引擎無關）；沒 Gemini key / 摘要失敗則靜默略過、書籤照常送
 - **兩條觸發路徑**：popup「送到 Instapaper」按鈕（啟用且已連結才顯示）；快速鍵 Alt+I
@@ -217,7 +217,8 @@ target 為中文變體時，偵測為**相反變體**的段落不送 LLM，改�
 
 - 混合頁兩路並存：可轉段落走本地轉換、其餘照走 LLM；轉換結果不寫翻譯快取、不記用量（零 API）
 - **自動模式**（`settings.autoConvertZh`，預設開）：頁面載入 / SPA 導航自動轉換（只跑本地轉換、絕不打 API）；popup toggle「簡繁自動互轉（免費）」只在 target 為中文變體時顯示，切換即時生效（取消時僅還原本地轉換結果，LLM 翻譯成果不受影響）
-- 完成 toast 標示「免費未使用 API」；混合頁完整翻譯時標示其中 N 段本地轉換
+- toast 文案與 LLM 翻譯完全分開：進行中「簡繁本地轉換中⋯（不使用 AI 翻譯）」、完成「簡繁本地轉換完成」+「只做字典簡繁轉換，未觸發 AI 翻譯 · 免費」、SPA 新內容「簡繁本地轉換新內容⋯」/「已本地轉換 N 段新內容（未使用 AI）」；混合頁完整翻譯時標示其中 N 段是字典轉換未經 AI。完成通知預設不顯示（`hideZhConvertToast: true`，設定頁可關閉此隱藏），進行中 toast 仍顯示
+- 轉換後按翻譯：頁面若只是被本地轉換標成已翻譯（`translatedBy = 'opencc-local'`）且仍有夠份量的未翻外語段落（`SK.hasSubstantialUntranslated()`，門檻 200 字元），按翻譯視為「翻這頁的外語內容」直接整頁翻譯、已轉換段不還原；整頁本來就是簡體（沒有其他候選）才維持 toggle 還原
 - **實作**：`lib/zh-convert.js` + `lib/vendor/opencc/`（字典 10 檔約 1.1MB，lazy load）；分流判定與 SPA 邊角處理見 SPEC-PRIVATE §32
 
 ---
@@ -272,6 +273,8 @@ single 模式譯文**一律注入回原 element**（不做 sibling overlay——
 
 - **納入**：常見文字 block 元素（段落 / 標題 / 列表 / 引用 / 表格格 / 圖說等）與偵測為段落的 inline 結構
 - **技術性排除**：script / style / 程式碼區塊（含語法高亮 `<pre>`）/ 表單控制項 / 站底 footer（無文章祖先時）/ ARIA search 等；`<nav>` 不硬排除（交給 prompt）
+- **頁面作者宣告的不翻譯訊號**：HTML 標準 `translate="no"` 屬性與 `notranslate` class（Google Translate 慣例）整顆跳過，`translate="yes"` 可在其中重新開放；段落內 inline 的同類元素（人名、代號）原樣保留不送翻譯。掛在 `<html>` / `<body>` 或涵蓋頁面大半文字的 app root 上的文件級宣告不採信（那是 SPA 避開 Google Translate 改 DOM 的 workaround，不代表內容不可翻）
+- **icon 字型 ligature**：以文字當 icon 名的元素（computed font-family 為 icon / symbol 類字型、內容為單一識別字 token，如 Material Icons 的 `star`）不翻譯也不送翻譯，避免 icon 變成中文字
 - **可見性**：隱藏元素與 a11y visually-hidden 元素不收
 - 特定站點結構補抓 selector、mixed-content fragment 切分、BUTTON 長文放行等細節見 SPEC-PRIVATE §32
 
@@ -299,24 +302,28 @@ shinkansen/
 ├── content-floating-icon.js  # 懸浮翻譯控制按鈕
 ├── content.css
 ├── background.js             # Service Worker（ES module）
-├── privacy-policy.html       # 隱私權政策（繁中）
-├── privacy-policy.en.html    # 隱私權政策（英文）
 ├── LICENSE                   # ELv2
 ├── THIRD-PARTY-NOTICES.md    # 第三方授權聲明
 ├── lib/
 │   ├── gemini.js             # Gemini API 呼叫、分批、重試
 │   ├── openai-compat.js      # 自訂 OpenAI-compatible adapter（§3.8）
 │   ├── openai-compat-thinking.js # 自訂模型 thinking 控制 mapping
+│   ├── llm-common.js         # 兩條 LLM adapter 共用的引擎層（fetch 重試 / 對齊與逐段 fallback / JSON 剝殼）
+│   ├── translate-pipeline.js # background 三條翻譯 handler 共用 pipeline（術語表 → cache key → 快取 → API → 寫快取 → 計費 → 落地）
+│   ├── billing.js            # 用量計費公式單一資料源（raw / 實付 / cache 折扣比例）
 │   ├── google-translate.js   # Google Translate 非官方 API 封裝（免 API Key）
 │   ├── system-instruction.js # 跨 provider 共用的翻譯 batch 構建 helper
 │   ├── bg-error.js           # 背景端錯誤 error code 協定
 │   ├── cache.js              # 翻譯快取（LRU + debounced flush）
 │   ├── storage.js            # 設定讀寫、預設值
 │   ├── constants.js          # 批次翻譯數值常數（content-ns.js 內為鏡像值）
+│   ├── domain-utils.js       # 自動翻譯網站名單的網域正規化 + 比對（content script 共載）
+│   ├── shortcut-utils.js     # 自訂快速鍵 helper（content script 共載）
 │   ├── stream-reuse.js       # streaming 批次 partial-reuse 規劃
 │   ├── logger.js             # 結構化 Log 系統
 │   ├── usage-db.js           # 用量追蹤（IndexedDB）
 │   ├── model-pricing.js      # Gemini 模型計價表
+│   ├── font-loader.js        # 譯文 PDF 的 SC / JP / KR 字型「用到才下載」+ SHA-256 驗證（§17.8）
 │   ├── exchange-rate.js      # USD ↔ TWD 匯率抓取 + 快取
 │   ├── format.js             # 共用格式化函式
 │   ├── format-currency.js    # 金額格式化 + fallback 匯率常數
@@ -324,12 +331,16 @@ shinkansen/
 │   ├── readability.js        # vendored @mozilla/readability（Apache-2.0；授權正本 readability.LICENSE）
 │   ├── instapaper.js         # Instapaper Full API 封裝（§3.11）
 │   ├── instapaper-keys.js    # Instapaper consumer 憑證（gitignore 不入 repo）
-│   ├── i18n.js               # Extension UI 字串 i18n 字典（8 語，§3.10）
+│   ├── i18n.js               # Extension UI 字串 i18n 字典（8 語，§3.10；popup / options / translate-doc 載入）
+│   ├── i18n-content.js       # content script 專用子集（GENERATED，tools/build/generate-i18n-content.mjs 從 i18n.js 產出，只含 content 用到的 key）
 │   ├── compat.js             # Safari／Firefox 相容性 shim
 │   ├── platform.js           # runtime 平台偵測
 │   ├── distribution.js       # 編譯期注入的 MAS build flag（ES module 版）
+│   ├── distribution-cs.js    # 同上的 content script 版（與 distribution.js 同步）
 │   ├── edit-link-repair.js   # contenteditable 連結邊界補位（編輯模式共用）
 │   ├── update-check.js       # 版本更新檢查
+│   ├── release-highlights.js # 近期重大更新 key 清單（單一資料源）
+│   ├── welcome-notice.js     # 自動更新後「歡迎升級」提示寫入邏輯
 │   ├── zh-convert.js         # 簡繁本地互轉（§3.12）
 │   └── vendor/               # 第三方程式庫（pdfjs／pdf-lib + fontkit／chart.min.js／fflate／Noto Sans TC 字型／opencc 簡繁字典）
 ├── translate-doc/            # 文件翻譯：PDF + EPUB + TXT / MD / HTML + 字幕檔（§17，web_accessible_resources）
@@ -338,12 +349,15 @@ shinkansen/
 │   ├── block-types.js        # block type 共用常數
 │   ├── layout-analyzer.js    # PDF 版面分析
 │   ├── pdf-engine.js         # PDF.js wrapper（解析 pipeline）
+│   ├── pdf-oplist.js         # PDF.js operator list 輕量判斷
 │   ├── pdf-renderer.js       # 譯文 PDF 下載（pdf-lib，§17.8）
 │   ├── epub-engine.js        # EPUB 解析（§17.10）
 │   ├── epub-scan.js          # 譯後一致性掃描（§17.10）
 │   ├── epub-writer.js        # 譯本 EPUB 重建（§17.10）
 │   ├── epub-session-db.js    # 書籍式文件翻譯工作階段存檔（IndexedDB）
 │   ├── doc-file-engine.js    # TXT / Markdown / HTML 解析與譯文檔重建 + 術語表 CSV 解析（§17.11）
+│   ├── block-output.js       # block 譯文輸出優先鏈（editedHtml → 佔位符反序列化 → 純文字）單一資料源
+│   ├── docx-engine.js        # Word（.docx）解析與譯本 docx 重建（§17.13）
 │   ├── subtitle-engine.js    # 字幕檔（SRT / WebVTT / ASS）解析、行內標記佔位符對映與譯文檔重建（§17.12）
 │   ├── dev-verify.js         # dev 驗證 harness hook（production 不載入）
 │   ├── reader.js             # 線上閱讀器（雙頁並排，§17.6）
@@ -352,11 +366,12 @@ shinkansen/
 │   ├── popup.html / popup.js / popup.css
 ├── options/
 │   ├── options.html / options.js / options.css
+│   ├── import-sanitize.js    # 設定匯入驗證（§8.3 `sanitizeImport()`）
 ├── _locales/                 # 8 語 extName / extDescription（manifest __MSG__ 引用 + 商店 listing）
 └── icons/
 ```
 
-（部分次要檔案從略；以 repo 現況為準。）
+（部分次要檔案從略；以 repo 現況為準。content script 除上列 `content-*.js` 外，manifest 另共載 `lib/` 的 `distribution-cs.js` / `i18n-content.js` / `shortcut-utils.js` / `format-currency.js` / `domain-utils.js` / `edit-link-repair.js` / `readability.js`，完整載入順序以 `manifest.json` 為準。）
 
 ---
 
@@ -371,6 +386,8 @@ shinkansen/
 7. background 查快取 → 未命中呼叫對應 provider API
 8. 每批回來立即注入 DOM，Toast 更新進度
 9. 全部完成後顯示成功 Toast（含 token 數、費用、快取命中率）
+
+**同頁多份 Shinkansen**：同一個分頁若同時載入多份 Shinkansen（例如商店版與開發版並存），只有版本最高的一份會翻譯（整頁與 YouTube 字幕），其餘靜默讓位，避免重複計費與字幕互相覆寫。舊版沒有此機制，不會讓位，須先停用或更新。
 
 ---
 
@@ -414,7 +431,8 @@ shinkansen/
     "batchSize": 50,
     "applyGlossary": false,
     "temperature": 1.0,
-    "applyFixedGlossary": true
+    "applyFixedGlossary": true,
+    "subtitleStripPeriod": true
   },
   "ytSubtitle": {
     "autoTranslate": true,
@@ -435,26 +453,27 @@ shinkansen/
   },
   "maxRetries": 3,
   "maxConcurrentBatches": 30,
-  "maxUnitsPerBatch": 20,
-  "maxCharsPerBatch": 3500,
+  "maxUnitsPerBatch": 40,
+  "maxCharsPerBatch": 7000,
   "maxTranslateUnits": 1000,
   "partialMode": { "enabled": false, "maxUnits": 25 },
   "toastOpacity": 0.7,
   "toastAutoHide": true,
   "showProgressToast": true,
+  "hideZhConvertToast": true,
   "displayMode": "single",
   "displayCurrency": "TWD",
   "translationMarkStyle": "tint",
   "dualAccentColor": "auto",
   "translatePresets": [
-    { "slot": 1, "engine": "gemini", "model": "gemini-3-flash-preview", "label": "Flash" },
+    { "slot": 1, "engine": "gemini", "model": "gemini-3.8-flash", "label": "Flash" },
     { "slot": 2, "engine": "gemini", "model": "gemini-3.1-flash-lite", "label": "Flash Lite" },
     { "slot": 3, "engine": "google", "model": null, "label": "Google MT" }
   ],
   "customShortcuts": { "2": null, "1": null, "3": null },
   "instapaperEnabled": false,
   "instapaperSummaryEnabled": true,
-  "forbiddenTerms": "（見 §3.7 / DEFAULT_FORBIDDEN_TERMS，25 條預設）",
+  "forbiddenTerms": "（見 §3.7 / DEFAULT_FORBIDDEN_TERMS，26 條預設；實際存 chrome.storage.local，見 §8.2）",
   "disableUpdateNotice": false,
   "popupButtonSlot": 2,
   "floatingIcon": null,
@@ -494,13 +513,14 @@ shinkansen/
 - **術語表快取**：key `gloss_<sha1>` → 術語對照 JSON
 - **版本標記**：key `__cacheVersion` → manifest version（v1.8.45 起版本變更**不**清快取，只更新標記）
 - **累計費用顯示基準點**：key `usageResetAt` → ms epoch。popup「累計費用」的「清除」寫入；popup 只加總此時間點之後的 usage-db 紀錄。usage-db 與此 key 同為裝置本機，不跨裝置同步
-- **機密**：`apiKey`（Gemini）、`customProviderApiKey`（自訂 Provider）——不跨裝置同步
+- **機密**：`apiKey`（Gemini）、`customProviderApiKey`（自訂 Provider）、`instapaperToken` / `instapaperTokenSecret`（Instapaper OAuth）——不跨裝置同步、不在匯出範圍
+- **大項設定**：`fixedGlossary`（固定術語表）、`forbiddenTerms`（禁用詞清單）——sync 每個 key 上限 8,192 bytes，術語表百餘條即超限；改存 local 後不跨裝置同步，匯出 / 匯入 JSON 仍包含。舊版寫在 sync 的值於下次讀取設定時自動搬到 local 並從 sync 移除（`lib/storage.js` `LOCAL_SETTINGS_KEYS`）
 - **通知狀態**：`welcomeNotice`（升級歡迎橫幅）、`updateAvailable`（`lib/update-check.js` 寫入的新版資訊）
 - **其他**：`exchangeRate`（匯率 cache）、`translateDocPresetSlot`（文件翻譯頁上次選的 preset）、`hostSettingsConsumedSeq`（Safari host app 設定交接序號）、`yt_debug_log` / `anomaly_log`（持久 log ring，§12）
 
 ### 8.3 同步策略
 
-- `chrome.storage.sync` 自動跨裝置同步設定（不含 API Key）
+- `chrome.storage.sync` 自動跨裝置同步設定（不含 API Key，也不含固定術語表 / 禁用詞清單——兩者存 local，§8.2）
 - 翻譯快取與術語表快取只存 local，不同步
 - 設定頁提供匯出/匯入 JSON（API Key 不含在匯出範圍），匯入時 `sanitizeImport()` 驗證所有欄位
 
@@ -510,7 +530,9 @@ shinkansen/
 
 ### 9.1 Key 設計
 
-`tc_` + SHA-1（原文十六進位）。同一段原文跨頁面共用同一 key。key 依呼叫情境自動分區——引擎（Gemini / Google / 自訂 Provider）、用途（網頁 / 字幕 / ASR / Drive / 文件翻譯）、術語表內容、禁用詞清單、模型、目標語言、文件翻譯的 temperature 與額外指令都會讓 key 分開，互不污染。suffix 組裝規則見 SPEC-PRIVATE §32。
+`tc_` + SHA-1（原文十六進位）。同一段原文跨頁面共用同一 key。key 依呼叫情境自動分區——引擎（Gemini / Google / 自訂 Provider）、用途（網頁 / 字幕 / ASR / Drive / 文件翻譯）、術語表內容、禁用詞清單、模型、目標語言、非預設 temperature、自訂 system prompt、文件翻譯額外指令都會讓 key 分開（未改過設定的使用者 key 不變），互不污染。suffix 組裝規則見 SPEC-PRIVATE §32。
+
+**Gemini implicit cache 的實際命中條件**：Gemini 3 系列以約 4,096 token 為一個快取區塊、只對完整區塊計 `cachedContentTokenCount`（2026-09-14 直打 API 實測：前綴 1.8K / 4.5K token 連打皆 0，9K token 第二次起命中 4,080）。網頁翻譯每批固定前綴（system prompt + 禁用詞 + 格式規則）約 2,400 token 不足一塊，所以完成通知上的 cache 命中率在網頁翻譯通常為 0%；只有大型固定術語表、文件翻譯全書術語表等把前綴推過 4K 才會出現命中。
 
 ### 9.2 批次讀寫與容量
 
@@ -537,7 +559,7 @@ shinkansen/
 | 快捷鍵 | command id | slot | 預設 engine / model |
 |---|---|---|---|
 | Alt+S（Opt+S） | `translate-preset-0` | 2 | Gemini Flash Lite（主要預設） |
-| Alt+A（Opt+A） | `translate-preset-1` | 1 | Gemini Flash |
+| Alt+A（Opt+A） | `translate-preset-1` | 1 | Gemini 3.8 Flash（次要預設，四指長按亦走此組） |
 | Alt+D（Opt+D） | `translate-preset-3` | 3 | Google MT |
 | Alt+I（Opt+I） | `send-to-instapaper` | — | 送到 Instapaper（§3.11） |
 
@@ -555,13 +577,32 @@ shinkansen/
 
 iOS Safari 背景 event page 掛起的續命處理（長批次翻譯期間保持背景存活）。
 
+### 10.4 首次設定（onboarding）
+
+目標：新使用者從安裝到第一次翻譯成功的摩擦最小化，每一步都讓使用者知道「做對了沒」。
+
+**Chrome／Firefox／macOS Safari**
+
+- 首次安裝（`onInstalled` reason=install）自動開啟設定頁；更新不開
+- 設定頁「Gemini API Key」欄位下方直達 [aistudio.google.com/api-keys](https://aistudio.google.com/api-keys)（登入後即金鑰頁，附「Create API key → Create key → 複製貼上」三步提示），另附詳細教學連結
+- 貼上看起來完整的金鑰（`AIza` 開頭、30 字元以上）自動測試一次，不必另按「測試」；設定自動儲存
+- Popup 未設 API Key 時狀態列可點，直接開設定頁
+
+**iOS／iPadOS（host app）**
+
+- 首次啟動 4 步導覽：① 在 Safari 啟用 → ② 取得 Gemini API Key → ③ 選預設翻譯方式 → ④ 怎麼翻譯（懸浮按鈕／四指輕點／YouTube 字幕）。啟用排第一步：延伸功能沒啟用其他設定都白做，且是最容易卡關的一步
+- 「在 Safari 啟用」步與主畫面都有**即時狀態列**三態：尚未偵測到啟用／已啟用但還沒允許「每個網站」／已啟用可以翻譯了。狀態來自延伸功能經 App Group 回報（延伸功能只要在 Safari 跑過就會被偵測到；「所有網站」存取權由延伸功能查 `permissions` 得知），使用者切回 App 即更新。主畫面已啟用時收起啟用步驟
+- 啟用步驟文案對齊 iOS 26 Safari 實際字串（「頁面選單」→「管理延伸功能」→ 開關；再點「Shinkansen」→「永遠允許⋯」→「一律在每個網站允許」），附真實畫面裁圖
+- API Key 步主按鈕直達金鑰頁（在系統 Safari 開啟），貼上金鑰自動檢查；沒金鑰可略過，預設翻譯方式自動落在免費 Google 翻譯，填了金鑰則自動落在 Gemini Flash Lite（與擴充功能出廠預設同一組，最省），親手改選過就以使用者的選擇為準
+- 主畫面狀態卡同時顯示 API Key 是否已設定（真值來自延伸功能回填）
+
 ---
 
 ## 11. 翻譯狀態提示（Toast）
 
 ### 11.1 容器
 
-`position: fixed` 最上層，Shadow DOM 隔離，280px 寬、白底圓角陰影。位置四選項（預設 `bottom-right`），設定頁可調。預設透明度 70%。
+`position: fixed` 最上層，Shadow DOM 隔離，寬度依內容自動調整（180–320px）、白底圓角陰影。位置四選項（預設 `bottom-right`），設定頁可調。預設透明度 70%。
 
 ### 11.2 狀態
 
@@ -613,7 +654,7 @@ iOS Safari 背景 event page 掛起的續命處理（長批次翻譯期間保持
 - Drive 影片字幕翻譯 toggle（Drive 影片頁顯示）
 - 快取統計 + 清除快取按鈕
 - 累計費用 / token 顯示 +「清除」按鈕（只重設顯示基準點，不刪用量紀錄）
-- 狀態列
+- 狀態列（未設 Gemini API Key 且有 preset 用 Gemini 時顯示提示，該列可點，點了直接開設定頁）
 - Footer：設定按鈕 +「翻譯文件」按鈕（§17）+ 快捷鍵提示（動態讀取）
 
 ### 13.2 版本顯示
@@ -648,28 +689,40 @@ iOS Safari 背景 event page 掛起的續命處理（長批次翻譯期間保持
 - 支援日期範圍篩選、CSV 匯出、清除——清除有兩種語意：options 的清除真刪紀錄；popup 的「清除」只重設顯示基準點，不刪任何紀錄
 - 費用計算套用 cache 命中折扣後的實付值
 - 字幕翻譯逐批合併成單筆（YouTube / Drive 各自合併不互混）；Google MT 整頁翻譯亦合併
+- 網頁翻譯（Gemini / 自訂模型）每批翻完即寫入，同一頁三分鐘內的批次合併成單筆——關閉分頁或中途離開，已翻完的批次照樣入帳；網頁翻譯紀錄不再有「耗時」值
 - 全部命中本地快取（零 API 呼叫）的翻譯不寫入用量紀錄
 
 ---
 
-## 17. 文件翻譯（PDF / EPUB / TXT / Markdown / HTML / 字幕檔）
+## 17. 文件翻譯（PDF / EPUB / Word / TXT / Markdown / HTML / 字幕檔）
 
 ### 17.1 功能總覽
 
-使用者透過 popup 點選「翻譯文件」開啟獨立分頁，本機上傳 PDF、EPUB、TXT、Markdown（`.md` / `.markdown`）、HTML（`.htm` / `.html`）或字幕檔（`.srt` / `.vtt` / `.ass` / `.ssa`），選擇翻譯 preset（沿用既有三組 preset），系統解析、批次送翻、提供：
+使用者透過 popup 點選「翻譯文件」開啟獨立分頁，本機上傳 PDF、EPUB、Word（`.docx`）、TXT、Markdown（`.md` / `.markdown`）、HTML（`.htm` / `.html`）或字幕檔（`.srt` / `.vtt` / `.ass` / `.ssa`），選擇翻譯 preset（沿用既有三組 preset），系統解析、批次送翻、提供：
 
 1. **線上閱讀器**（PDF）：雙頁並排顯示（左原 / 右譯），雙向 scroll sync（同頁同比例定位）、zoom 控制、同步捲動開關
-2. **下載譯文檔**：PDF 輸出 `<原檔名>-shinkansen.pdf`（譯文直接寫在原頁面版面上，頁數與原檔相同）；EPUB 輸出譯本 EPUB（單語 / 雙語對照可選）；TXT / Markdown / HTML 輸出 `<原檔名>-shinkansen.<原副檔名>`（譯文輸出格式 = 輸入格式）；字幕檔輸出同格式字幕檔 `<原檔名>.<語言>.<原副檔名>`（單語 / 雙語字幕可選，§17.12）
+2. **下載譯文檔**：PDF 輸出 `<原檔名>-shinkansen.pdf`（譯文直接寫在原頁面版面上，頁數與原檔相同）；EPUB 輸出譯本 EPUB（單語 / 雙語對照可選）；Word 輸出 `<原檔名>-shinkansen.docx`（雙語版 `-shinkansen-dual.docx`，§17.13）；TXT / Markdown / HTML 輸出 `<原檔名>-shinkansen.<原副檔名>`（譯文輸出格式 = 輸入格式）；字幕檔輸出同格式字幕檔 `<原檔名>.<語言>.<原副檔名>`（單語 / 雙語字幕可選，§17.12）
 
 ### 17.2 限制與上限（PDF）
 
 | 項目 | 硬上限 |
 |------|--------|
-| 頁數 | 50 頁 |
-| 檔案大小 | 10 MB |
+| 頁數 | 300 頁 |
+| 檔案大小 | 50 MB |
 
 - 達硬上限：顯示「檔案超過支援上限，請先拆分後再上傳」+ 阻擋上傳
-- **已知不支援場景**（上傳時偵測 + 標示）：純掃描 PDF（需 OCR，終止）、加密 PDF（終止）、字型映射不完整（警告 + 允許繼續）、旋轉 / 直排文字（該部分維持原文不翻譯）、RTL 文字（按 LTR 處理）
+- 硬上限只擋解析階段吃不消的極端檔；長文件的翻譯成本由 §17.2.1「翻譯頁數範圍」控制
+- **已知不支援場景**（上傳時偵測 + 標示）：純掃描 PDF（需 OCR，終止）、加密 PDF（終止）、字型映射不完整（警告 + 允許繼續）、局部旋轉 / 直排文字（該部分維持原文不翻譯）、內容整頁旋轉且未設頁面 Rotate 屬性（報「文字整頁旋轉，目前不支援」終止，不誤判為掃描檔）、RTL 文字（按 LTR 處理）
+
+### 17.2.1 翻譯頁數範圍（PDF）
+
+解析完成的「解析完成」畫面提供「翻譯頁數」起訖輸入（預設整份文件，附「全部」還原按鈕），可只翻文件其中一段頁面——長篇報告 / 操作手冊不必整份送翻。
+
+- 輸入自動修正到合法區間：小於 1 補成 1、超過總頁數補成總頁數、起始頁大於結束頁時結束頁一起推齊
+- **只影響「哪些頁送去翻譯」**：閱讀器與下載的譯文 PDF 仍是完整文件，範圍外的頁維持原文
+- 「先建立文章術語表」的取樣範圍跟著頁數範圍走
+- 換檔（重新上傳 / 切換檔案）後範圍重設為整份文件
+- EPUB / Word / TXT / Markdown / HTML / 字幕檔走章節勾選（§17.6），不使用頁數範圍
 
 ### 17.3 入口 UI
 
@@ -700,13 +753,13 @@ iOS Safari 背景 event page 掛起的續命處理（長批次翻譯期間保持
 ### 17.7 翻譯失敗處理
 
 - 單段失敗：該位置露出原文；「翻譯紀錄」modal 內可一鍵重試所有失敗段
-- 整體失敗：閱讀器顯示錯誤 banner，下一輪翻譯成功時自動清除
+- 整體失敗：閱讀器顯示錯誤 banner，下一輪翻譯成功時自動清除；譯文 PDF 產生失敗（字型嵌入 / 開檔錯誤）同樣顯示原因，翻譯結果仍在（可從「翻譯紀錄」複製譯文）
 - 編輯頁儲存只標記「內容有變動」的段落為手動編輯；未動過的失敗段保留重試入口
 - **不做整份自動 retry**（浪費已成功段落的 token）；下載時 failed 段落以原文輸出
 
 ### 17.8 譯文 PDF 下載
 
-原頁嵌為底層（向量 / 點陣 / 文字原樣保留），可翻譯段落以白底遮罩蓋住原文位置後寫入譯文；不可翻譯與失敗段落露出底層原文；原 PDF 的連結 annotation 重建。中文字型內嵌 Noto Sans TC（TTF，subset 後每檔約 100-300KB，授權標示於 `lib/vendor/fonts/`）。譯文自動換行與 fit-to-box 縮排；排版細節見 SPEC-PRIVATE §32。
+原頁嵌為底層（向量 / 點陣 / 文字原樣保留），可翻譯段落以白底遮罩蓋住原文位置後寫入譯文；不可翻譯與失敗段落露出底層原文；原 PDF 的連結 annotation 重建。中文字型內嵌 Noto Sans TC（TTF，subset 後每檔約 100-300KB，授權標示於 `lib/vendor/fonts/`）。目標語言為簡體中文 / 日文 / 韓文時，譯文 PDF 改用對應的 Noto Sans SC / JP / KR：安裝包不內建，**只在第一次翻譯該語言的 PDF 時**從專案的 GitHub Pages 下載（Regular + Bold 約 10–21 MB（簡中最大），SHA-256 驗證後存瀏覽器快取，之後離線可用）；下載失敗退回內建 TC 並提示，翻譯不中斷。其他目標語言與網頁 / EPUB / 字幕翻譯不會觸發下載。譯文自動換行與 fit-to-box 縮排；塞不下的段落末行補「…」且不畫到段落框外；頁面旋轉（/Rotate）或裁切（CropBox）的頁譯文座標一律正確，即使連結 / 底色資訊抽取失敗也只少連結與底色不錯位；閱讀器內重試 / 下載沿用解析階段已開的 PDF，不重新解析整份文件。排版細節見 SPEC-PRIVATE §32。
 
 ### 17.10 EPUB 電子書翻譯
 
@@ -716,14 +769,16 @@ iOS Safari 背景 event page 掛起的續命處理（長批次翻譯期間保持
 
 **使用者可見功能**：
 
-- **章節選翻**：解析後列章節清單（含每章字數與預估費用），可勾選部分章節翻譯；附屬頁（封面 / 版權頁等）預設建議跳過
+- **章節選翻**：解析後列章節清單（含每章字數與預估費用），可勾選部分章節翻譯；附屬頁（封面 / 版權頁等）預設建議跳過（檔名判斷以完整關鍵字為準，`stock_market` / `navy` / `discovery` 之類正文章不受 toc / nav / cover 子字串誤判）。預估費用依原文 CJK 字元佔比套用不同係數，日文 / 韓文 / 中文原文比拉丁文原文估得高
+- **續翻與重翻**：翻到一半取消或部分段落失敗的章節再按「翻譯」= 續翻，只補未完成段落，已完成段落不重送、不彈重翻確認、不重新計費；只有整章已完成又重新勾選才視為重翻（確認後清該章翻譯快取重新計費）。重翻失敗或中途取消時，已有譯文的段落（含手動編輯）保留上一版
+- **翻譯單位**（EPUB / HTML）：段落、標題、清單項、表格儲存格等區塊為單位；容器自己的直接文字（例 `<li>Chapter one<ol>…</ol></li>` 的「Chapter one」、轉檔書 `<div>正文<h2>標題</h2>正文</div>` 的正文、`<body>` 直接文字）同樣是翻譯單位，譯文寫回原位置。日文 `<ruby>` 的讀音假名（`<rt>` / `<rp>`）不進送翻原文與術語表抽取，雙語輸出的原文段仍保留完整 ruby
 - **預覽編輯**：已翻段落可直接點擊編輯（`contenteditable`，貼上降為純文字、連結邊界打字自動補回連結內）；「顯示原文對照」toggle；全書預覽；搜尋取代（只動譯文文字、保留 inline 標記）
 - **譯文空格自動校正**（`translateDoc.epubAutoFixSpacing`，預設開）：中文譯文的 CJK↔拉丁間距自動補齊、全形標點旁多餘空格自動移除
-- **工作階段存檔**：翻譯進度（含手動編輯）、全書術語表、本書禁用詞、額外翻譯指令、累計費用整包存本機 IndexedDB；重開同檔自動還原；不受「清除翻譯記憶」影響。支援匯出 / 匯入 `-session.json`（跨書匯入拒絕）
+- **工作階段存檔**：翻譯進度（含手動編輯）、全書術語表、本書禁用詞、額外翻譯指令、累計費用整包存本機 IndexedDB，翻譯途中逐批落地（中途關頁 / reload 不掉本輪已完成段落與費用）；重開同檔自動還原；不受「清除翻譯記憶」影響。支援匯出 / 匯入 `-session.json`（跨書匯入拒絕）
 - **放棄本書翻譯**：紅字按鈕，confirm 後清掉這本書全部工作進度與快取，回到選檔畫面
 - **全書術語表**：分輪掃描全書抽取譯名對照（上限 500 條），跨章節譯名一致；可手動編輯、逐條「對照一次」選項；匯入支援 JSON（含選項 flag）與 CSV（兩欄「原文,譯名」，容許 BOM / CRLF / 引號跳脫 / 表頭列；非 CSV 副檔名但 JSON parse 失敗時自動退回 CSV 解析），匯入走合併 / 覆蓋 dialog 與上限保護
 - **本書禁用詞 / 額外翻譯指令**：per-document 補充規則，隨工作階段保存
-- **術語表譯名不被加註原文**：翻譯完成後，術語表 target 為純譯名的條目，譯文中出現「譯名（該條 source）」一律還原成純譯名（確定性後處理；target 本身含括號對照的條目照表輸出，要對照請把譯名寫成「譯名（原文）」並搭配「對照一次」選項；手動編輯過的段落不動；快取命中的舊譯文重跑零費用即治癒）。通用 prompt 的「特殊詞彙首次出現加註原文」規則會讓模型對純譯名條目自行加註（實測同一份內容段落版 91 段 33 處），術語表是單一事實來源
+- **術語表譯名不被加註原文**：翻譯完成後，術語表 target 為純譯名的條目，譯文中出現「譯名（該條 source）」一律還原成純譯名（確定性後處理；target 本身含括號對照的條目照表輸出，要對照請把譯名寫成「譯名（原文）」並搭配「對照一次」選項；手動編輯過的段落不動；原文本身就帶括號對照的段落——例 “FBI (Federal Bureau of Investigation)”——該條不清理；快取命中的舊譯文重跑零費用即治癒）。通用 prompt 的「特殊詞彙首次出現加註原文」規則會讓模型對純譯名條目自行加註（實測同一份內容段落版 91 段 33 處），術語表是單一事實來源
 - **輸出格式**：EPUB 2 來源可選升級輸出 EPUB 3；譯本內容可選單語譯文或雙語對照（切換重新下載零重翻費用）
 - **段落間距至少 0.5em**（`translateDoc.epubParagraphSpacing`，預設關）：改善 `margin:0` 傳統排版的段落擁擠
 - **譯後一致性掃描**（`translateDoc.consistencyScan`，預設開）：翻譯完成後掃描「同一原文多譯名 / 指定譯名缺席」並列出可一鍵取代的違規清單。注意訊號層：掃的是譯名一致性，不驗「單一譯名但翻得差」（品質歸 prompt / 模型）
@@ -732,7 +787,7 @@ iOS Safari 背景 event page 掛起的續命處理（長批次翻譯期間保持
 
 ### 17.11 TXT / Markdown / HTML 檔案翻譯
 
-與 EPUB 共用同一條「書籍式文件」管線（章節清單 / 全書術語表 / 譯後一致性掃描 / 預覽編輯 / 工作階段存檔 / 費用預估 / 術語表譯名不被加註原文的後處理全部沿用），只有解析與譯文檔重建按格式分流：
+與 EPUB 共用同一條「書籍式文件」管線（章節清單 / 術語表 / 譯後一致性掃描 / 預覽編輯 / 工作階段存檔 / 費用預估 / 術語表譯名不被加註原文的後處理全部沿用），只有解析與譯文檔重建按格式分流：
 
 - **TXT**：按空行分段為翻譯單位；空白行、純標點 / 數字段（分隔線、頁碼）原樣保留。無章節結構——整份單一「章節」，不出章節勾選 UI，主按鈕為「開始翻譯」
 - **Markdown**：按 ATX 標題（`#` / `##`）切章，比照 EPUB 出章節勾選清單；標題 / 清單 / 引用的標記前綴由重建端保留，fenced code block 不翻譯原樣帶過；無標題檔視同單章
@@ -740,12 +795,13 @@ iOS Safari 背景 event page 掛起的續命處理（長批次翻譯期間保持
 - **限制**：檔案硬上限與 EPUB 相同（100 MB）；已選字數超過 50 萬字時顯示成本警告
 - **檔案編碼**：讀入時自動判斷編碼——UTF-8（含 BOM）/ UTF-16（BOM）/ Big5 / GBK / Shift_JIS / EUC-KR / Windows-1252（以目標語言決定舊編碼的優先順序，並以常用字比例防止 Big5 ⇄ GBK 互判錯）；譯文檔一律以 **UTF-8** 輸出（來源有 BOM 才帶 UTF-8 BOM）
 - **格式列**：章節清單資訊列的「格式」欄顯示 EPUB 版本或 TXT / Markdown / HTML
+- **UI 文案分流**：只有 EPUB 用「書」語彙（全書術語表 / 全書預覽 / 放棄本書翻譯 / 本書累計費用 / 本書禁用詞）；TXT / Markdown / HTML / 字幕檔用通用檔案語彙（全文術語表 / 全文預覽 / 放棄本檔翻譯 / 本檔累計費用 / 本檔禁用詞）。單章文件另隱藏「章節數」列、摘要列不出現「N 章」、預覽返回鍵為「← 返回」；無作者的檔案隱藏「作者」列
 - 雙語對照譯本輸出為 EPUB 與字幕檔提供，TXT / Markdown / HTML 不提供
 - **整份未翻輸出 === 輸入**（重建不變量）：未翻 / 失敗段落在譯文檔中以原文原樣輸出
 
 ### 17.12 字幕檔翻譯（SRT / WebVTT / ASS）
 
-與 TXT / Markdown / HTML 共用同一條「書籍式文件」管線（全書術語表 / 譯後一致性掃描 / 預覽編輯 / 工作階段存檔 / 費用預估全部沿用），整份單一「章節」不出章節勾選 UI：
+與 TXT / Markdown / HTML 共用同一條「書籍式文件」管線（術語表 / 譯後一致性掃描 / 預覽編輯 / 工作階段存檔 / 費用預估全部沿用），整份單一「章節」不出章節勾選 UI：
 
 - **支援格式**：SubRip（`.srt`）、WebVTT（`.vtt`）、Advanced SubStation Alpha（`.ass` / `.ssa`）
 - **翻譯單位**：每則字幕（cue）一個翻譯單位；同一批內相鄰字幕一起送翻，LLM 以前後字幕為語境但逐則輸出（內建字幕專用提示：不合併 / 不拆分相鄰字幕、不把內容提前或延後到相鄰則、譯文精簡口語、不加註解；使用者的「本文件額外翻譯指令」接在其後）
@@ -753,8 +809,22 @@ iOS Safari 背景 event page 掛起的續命處理（長批次翻譯期間保持
 - **譯名不加括號原文對照**：字幕提示明訂「譯名後不加括號原文」並優先於通用 prompt 的「特殊詞彙首次出現加註原文」規則（字幕每則獨立，通用規則會讓每則都變「首次出現」→ 滿篇「伊拉克（Iraq）」）；另有書籍式文件共用的確定性安全網（§17.10「術語表譯名不被加註原文」）
 - **原樣保留**：序號、時間軸（含 VTT cue 設定）、WEBVTT 標頭、NOTE / STYLE / REGION 區塊、ASS 的 `[Script Info]` / `[V4+ Styles]` 區段與 `Comment:` 行、純音符 / 純標點字幕（♪ ♪）全部原樣帶過
 - **行內標記保留**：`<i>` / `<b>` / `<c.class>` 等配對標記、`<v 說話者>` / VTT 時間標記 `<00:01.000>` / ASS 覆寫 `{\an8}` / ASS 換行 `\N` 以佔位符協定保護，譯文回來還原原標記；LLM 吃掉的 ASS 覆寫標記補回該行行首
-- **輸出**：下載 `<原檔名>.<語言>.<原副檔名>`（例 `Show S01E01.srt` → `Show S01E01.zh.srt`；語言碼取目標語言主要子標籤小寫：zh-TW / zh-CN → `zh`、en → `en`），語言碼緊貼副檔名是播放器（VLC / Plex / Jellyfin）自動對字幕軌與標示語言的慣例；譯文檔與原檔同格式、同則數、同時間軸；「譯本內容」select 可選**單語字幕**（每則只有譯文）或**雙語字幕**（每則譯文在上、原文在下，ASS 以 `\N` 分行；檔名為 `<原檔名>.dual.<語言>.<原副檔名>`）；切換模式重新下載零重翻費用
+- **輸出**：下載 `<原檔名>.<語言>.<原副檔名>`（例 `Show S01E01.srt` → `Show S01E01.zh.srt`；語言碼取目標語言主要子標籤小寫：zh-TW / zh-CN → `zh`、en → `en`），語言碼緊貼副檔名是播放器（VLC / Plex / Jellyfin）自動對字幕軌與標示語言的慣例；譯文檔與原檔同格式、同則數、同時間軸；「字幕內容」select 可選**單語字幕**（每則只有譯文）或**雙語字幕**（每則譯文在上、原文在下，ASS 以 `\N` 分行；檔名為 `<原檔名>.dual.<語言>.<原副檔名>`）；切換模式重新下載零重翻費用
 - **預覽**：一則多行的字幕譯文在預覽頁以換行顯示（與下載檔一致），預覽內編輯的換行存回譯文時保留
 - **限制**：檔案硬上限與 EPUB 相同（100 MB）；格式列顯示 SRT / WebVTT / ASS；整份未翻輸出 === 輸入
 - **檔案編碼**：讀入時自動判斷編碼——UTF-8（含 BOM）/ UTF-16（BOM）/ Big5 / GBK / Shift_JIS / EUC-KR / Windows-1252（以目標語言決定舊編碼的優先順序，並以常用字比例防止 Big5 ⇄ GBK 互判錯）；字幕檔常見的舊編碼來源不再亂碼，譯文字幕檔一律以 **UTF-8** 輸出（來源有 BOM 才帶 UTF-8 BOM）
 - 解析 / 佔位符對映 / 重建細節見 SPEC-PRIVATE §32
+
+### 17.13 Word（.docx）檔案翻譯
+
+與 EPUB 共用同一條「書籍式文件」管線（章節清單 / 全書術語表 / 譯後一致性掃描 / 預覽編輯 / 工作階段存檔 / 費用預估 / 術語表譯名不被加註原文的後處理全部沿用），譯文寫回原 .docx 檔案結構——版面、樣式、字型、圖片、表格全部由 Word 自身維持，不做版面重排：
+
+- **章節切分**：內文依標題樣式（Heading 1 / Heading 2）切章，比照 Markdown 出章節勾選清單；無標題檔視同單章。頁首與頁尾、註腳與章節附註、文件註解各自成附加章節，可獨立勾選
+- **格式保留**：段落樣式、對齊、清單編號、粗斜體 / 底線 / 刪除線 / 上下標 / 色字 / 螢光標記 / 字型等行內格式，以及超連結（外部與文件內錨點）全數往返；行內圖片、定位鍵、分頁符、數學公式、內容控制項原樣保留不送翻
+- **欄位（field）**：PAGE / TOC 等 Word 欄位整塊原樣保留不翻譯——目錄在 Word 內更新欄位後即以譯後標題重算
+- **書籤與註解錨點**：書籤、註解範圍錨點與參照全數保留；註解（comments）內容一併翻譯，在 Word 註解面板顯示譯文；超連結的全部屬性（提示文字等）原樣保留
+- **雙語對照**（下載時「譯本內容」select 可選）：原文段落原樣保留，譯文段落接在每段後面（清單項的譯文段不重複編號、段落層分節與文字框定位屬性不複製；頁首頁尾 / 註腳 / 註解維持單語）；切換模式重新下載零重翻費用
+- **不支援場景**（上傳時偵測 + 明確提示）：加密（密碼保護）docx 擋下；含未接受追蹤修訂的檔案擋下並提示先在 Word 接受修訂；`.doc` 舊格式與 `.docm` 巨集檔不支援
+- **限制**：檔案硬上限與 EPUB 相同（100 MB）；已選字數超過 50 萬字時顯示成本警告；格式列顯示「Word (DOCX)」
+- **重建不變量**：未翻 / 失敗段落與所有未動檔案區塊逐位元組保留；重複下載輸出一致
+- 解析 / OOXML 寫回 / island 協定等實作細節見 SPEC-PRIVATE §32

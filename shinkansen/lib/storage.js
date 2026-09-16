@@ -102,7 +102,7 @@ source 欄位必須是原文文本中「逐字出現」的字串，保持原文�
 3. 原文中僅出現一次且無歧義的簡單詞彙。
 </exclusion_rules>
 <output_constraints>
-1. 語言規範：嚴格使用台灣繁體中文與台灣慣用語，絕對禁用中國譯法（例如：必須使用「影片」而非「視頻」、「軟體」而非「軟件」、「程式」而非「程序」、「實作」而非「實現」、「線程」而非「進程」）。
+1. 語言規範：嚴格使用台灣繁體中文與台灣慣用語，絕對禁用中國譯法（例如：必須使用「影片」而非「視頻」、「軟體」而非「軟件」、「程式」而非「程序」、「實作」而非「實現」、「執行緒」而非「線程」、「行程」而非「進程」）。
 2. 數量限制：提取數量上限為 200 條，若超過請依重要性篩選，保留最重要的 200 條。
 3. 絕對 JSON 格式：只能輸出純 JSON 陣列，絕對不可包含任何前言、解釋、後記，也「絕對不要」使用 \`\`\`json 和 \`\`\` 的 Markdown 程式碼區塊標記。
 4. 欄位完整：每條 entry 必須同時包含 source、target、type 三個欄位；target 必須是譯名本身，絕對不可填入分類代號（person / place / tech / work）。
@@ -133,8 +133,12 @@ export const DEFAULT_SUBTITLE_SYSTEM_PROMPT = `你是專業的影片字幕翻譯
 export const DEFAULT_ASR_SUBTITLE_SYSTEM_PROMPT = `你是專業的{sourceLanguage} ASR（自動語音辨識）字幕翻譯員，將{sourceLanguage} YouTube 自動字幕翻譯成台灣繁體中文。
 
 <input_format>
-輸入是 JSON 陣列，每個元素 {"s": 起始毫秒， "e": 結束毫秒， "t": {sourceLanguage}片段}。
-範例：[{"s":500,"e":1200,"t":"the auto"},{"s":1200,"e":1800,"t":"captions are"},{"s":1800,"e":3500,"t":"really broken"}]
+輸入是逐行的{sourceLanguage}片段，每行格式「編號|片段文字」，編號從 1 開始依時間順序遞增；片段之間若有明顯停頓，會插入一個空行。
+範例：
+1|the auto
+2|captions are
+
+3|really broken
 </input_format>
 
 <task>
@@ -145,19 +149,19 @@ export const DEFAULT_ASR_SUBTITLE_SYSTEM_PROMPT = `你是專業的{sourceLanguag
 </task>
 
 <output_format>
-回傳 JSON 陣列，每個元素 {"s": 該句起始 ms, "e": 該句結束 ms, "t": 中文譯文}。
-- s 必須等於某個輸入元素的 s
-- e 必須等於某個輸入元素的 e（通常是該句最後一個片段的 e)
-- 不要包 \`\`\`json fence，直接輸出純 JSON 陣列
-- 不要任何解釋、開場白、後記
-範例：[{"s":500,"e":3500,"t":"自動字幕真的壞了"}]
+逐行輸出，每行格式「起始編號-結束編號|中文譯文」，代表該句涵蓋輸入的哪一段連續片段；只涵蓋一個片段時寫「編號|中文譯文」。
+- 編號必須來自輸入，各行範圍依序遞增、不可重疊、不可跳過任何片段（所有輸入片段都要被某一行涵蓋）
+- 每行只有一句譯文，譯文內不可出現換行
+- 不要 JSON、不要 code fence、不要任何解釋、開場白、後記
+範例：
+1-3|自動字幕真的壞了
 </output_format>
 
 <critical_rules>
 1. 禁用中國用語（網絡→網路、視頻→影片、軟件→軟體、數據→資料、用戶→使用者）
 2. 專有名詞保留原文寫法（人名、品牌、技術縮寫如 AI、NASA、CPU 不譯成中文）
 3. 忠實保留粗俗用語（Fuck → 幹），不審查、不委婉化
-4. 不要遺漏輸入片段：輸出陣列加總應涵蓋所有輸入時間範圍
+4. 不要遺漏輸入片段：每個輸入編號都必須被某一行的範圍涵蓋
 5. 這批輸入可能從句子中間開始、或在句子中間結束（前後還有其他批次接續）：開頭與結尾的殘句照字面翻譯即可，絕對不可為了讓句子完整而補上輸入片段裡沒有的詞語，也不可丟棄殘句
 </critical_rules>`;
 
@@ -196,7 +200,31 @@ export const DEFAULT_FORBIDDEN_TERMS = [
   { forbidden: '操作系統', replacement: '作業系統', note: '' },
   { forbidden: '沒有之一', replacement: '',         note: '陳腔濫調，留空替換詞由 AI 自行改寫' },
   { forbidden: '橫空出世', replacement: '',         note: '陳腔濫調，留空替換詞由 AI 自行改寫' },
+  { forbidden: '啃硬骨頭', replacement: '',         note: '中國媒體慣用比喻（攻克難題），留空替換詞由 AI 自行改寫' },
 ];
+
+// 舊版預設清單凍結快照（v2.4.9 以前的 25 條）。既有使用者若 storage 曾把當時的預設
+// 清單「物化」寫死（2026-07-09 之前的 autosave 會寫），新增預設條目後逐條比對會被誤判
+// 成「使用者客製」→ 永遠吃不到新條目。getSettings 與 options 的「未客製」判斷把等於
+// 任一快照的 saved 視為未客製（比照 §7.5 prompt 的 normalize 升級路徑）。
+// 日後再改預設清單時：把「當時的完整清單」再 push 一份進來，不要改既有快照。
+export const LEGACY_DEFAULT_FORBIDDEN_TERMS_SNAPSHOTS = [
+  [
+    ['視頻', '影片'], ['音頻', '音訊'], ['軟件', '軟體'], ['程序', '程式'], ['進程', '行程'],
+    ['線程', '執行緒'], ['數據', '資料'], ['數據庫', '資料庫'], ['網絡', '網路'], ['信息', '資訊'],
+    ['質量', '品質'], ['用戶', '使用者'], ['默認', '預設'], ['創建', '建立'], ['實現', '實作'],
+    ['運行', '執行'], ['發布', '發表'], ['屏幕', '螢幕'], ['劍指', '針對'], ['痛點', '要害'],
+    ['硬傷', '罩門'], ['文檔', '文件'], ['操作系統', '作業系統'], ['沒有之一', ''], ['橫空出世', ''],
+  ],
+];
+
+/** saved 禁用詞陣列是否逐條等於某一版舊預設快照（forbidden + replacement 皆同、順序同）。 */
+export function isLegacyDefaultForbiddenTerms(terms) {
+  if (!Array.isArray(terms) || terms.length === 0) return false;
+  return LEGACY_DEFAULT_FORBIDDEN_TERMS_SNAPSHOTS.some((snap) =>
+    snap.length === terms.length
+    && snap.every(([f, r], i) => (terms[i]?.forbidden || '') === f && (terms[i]?.replacement || '') === r));
+}
 
 // ── i18n:翻譯目標語言(P1 / v1.8.59)─────────────────────────────────
 // targetLanguage setting 控制翻譯成什麼語言:
@@ -344,8 +372,12 @@ export const UNIVERSAL_SUBTITLE_SYSTEM_PROMPT = `You are a professional video su
 export const UNIVERSAL_ASR_SUBTITLE_SYSTEM_PROMPT = `You are translating {sourceLanguage} ASR (auto-generated) subtitles into {targetLanguage}.
 
 <input_format>
-JSON array. Each element {"s": startMs, "e": endMs, "t": "{sourceLanguage} fragment"}.
-Example: [{"s":500,"e":1200,"t":"the auto"},{"s":1200,"e":1800,"t":"captions are"}]
+One {sourceLanguage} fragment per line in the form "index|fragment text"; indexes start at 1 and increase in time order. A blank line marks a noticeable pause between fragments.
+Example:
+1|the auto
+2|captions are
+
+3|really broken
 </input_format>
 
 <task>
@@ -357,27 +389,39 @@ Example: [{"s":500,"e":1200,"t":"the auto"},{"s":1200,"e":1800,"t":"captions are
 </task>
 
 <output_format>
-Return a JSON array. Each element {"s": startMs, "e": endMs, "t": "translation"}.
-- s must equal some input element's s
-- e must equal some input element's e (typically the last fragment's e in that sentence)
-- Output pure JSON only. No code fence. No prefaces, no postscripts.
+Output one line per sentence in the form "startIndex-endIndex|translation", where the range is the run of consecutive input fragments that sentence covers; use "index|translation" when a sentence covers a single fragment.
+- Indexes must come from the input; ranges must be in increasing order, must not overlap, and must not skip any fragment (every input fragment must be covered by some line)
+- Exactly one sentence per line; no line breaks inside a translation
+- No JSON, no code fence, no explanations, prefaces, or postscripts
+Example:
+1-3|自動字幕真的壞了
 </output_format>`;
 
-// 預設 target 推導(navigator.language)。Q3 拍板:
-//   zh-TW / zh-Hant / zh-HK    → zh-TW(同繁體圈,zh-HK 雖港式詞彙不同但比 zh-CN/en 接近)
-//   其他 zh-*(zh-CN/zh-Hans/zh-SG)→ zh-CN
-//   ja / ko / es / fr / de prefix → 對應 target
-//   其他                          → en
-export function detectDefaultTargetLanguage() {
-  const nav = ((typeof navigator !== 'undefined' && navigator.language) || 'en').toLowerCase();
-  if (nav.startsWith('zh-tw') || nav.startsWith('zh-hant') || nav.startsWith('zh-hk')) return 'zh-TW';
-  if (nav.startsWith('zh')) return 'zh-CN';
-  if (nav.startsWith('ja')) return 'ja';
-  if (nav.startsWith('ko')) return 'ko';
-  if (nav.startsWith('es')) return 'es';
-  if (nav.startsWith('fr')) return 'fr';
-  if (nav.startsWith('de')) return 'de';
+// navigator.language → 支援語言的推導規則（前綴比對，依序命中）。Q3 拍板：
+//   zh-TW / zh-Hant / zh-HK / zh-MO → zh-TW（同繁體圈；zh-HK / zh-MO 詞彙不同但比 zh-CN / en 接近。
+//                                      zh-MO 2026-09-12 批次 6 起對齊 content-ns.js 的繁體判定，原本三份都落 zh-CN）
+//   其他 zh-*（zh-CN / zh-Hans / zh-SG）→ zh-CN
+//   ja / ko / es / fr / de 前綴        → 對應語言
+//   其他                              → en
+// 單一資料源：detectDefaultTargetLanguage（預設翻譯目標）與 resolveUiLanguage（UI 語系 'auto'）
+// 共用；lib/i18n.js getUiLanguage 內有一份鏡像表（content script 不能 import），
+// test/unit/mirror-drift.spec.js 鎖兩份逐條相同——改這裡必同步那邊。
+export const NAV_LANG_RULES = [
+  ['zh-tw', 'zh-TW'], ['zh-hant', 'zh-TW'], ['zh-hk', 'zh-TW'], ['zh-mo', 'zh-TW'],
+  ['zh', 'zh-CN'],
+  ['ja', 'ja'], ['ko', 'ko'], ['es', 'es'], ['fr', 'fr'], ['de', 'de'],
+];
+export function langFromNavigator(navLang) {
+  const nav = String(navLang || 'en').toLowerCase();
+  for (const [prefix, lang] of NAV_LANG_RULES) {
+    if (nav.startsWith(prefix)) return lang;
+  }
   return 'en';
+}
+
+// 預設 target 推導（navigator.language）：規則見 NAV_LANG_RULES
+export function detectDefaultTargetLanguage() {
+  return langFromNavigator((typeof navigator !== 'undefined' && navigator.language) || 'en');
 }
 
 // P3 (v1.8.62):把 UI 語系偏好(可能 'auto' / 8 語其一)解析為實際 dict 用的 8 語之一。
@@ -388,15 +432,7 @@ export function resolveUiLanguage(uiLanguagePref) {
       && ['zh-TW', 'zh-CN', 'en', 'ja', 'ko', 'es', 'fr', 'de'].includes(uiLanguagePref)) {
     return uiLanguagePref;
   }
-  const nav = ((typeof navigator !== 'undefined' && navigator.language) || 'en').toLowerCase();
-  if (nav.startsWith('zh-tw') || nav.startsWith('zh-hant') || nav.startsWith('zh-hk')) return 'zh-TW';
-  if (nav.startsWith('zh')) return 'zh-CN';
-  if (nav.startsWith('ja')) return 'ja';
-  if (nav.startsWith('ko')) return 'ko';
-  if (nav.startsWith('es')) return 'es';
-  if (nav.startsWith('fr')) return 'fr';
-  if (nav.startsWith('de')) return 'de';
-  return 'en';
+  return langFromNavigator((typeof navigator !== 'undefined' && navigator.language) || 'en');
 }
 
 // v2.0.78（批次 4 F1）：區塊 strip 規則必須錨定「預設字面值」，不可用 [\s\S]*? 吞任意
@@ -455,6 +491,10 @@ function _normalizePromptForComparison(s) {
     // <document_number_fidelity> 區塊(文件金額 / 表格數值逐字保留,修報價單千分位
     // 被散文數字規則移除)。strip 新增內容,舊 saved 字面值視為未客製自動吃新 prompt
     .replace(/沒有可靠通行譯名或不確定時，一律保留原文，嚴禁自創、猜測或音譯譯名（例如不確定某公司的中文名稱時，保留其英文名）。/g, '')
+    // 2026-09-11 code review §3.6-3：DEFAULT_GLOSSARY_PROMPT 語言規範範例原寫「線程」而非
+    // 「進程」——「線程」本身就是中國用語（台灣：執行緒），與 forbiddenTerms 禁「線程」自相
+    // 矛盾。改「執行緒」而非「線程」、「行程」而非「進程」；舊字面值映射到新措辭（§7.5）
+    .replace(/「線程」而非「進程」/g, '「執行緒」而非「線程」、「行程」而非「進程」')
     .trim();
 }
 
@@ -697,7 +737,7 @@ export const DEFAULT_SETTINGS = {
   maxConcurrentBatches: 30,
   // v1.0.2: 每批段數上限與字元預算，使用者可在設定頁自行調整。
   // 段數上限：避免單批 placeholder slot 過多導致 LLM 對齊失準。
-  // 字元預算：作為 token proxy（3500 chars ≈ 1000 英文 tokens），留足 output headroom。
+  // 字元預算：作為 token proxy（7000 chars ≈ 2000 英文 tokens；2026-09-14 起 3500 → 7000，見 lib/constants.js）。
   maxUnitsPerBatch: DEFAULT_UNITS_PER_BATCH,
   maxCharsPerBatch: DEFAULT_CHARS_PER_BATCH,
   // v1.0.1: 單頁翻譯段落數上限。超大頁面（如維基百科長條目）超過此上限時截斷。
@@ -744,7 +784,7 @@ export const DEFAULT_SETTINGS = {
   // label 顯示於 options 頁（未來 toast 也可用）。
   // 行為：閒置按 → 啟動對應 preset；翻譯中按 → abort；已翻譯按任意 → restorePage。
   translatePresets: [
-    { slot: 1, engine: 'gemini', model: 'gemini-3-flash-preview', label: 'Flash' },
+    { slot: 1, engine: 'gemini', model: 'gemini-3.8-flash', label: 'Flash' },
     { slot: 2, engine: 'gemini', model: 'gemini-3.1-flash-lite', label: 'Flash Lite' },
     { slot: 3, engine: 'google', model: null, label: 'Google MT' },
   ],
@@ -831,7 +871,7 @@ export const DEFAULT_SETTINGS = {
     //   thinkingLevel:'auto' 不送任何 thinking 參數，讓 provider 自選預設;
     //   'off' / 'low' / 'medium' / 'high' 由 lib/openai-compat-thinking.js 偵測 provider 後
     //   翻譯成對應 API 寫法（OpenRouter unified reasoning / Claude thinking.type /
-    //   OpenAI o reasoning_effort / Grok reasoning_effort / Qwen extra_body.enable_thinking /
+    //   OpenAI o reasoning_effort / Grok reasoning_effort / Qwen enable_thinking /
     //   通用 OpenAI-compat reasoning_effort）。
     //   extraBodyJson：使用者自填 JSON 字串，deep merge 到 request body，可覆蓋自動 mapping
     //   並加 provider 專屬參數（top_k / metadata 等）。預設空白（進階使用者才需要）。
@@ -911,6 +951,61 @@ async function migrateApiKeyIfNeeded(syncSaved) {
   await browser.storage.sync.remove('apiKey');
 }
 
+// 大項設定存 storage.local（2026-09-12 code review 批次 6，P1-1 長期解）：chrome.storage.sync 每個
+// key 上限 8,192 bytes，固定術語表 / 禁用詞清單是無上限的使用者清單（約 150–200 條就爆），
+// 超限後整包 sync.set reject → 所有欄位 autosave 一起失敗。改存 local（10MB）；代價是這兩項
+// 不再跨裝置同步（匯出 / 匯入 JSON 仍含），SPEC §8.2。
+//   - getSettings：讀 local 覆蓋到 saved（local 沒 key = 未寫入，forbiddenTerms 依 target 給預設的語意不變）
+//   - setSettings / options / 匯入：以 splitSettingsPatch 分流
+//   - migrateLargeKeysToLocalIfNeeded：sync 仍有 key（舊版寫入 / 其他裝置同步回來 / 舊備份匯入）
+//     → sync 值視為較新，蓋到 local 後從 sync 移除，之後不會再被同步回來
+export const LOCAL_SETTINGS_KEYS = ['fixedGlossary', 'forbiddenTerms'];
+export async function migrateLargeKeysToLocalIfNeeded(syncSaved) {
+  if (!syncSaved) return;
+  const present = LOCAL_SETTINGS_KEYS.filter((k) => Object.prototype.hasOwnProperty.call(syncSaved, k));
+  if (present.length === 0) return;
+  const patch = {};
+  for (const k of present) patch[k] = syncSaved[k];
+  await browser.storage.local.set(patch);
+  await browser.storage.sync.remove(present);
+}
+/** 把設定 patch 分成 sync 與 local 兩份（local 只含 LOCAL_SETTINGS_KEYS 內實際存在的 key） */
+export function splitSettingsPatch(patch) {
+  const syncPart = { ...(patch || {}) };
+  const localPart = {};
+  for (const k of LOCAL_SETTINGS_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(syncPart, k)) {
+      localPart[k] = syncPart[k];
+      delete syncPart[k];
+    }
+  }
+  return { syncPart, localPart };
+}
+/** 讀 local 的大項設定並覆蓋進 saved（就地修改並回傳） */
+export async function overlayLocalSettings(saved) {
+  const local = await browser.storage.local.get(LOCAL_SETTINGS_KEYS);
+  for (const k of LOCAL_SETTINGS_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(local, k)) saved[k] = local[k];
+  }
+  return saved;
+}
+
+// 一次性遷移（2026-09-11 code review S-1）：Instapaper OAuth token / secret 從 sync 搬到
+// local。sync 整包會被 Debug Bridge GET_STORAGE 與 options「匯出設定」帶出，帳號憑證不該
+// 跟設定偏好同一個池（與 apiKey 同設計）。username 非機密，留在 sync 供 options 顯示連結狀態。
+export const INSTAPAPER_LOCAL_KEYS = ['instapaperToken', 'instapaperTokenSecret'];
+export async function migrateInstapaperTokenIfNeeded(syncSaved) {
+  if (!syncSaved) return;
+  const present = INSTAPAPER_LOCAL_KEYS.filter((k) => typeof syncSaved[k] === 'string' && syncSaved[k]);
+  if (present.length === 0) return;
+  const local = await browser.storage.local.get(INSTAPAPER_LOCAL_KEYS);
+  const toSet = {};
+  for (const k of present) if (!local[k]) toSet[k] = syncSaved[k];
+  if (Object.keys(toSet).length) await browser.storage.local.set(toSet);
+  // 無論 local 原本有沒有，sync 裡的一律清掉（避免之後又被同步回來）
+  await browser.storage.sync.remove(INSTAPAPER_LOCAL_KEYS);
+}
+
 // 一次性遷移(v1.9.14):Gemini 3.1 Flash Lite 從 preview 轉正式版,model ID 由
 // 'gemini-3.1-flash-lite-preview' 改成 'gemini-3.1-flash-lite'。掃使用者 saved
 // 設定裡所有可能存舊 ID 的欄位(geminiConfig.model / glossary.model / ytSubtitle.model /
@@ -940,6 +1035,16 @@ export const GEMINI_36_FLASH_OLD_ID = 'gemini-3.6-flash';
 export const GEMINI_36_FLASH_NEW_ID = 'gemini-3.7-flash';
 export async function migrateGemini36FlashModelIfNeeded(syncSaved) {
   return _migrateGeminiModelId(syncSaved, GEMINI_36_FLASH_OLD_ID, GEMINI_36_FLASH_NEW_ID);
+}
+
+// 一次性遷移(2026-09-03):gemini-3.7-flash 自模型清單下架,由新一代 gemini-3.8-flash
+// 接替(同促銷價 $0.75 / $3.75 至 2026 年底,2027-01-01 起 $1.50 / $7.50)。
+// 存了舊 ID 的使用者設定改寫成 3.8-flash,避免 dropdown 選不到 / pricing 查不到。
+// 與 35→36→37 遷移串聯:存極舊 ID 的設定逐段接力,最終都落在 3.8-flash。
+export const GEMINI_37_FLASH_OLD_ID = 'gemini-3.7-flash';
+export const GEMINI_37_FLASH_NEW_ID = 'gemini-3.8-flash';
+export async function migrateGemini37FlashModelIfNeeded(syncSaved) {
+  return _migrateGeminiModelId(syncSaved, GEMINI_37_FLASH_OLD_ID, GEMINI_37_FLASH_NEW_ID);
 }
 
 // 共用實作:掃 saved 設定裡所有可能存模型 ID 的欄位(geminiConfig.model /
@@ -1003,10 +1108,12 @@ function _bindSettingsCacheInvalidator() {
   // v1.10.46(批次 2-6):過濾掉與 settings 無關的 local 高頻寫入——翻譯期間 logger
   // persistLog(yt_debug_log)與 tc_* 快取 flush 都寫 storage.local,原本任何變動都
   // invalidate → cache 在翻譯熱路徑的實際命中率近零(v1.8.14 的初衷整個失效)。
-  // getSettings 的資料來源只有:sync 全部 key + local 的 apiKey / customProviderApiKey。
+  // getSettings 的資料來源只有:sync 全部 key + local 的 apiKey / customProviderApiKey +
+  // local 的大項設定（LOCAL_SETTINGS_KEYS，批次 6）。
   browser.storage.onChanged.addListener((changes, area) => {
     if (area !== 'sync' && !(area === 'local' && changes
-      && (API_KEY_STORAGE_KEY in changes || CUSTOM_PROVIDER_API_KEY in changes))) return;
+      && (API_KEY_STORAGE_KEY in changes || CUSTOM_PROVIDER_API_KEY in changes
+        || LOCAL_SETTINGS_KEYS.some((k) => k in changes)))) return;
     _settingsCachePromise = null;
   });
 }
@@ -1025,11 +1132,19 @@ export async function getSettingsCached() {
 export async function getSettings() {
   const saved = await browser.storage.sync.get(null);
   await migrateApiKeyIfNeeded(saved);
+  await migrateInstapaperTokenIfNeeded(saved);
   await migrateGeminiFlashLiteModelIfNeeded(saved);
   await migrateGemini35FlashModelIfNeeded(saved);
   await migrateGemini36FlashModelIfNeeded(saved);
-  // 從 local 讀 apiKey（v0.62 起的正規位置）
-  const { [API_KEY_STORAGE_KEY]: apiKey = '' } = await browser.storage.local.get(API_KEY_STORAGE_KEY);
+  await migrateGemini37FlashModelIfNeeded(saved);
+  // 大項設定（固定術語表 / 禁用詞）存 local：sync 殘留先搬過去，再以 local 為準（批次 6）
+  await migrateLargeKeysToLocalIfNeeded(saved);
+  // local 一次讀完：apiKey（v0.62 起的正規位置）+ customProvider apiKey + 大項設定
+  const localAll = await browser.storage.local.get([API_KEY_STORAGE_KEY, CUSTOM_PROVIDER_API_KEY, ...LOCAL_SETTINGS_KEYS]);
+  for (const k of LOCAL_SETTINGS_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(localAll, k)) saved[k] = localAll[k];
+  }
+  const apiKey = localAll[API_KEY_STORAGE_KEY] || '';
   // P1: 先決定 targetLanguage,後面 forbiddenTerms 預設依此分歧。
   // saved 不在合法集合(舊使用者沒此 key / 值損壞)→ navigator 推導。
   const target = (typeof saved.targetLanguage === 'string' && TARGET_LANGUAGES.includes(saved.targetLanguage))
@@ -1060,7 +1175,8 @@ export async function getSettings() {
     // 就完全以 saved 為準；未曾寫入時才套用預設清單。
     // P1: 未曾寫入時依 target 分歧——zh-TW 走 DEFAULT 清單(維持原行為),
     // zh-CN / en 走空陣列(那些 target 不需要禁用中國用語清單)。
-    forbiddenTerms: Array.isArray(saved.forbiddenTerms)
+    // 2026-09-06: saved 等於舊版預設快照(物化殘留)→ 視為未寫入，讓新增的預設條目生效。
+    forbiddenTerms: (Array.isArray(saved.forbiddenTerms) && !isLegacyDefaultForbiddenTerms(saved.forbiddenTerms))
       ? saved.forbiddenTerms
       : (target === 'zh-TW' ? DEFAULT_SETTINGS.forbiddenTerms : []),
     // v1.5.7: customProvider 深層 merge（保留新欄位預設值）
@@ -1070,9 +1186,8 @@ export async function getSettings() {
     translateDoc: { ...DEFAULT_SETTINGS.translateDoc, ...(saved.translateDoc || {}) },
   };
   merged.apiKey = apiKey;
-  // v1.5.7: 從 storage.local 讀 customProvider apiKey 注入
-  const { [CUSTOM_PROVIDER_API_KEY]: cpApiKey = '' } = await browser.storage.local.get(CUSTOM_PROVIDER_API_KEY);
-  merged.customProvider.apiKey = cpApiKey;
+  // v1.5.7: customProvider apiKey 也在 local（上面一次讀完）
+  merged.customProvider.apiKey = localAll[CUSTOM_PROVIDER_API_KEY] || '';
   return merged;
 }
 
@@ -1123,7 +1238,12 @@ export async function setSettings(patch) {
     rest.customProvider = cp;
   }
 
-  if (Object.keys(rest).length > 0) {
-    await browser.storage.sync.set(rest);
+  // 大項設定（固定術語表 / 禁用詞）走 local（批次 6）
+  const { syncPart, localPart } = splitSettingsPatch(rest);
+  if (Object.keys(localPart).length > 0) {
+    await browser.storage.local.set(localPart);
+  }
+  if (Object.keys(syncPart).length > 0) {
+    await browser.storage.sync.set(syncPart);
   }
 }

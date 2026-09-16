@@ -1,5 +1,5 @@
 // content-spa.js — Shinkansen SPA 導航支援 + Content Guard
-// 負責：SPA 導航偵測（History API 攔截 + URL 輪詢 + hashchange）、
+// 負責：SPA 導航偵測（URL 輪詢 + popstate / hashchange）、
 // MutationObserver 動態段落偵測、Content Guard 週期性修復。
 
 (function(SK) {
@@ -70,7 +70,8 @@
     let _spaStripped = 0;
     STATE.originalHTML.forEach((originalHTML, el) => {
       // AMO source review: originalHTML 來自本 extension 翻譯前自存的原始 DOM 字串,純還原用。
-      el.innerHTML = originalHTML;
+      // 2026-09-11 code review §3.1-2：innerHTML 沒動過的元素不重寫（同 content.js restore 守門）
+      if (el.innerHTML !== originalHTML) el.innerHTML = originalHTML;
       el.removeAttribute('data-shinkansen-translated');
       SK.restoreLocaleStyling?.(el);
       _spaStripped++;
@@ -102,7 +103,6 @@
     SK.restoreDocLang?.();  // v2.0.73:SPA 換頁後新內容是原文,<html lang> 還原原值
     // v2.0.85: Map 已全清,掃掉簿記追不到的無主殭屍 marker(與 restoreInjectedDom 同)
     SK.sweepOrphanTranslationMarkers?.();
-    STATE.cache.clear();
     STATE.translated = false;
     STATE._glossaryPromise = null;
     SK.safeSendMessage({ type: 'CLEAR_BADGE' }).catch(() => {});
@@ -179,6 +179,14 @@
     resetForSpaNavigation();
 
     await new Promise(r => setTimeout(r, SK.SPA_NAV_SETTLE_MS));
+    // 2026-09-11 code review §3.3-1：settle 期間又有新導航（站點 canonical URL 改寫、
+    // 連點兩篇文章）→ 本輪已 stale，交給較新的那輪續翻；否則本輪的 handleTranslatePreset
+    // 會先啟動翻譯，較新那輪進來看到 STATE.translating 把它 abort，兩輪互相取消
+    // → 最終沒翻。hash 路徑上方已有同款 guard，一般路徑補齊。
+    if (spaLastUrl !== newUrl) {
+      SK.sendLog('info', 'spa', 'SPA nav: superseded by newer navigation during settle, skipping', { staleUrl: newUrl, currentUrl: spaLastUrl });
+      return;
+    }
 
     if (wasSticky) {
       // v1.4.12: 上次若由 preset 快速鍵觸發就按同 slot 續翻，保留 engine+model；
@@ -227,32 +235,13 @@
     }
   }
 
-  // ─── History API 攔截 ─────────────────────────────────
-  // 防止 content script 重複執行時（例如 extension reload）產生雙層 patch，
-  // 導致 _origPushState 指向已被 patch 的版本，形成循環呼叫。
-
-  if (!history.pushState.__sk_patched) {
-    const _origPushState = history.pushState.bind(history);
-    const _origReplaceState = history.replaceState.bind(history);
-
-    history.pushState = function (...args) {
-      _origPushState(...args);
-      handleSpaNavigation();
-    };
-    // v1.8.20: replaceState 在 pathname 變動時也視為 SPA navigation。
-    // React Router shallow routing、Notion、Twitter/X 部分路徑用 replaceState 換內容,
-    // 原版只更新 spaLastUrl 不 reset → 新內容用舊 STATE 跑,新段落不會被翻。
-    // 純 query string / hash 變動(pathname 不變)維持只更 lastUrl 不 reset 的行為。
-    history.replaceState = function (...args) {
-      const oldPath = location.pathname;
-      _origReplaceState(...args);
-      spaLastUrl = location.href;
-      if (location.pathname !== oldPath) {
-        handleSpaNavigation();
-      }
-    };
-    history.pushState.__sk_patched = true;
-  }
+  // ─── History API：不 monkey-patch ─────────────────────
+  // 2026-09-12 批次 6（code review §5.3）移除原 history.pushState / replaceState 攔截：
+  // content script 跑在 isolated world，改寫的是 isolated world 自己的 history 方法，
+  // 頁面主世界（React Router / Next.js …）呼叫的 pushState 完全走不到這層——
+  // 真正偵測到 SPA 導航的一直是下方 URL 輪詢（500ms）+ popstate / hashchange；
+  // 且原 replaceState 分支先把 spaLastUrl 設成新 URL 再呼叫 handleSpaNavigation，
+  // 該函式開頭 `newUrl === spaLastUrl` 必早退，等於從未生效。
   window.addEventListener('popstate', () => handleSpaNavigation());
   window.addEventListener('hashchange', () => handleSpaNavigation());
 
@@ -271,10 +260,9 @@
       return;
     }
     // v1.6.10: 分頁隱藏時跳過 URL 輪詢——背景分頁不會由使用者觸發導航,
-    // pushState patch + popstate + hashchange 三條 listener 仍活躍,真正
-    // 主動觸發的 SPA 導航不會漏接。輪詢只是萬一上述 patch 沒套到的 safety
-    // net,在隱藏分頁完全無作用,純消耗 CPU。從 visible 切回時的 catch-up
-    // 由下方 visibilitychange listener 補一次。
+    // popstate / hashchange 兩條 listener 仍活躍。輪詢是 SPA pushState 導航的
+    // 主要偵測手段(主世界 pushState 不經 content script),在隱藏分頁完全無作用,
+    // 純消耗 CPU。從 visible 切回時的 catch-up 由下方 visibilitychange listener 補一次。
     if (document.hidden) return;
     if (location.href !== spaLastUrl) {
       if (STATE.translated && !STATE.stickyTranslate && document.querySelector('[data-shinkansen-translated]')) {
@@ -287,7 +275,7 @@
   }, SPA_URL_POLL_MS);
 
   // v1.6.10: 分頁從隱藏切回可見時補一次 URL 同步——萬一 hidden 期間頁面
-  // 透過 setTimeout 觸發 pushState 而 monkey-patch 因時序未生效（極端情境）,
+  // 透過 pushState 換了 URL(hidden 期間輪詢是跳過的),
   // 切回前景時這次 catch-up 會抓到 URL 變化並走 handleSpaNavigation。
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden && location.href !== spaLastUrl) {
@@ -668,7 +656,7 @@
         // reuse 注入的元素不在其中 → 按還原後殘留殭屍譯文段
         SK.snapshotOnce?.(unit.el);
         // AMO source review: savedHTML 來自 STATE.translatedHTMLByText(本 extension 自存
-        // 的 inject 後 innerHTML),無 user input 流入。see BUILD.md §innerHTML
+        // 的 inject 後 innerHTML),無 user input 流入。see BUILD-FIREFOX.md §innerHTML
         unit.el.innerHTML = savedHTML;
         unit.el.setAttribute('data-shinkansen-translated', '1');
         STATE.translatedHTML.set(unit.el, savedHTML);
@@ -771,7 +759,7 @@
         if (rect.bottom < -500 || rect.top > window.innerHeight + 500) continue;
       }
       // AMO source review: savedHTML 來自 STATE.translatedHTML(本 extension 自己用
-      // el.innerHTML 讀出來再存的譯後 DOM 字串),沒有 user input 流入。see BUILD.md §innerHTML
+      // el.innerHTML 讀出來再存的譯後 DOM 字串),沒有 user input 流入。see BUILD-FIREFOX.md §innerHTML
       el.innerHTML = savedHTML;
       restored++;
     }
@@ -1619,12 +1607,15 @@
   SK.refreshAncestorSavedHTML = function refreshAncestorSavedHTML(el) {
     if (!STATE.translatedHTML || STATE.translatedHTML.size === 0) return;
     if (!el || !el.parentNode) return;
+    // 2026-09-14 批次 7：原本每次呼叫掃整張 translatedHTML（O(N) 對每個 key 跑 contains），
+    // A7 注入每個 node 都呼叫一次 → O(N²)。「map 內包含 el 的 key」= el 的祖先中有進 map 的
+    // 那些，改沿 parentNode 鏈查 map（O(depth)）。contains 不跨 shadow boundary，parentNode
+    // 走到 ShadowRoot 後為 null，集合相同。
     const ancestors = [];
-    for (const ancestor of STATE.translatedHTML.keys()) {
-      if (ancestor === el) continue;
-      if (ancestor.contains && ancestor.contains(el)) {
-        ancestors.push(ancestor);
-      }
+    let a = el.parentNode;
+    while (a) {
+      if (STATE.translatedHTML.has(a)) ancestors.push(a);
+      a = a.parentNode;
     }
     for (const ancestor of ancestors) {
       STATE.translatedHTML.set(ancestor, ancestor.innerHTML);
@@ -1643,7 +1634,9 @@
    * @param {{ done: number, failedCount: number, pageUsage: { cacheHits?: number } | null, totalRequested: number, isTinyRescan?: boolean }} args
    * @returns {{ type: 'silent' } | { type: 'error', msg: string } | { type: 'success', msg: string }}
    */
-  function pickRescanToast({ done, failedCount, pageUsage, totalRequested, isTinyRescan }) {
+  // isConvert：本頁是簡繁本地轉換（STATE.translationContext.provider === 'opencc-local'），rescan 新內容
+  // 也是字典轉換而非 LLM——文案用 zhConvert* 系列，避免「翻譯新內容」讓使用者以為打了 API（2026-09-14）
+  function pickRescanToast({ done, failedCount, pageUsage, totalRequested, isTinyRescan, isConvert = false }) {
     if (failedCount > 0) {
       return { type: 'error', msg: SK.t('toast.rescanPartialFailed', { failed: failedCount, total: totalRequested }) };
     }
@@ -1659,7 +1652,7 @@
     // pageUsage.cacheHits === 0 才是真正「全新翻 N 段」場景,保留 success toast 通知。
     const hasAnyCacheHit = pageUsage && pageUsage.cacheHits > 0 && done > 0;
     if (hasAnyCacheHit) return { type: 'silent' };
-    return { type: 'success', msg: SK.t('toast.rescanDone', { done }) };
+    return { type: 'success', msg: isConvert ? SK.t('toast.zhConvertRescanDone', { done }) : SK.t('toast.rescanDone', { done }) };
   }
   SK._pickRescanToast = pickRescanToast;
 
@@ -1810,10 +1803,15 @@
     // 完全不彈 toast → silent timeout 8s 後悄悄收場,user 體感無干擾。
     let loadingShown = false;
     let watchdogTimer = null;
+    // 簡繁本地轉換頁的 rescan 用獨立文案（不使用 AI），見 pickRescanToast 註解
+    const isConvertRescan = STATE.translationContext?.provider === 'opencc-local';
+    const rescanProgressText = (d, t) => (isConvertRescan
+      ? SK.t('toast.zhConvertNew', { done: d, total: t })
+      : SK.t('toast.translateNew', { done: d, total: t }));
     const tryShowLoadingToast = (d, t) => {
       if (loadingShown || isTinyRescan) return;
       loadingShown = true;
-      SK.showToast('loading', SK.t('toast.translateNew', { done: d, total: t }), { progress: d / t, startTimer: true });
+      SK.showToast('loading', rescanProgressText(d, t), { progress: d / t, startTimer: true });
       // watchdog 在 loading toast 真的顯示後才 schedule(8s timeout 已足夠 cover,watchdog 30s 仍保留作極端 case 紀錄)
       watchdogTimer = setTimeout(() => {
         const diag = {
@@ -1849,7 +1847,7 @@
             tryShowLoadingToast(d, t);
             // toast 已 show 後持續 update progress
             if (loadingShown) {
-              SK.showToast('loading', SK.t('toast.translateNew', { done: d, total: t }), { progress: d / t });
+              SK.showToast('loading', rescanProgressText(d, t), { progress: d / t });
             }
           },
         }),
@@ -1861,7 +1859,7 @@
       if (done > 0) {
         SK.sendLog('info', 'spa', `SPA observer rescan #${spaObserverRescanCount} done`, { done, failures: failures.length });
         const failedCount = failures.length;
-        const decision = pickRescanToast({ done, failedCount, pageUsage, totalRequested: newUnits.length, isTinyRescan });
+        const decision = pickRescanToast({ done, failedCount, pageUsage, totalRequested: newUnits.length, isTinyRescan, isConvert: isConvertRescan });
         if (decision.type === 'silent') {
           // loading toast 從未顯示就直接 silent;只有當它已 fire 才需 hideToast
           if (loadingShown) SK.hideToast();

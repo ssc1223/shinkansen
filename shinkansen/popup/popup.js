@@ -184,7 +184,7 @@ async function refreshTranslateButton() {
 }
 
 async function refreshShortcutHint() {
-  // v1.4.13: popup 按鈕觸發 TOGGLE_TRANSLATE 訊息，content.js 將其映射為 preset slot 2（Flash）。
+  // v1.4.13: popup 按鈕觸發 TOGGLE_TRANSLATE 訊息，content.js 將其映射為 preset slot 2（Flash Lite，主要預設）。
   // 所以這裡讀「主要預設」的當前鍵位顯示。
   // v1.8.19: 主要預設 command id 改為 translate-preset-0（字典序保證 chrome://extensions/shortcuts 顯示在最上）
   const el = $('shortcut-hint');
@@ -400,8 +400,9 @@ async function init() {
 
   // 送到 Instapaper：只有「已啟用且已連結」才顯示按鈕
   try {
-    const { instapaperEnabled = false, instapaperToken } =
-      await browser.storage.sync.get(['instapaperEnabled', 'instapaperToken']);
+    const { instapaperEnabled = false } = await browser.storage.sync.get(['instapaperEnabled']);
+    // token 在 storage.local（2026-09-11 起，見 storage.js migrateInstapaperTokenIfNeeded）
+    const { instapaperToken } = await browser.storage.local.get(['instapaperToken']);
     $('send-to-instapaper-btn').hidden = !(instapaperEnabled === true && !!instapaperToken);
   } catch { /* 讀取失敗維持 hidden */ }
 
@@ -440,9 +441,14 @@ async function init() {
 
   // v1.8.12: 只有當 translatePresets 中有任一 slot 用 Gemini engine 時，才提醒未設 API Key。
   // 使用者若三組 preset 都改成 Google MT / 自訂模型，popup 不再嘮叨他沒填 Gemini Key。
+  // 沒 key 時狀態列本身就是入口：點一下直接開設定頁（新使用者第一眼就知道下一步做什麼）
+  statusEl.classList.remove('status-cta');
+  statusEl.onclick = null;
   if (!apiKey && presetsRequireGemini(translatePresets)) {
     statusEl.textContent = t('popup.status.noApiKey');
     statusEl.style.color = '#ff3b30';
+    statusEl.classList.add('status-cta');
+    statusEl.onclick = () => $('options-btn').click();
   }
 
   refreshCacheInfo();
@@ -463,7 +469,7 @@ $('translate-btn').addEventListener('click', async () => {
     if (!tab?.id) { btn.disabled = false; return; }
     const mode = btn.dataset.mode;
     statusEl.textContent = mode === 'restore' ? t('popup.status.restoring') : t('popup.status.translating');
-    // v1.6.6: 讀 settings.popupButtonSlot 決定按鈕對應的 preset slot（預設 2 = Flash）
+    // v1.6.6: 讀 settings.popupButtonSlot 決定按鈕對應的 preset slot（預設 2 = Flash Lite，主要預設）
     // content.js handleTranslatePreset 自帶 toggle 行為（已翻譯 → 還原 / 翻譯中 → abort / 閒置 → 翻譯）
     const { popupButtonSlot } = await browser.storage.sync.get('popupButtonSlot');
     const slot = pickPopupSlot(popupButtonSlot);
@@ -657,7 +663,7 @@ $('send-to-instapaper-btn').addEventListener('click', async () => {
     } catch (_) { /* 摘要失敗不擋送出 */ }
     statusEl.textContent = t('instapaper.sending');
     const { instapaperToken, instapaperTokenSecret } =
-      await browser.storage.sync.get(['instapaperToken', 'instapaperTokenSecret']);
+      await browser.storage.local.get(['instapaperToken', 'instapaperTokenSecret']);
     const payload = buildInstapaperPayload({ url: page.url, html: page.html, title: page.title, description });
     const r = await saveToInstapaper({ token: instapaperToken, tokenSecret: instapaperTokenSecret, payload });
     if (r.ok) {

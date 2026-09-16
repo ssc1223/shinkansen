@@ -23,11 +23,11 @@
   //   - tradCount > 0 且 simpCount == 0 → zh-Hant(肯定 TC)
   // 兩邊都命中或都沒命中 → 走既有比例邏輯(維持 v0.76 短文補字策略不破壞)。
   // 簡繁特徵字集:v1.9.15 起為人工 curated 清單,簡繁互轉功能 vendor OpenCC 字典後
-  // 改由 tools/generate-zh-char-sets.mjs 完備生成(curated 清單覆蓋有限,短標題只含
+  // 改由 tools/build/generate-zh-char-sets.mjs 完備生成(curated 清單覆蓋有限,短標題只含
   // 清單外簡體字時 simpCount=0 → ratio fallback 誤判 zh-Hant 被跳過)。
   // 生成判準(防簡繁共用字誤判)與再生方式見腳本檔頭;歧義字(干/后/里/台/据/几…
   // 繁體文本也用的字)一律排除,確保「繁體短文絕不誤判 zh-Hans」優先於簡體覆蓋率。
-  // ── GENERATED:ZH-CHAR-SETS BEGIN(tools/generate-zh-char-sets.mjs,勿手改)──
+  // ── GENERATED:ZH-CHAR-SETS BEGIN(tools/build/generate-zh-char-sets.mjs,勿手改)──
   // 簡體特徵字 2657+9 字 / 繁體特徵字 3134+19 字
   //(+N 為準特徵 tier:繁/簡對側語料出現 ≤ 3 次的極邊緣共用字,例 么),
   // 判準見生成腳本檔頭
@@ -115,6 +115,28 @@
   //     ——那種 ratio 趨近 0,該整句送 LLM 翻成中文,不是只轉那兩個詞),且變體
   //     特徵字單邊乾淨。下限 2 不是 4:「传感/MEMS」這類 2 字 CJK + 英文縮寫的
   //     分類標籤(ratio 0.33)是真實漏轉案例,ratio 門檻已足以擋英文長句
+  // convertOnly 整頁預檢（2026-09-14 批次 7）：isConvertibleVariant 對任一段回 true 的
+  // 必要條件——cn2twp 需 simpCount > 0（detectTextLang 判 zh-Hans 的三條分支與放寬分支
+  // 都要求簡體獨有字 ≥ 1）；twp2cn 需 cjkCount ≥ 1（detectTextLang 對「CJK 佔比 ≥ 0.5
+  // 且無變體特徵字」預設回 zh-Hant，故只能以「有 CJK 字」為界）。整頁文字取 body.textContent
+  // + 每個 open shadow root 的 textContent（偵測層會進 shadow root），是段落 innerText /
+  // text node 的超集。用原生 regex 掃，長頁 (300K 字) 約 1ms。
+  const _SIMP_ONLY_RE = new RegExp('[' + Array.from(SIMPLIFIED_ONLY_CHARS).join('') + ']', 'u');
+  const _ANY_CJK_RE = /[\u3400-\u4DBF\u4E00-\u9FFF]/u;
+  SK.pageHasConvertibleSignal = function pageHasConvertibleSignal(direction, root) {
+    if (direction !== 'cn2twp' && direction !== 'twp2cn') return false;
+    const re = direction === 'cn2twp' ? _SIMP_ONLY_RE : _ANY_CJK_RE;
+    const scope = root || document.body;
+    if (!scope) return false;
+    if (re.test(scope.textContent || '')) return true;
+    if (typeof SK.findOpenShadowRoots === 'function') {
+      for (const sr of SK.findOpenShadowRoots(scope)) {
+        if (re.test(sr.textContent || '')) return true;
+      }
+    }
+    return false;
+  };
+
   SK.isConvertibleVariant = function isConvertibleVariant(text, direction) {
     if (direction !== 'cn2twp' && direction !== 'twp2cn') return false;
     const wantLang = direction === 'cn2twp' ? 'zh-Hans' : 'zh-Hant';
@@ -295,7 +317,7 @@
   // 都通用)，不依賴任何站點 class / id，符合硬規則 §6 / §8。
   // 兩條都成立才 reject——只 monospace 沒 pre 可能是 inline `<code>` 風格的小品味，
   // 一般文章正文不會兩條同時成立。
-  const _MONOSPACE_FONT_RE = /(?:^|[\s,'"])(monospace|Menlo|Consolas|Monaco|Courier|Fira(?:\s+Code|\s+Mono)?|Source\s+Code|JetBrains|Cascadia|Roboto\s+Mono|SFMono|SF\s+Mono|ui-monospace)(?:[\s,'"]|$)/i;
+  const _MONOSPACE_FONT_RE = /(?:^|[\s,'"])(monospace|Menlo|Consolas|Monaco|Courier|Fira\s+(?:Code|Mono)|Source\s+Code|JetBrains\s+Mono|Cascadia|Roboto\s+Mono|SFMono|SF\s+Mono|ui-monospace)(?:[\s,'"]|$)/i;
 
   // 自然語言 inline 元素：出現在 <pre> 內表示是引用文字（Medium 留言等)，不是 code。
   const PROSE_INLINE_TAGS = new Set(['A', 'EM', 'STRONG', 'I', 'B', 'CITE', 'Q', 'MARK', 'SMALL', 'INS', 'DEL', 'U']);
@@ -377,10 +399,9 @@
     if (!el || el.nodeType !== 1) return false;
     // <pre> 有專屬規則（pre+code→skip,pre 單獨→當文字段落，例如 Medium 留言),
     // 不能被結構性 monospace 規則覆蓋。<pre> 的 UA 預設 white-space:pre + monospace
-    // 字型剛好命中下面條件，但其語意應由 acceptNode 內 PRE+code 路徑（content-detect.js
-    // 第 ~265 行）決定，不在此處判斷。
+    // 字型剛好命中下面條件，但其語意應由 acceptNode 內 PRE+code 路徑決定，不在此處判斷。
     if (el.tagName === 'PRE') return false;
-    const cs = window.getComputedStyle(el);
+    const cs = SK.getCS(el);
     if (!cs) return false;
     const ws = cs.whiteSpace || '';
     if (ws !== 'pre' && ws !== 'pre-wrap' && ws !== 'break-spaces') return false;
@@ -393,20 +414,62 @@
   // 重複呼叫，實測同一個祖先鏈會被走過數百次。Map<el, bool> 把每個祖先
   // 第一次計算後的結果記下，後續任何後代命中即 O(1) 短路。memo 為純函式
   // 結果緩存（DOM 在單次 collectParagraphs 內不變動），語意完全等價。
-  function isInsideExcludedContainer(el, memo) {
+  // v2.4.13: 「文件級」notranslate 宣告不採信。SPA 常把 notranslate / translate="no"
+  // 掛在 app root（<div id="app" class="notranslate">）以避開 Google Translate 改 DOM
+  // 造成的 framework 崩潰，這不是「內容不可翻」的意思；採信會讓整站翻不到。
+  // 判準：被標記的容器文字量佔 body 一半以上 = 文件級 wrapper。葉節點 / 小容器
+  //（人名 span、icon、一小段 notranslate 區塊）不會達標，照常排除。
+  // body 文字長度快取 1 秒：同一輪 collectParagraphs 內多個標記容器共用，不重算。
+  let _bodyTextLenCache = { t: 0, len: 0 };
+  function isDocumentLevelNoTranslate(el) {
+    if (!el.children || el.children.length === 0) return false;
+    const now = Date.now();
+    if (now - _bodyTextLenCache.t > 1000) {
+      _bodyTextLenCache = { t: now, len: (document.body?.textContent || '').length };
+    }
+    const bodyLen = _bodyTextLenCache.len;
+    if (bodyLen === 0) return false;
+    return (el.textContent || '').length * 2 >= bodyLen;
+  }
+
+  // stopAt（可選，exclusive）：只檢查 el 到 stopAt 之間的祖先。grid-cell 補抓 pass 用——
+  // 該 pass 存在的前提就是 table[role="grid"] 已在 EXCLUDE_ROLES 內，走到 body 一定 true；
+  // 以 td 的父層為界只驗 cell 內部的排除訊號。帶 stopAt 時 caller 必須用獨立 memo
+  //（同一節點的有界 / 無界結論不同，不可共用快取）。
+  function isInsideExcludedContainer(el, memo, stopAt) {
     if (memo && memo.has(el)) return memo.get(el);
 
     const visited = [];
     let cur = el;
     let result = false;
-    while (cur && cur !== document.body) {
-      if (memo && memo.has(cur)) {
+    // v2.4.13: translate="yes" 依 HTML 規範可在 translate="no" 祖先內重新開放翻譯。
+    // 走到 yes 之後，更上層的 no 標記不再採信；yesIdx 記下 yes 元素在 visited 的
+    // 位置，memo 只快取 yes 元素（含）以下的節點——yes 以上的祖先對「不在 yes 內
+    // 的其他後代」結論不同，不能拿這條路徑的結果去快取
+    let yesIdx = -1;
+    while (cur && cur !== document.body && cur !== stopAt) {
+      // 走過 translate="yes" 之後不讀 memo:祖先的快取值可能來自「沒有 yes 的其他後代」
+      // 走到 translate="no" 容器的結論,對本路徑不成立
+      if (memo && yesIdx < 0 && memo.has(cur)) {
         result = memo.get(cur);
         break;
       }
       visited.push(cur);
 
       const tag = cur.tagName;
+      // v2.4.13: 頁面作者明確宣告的「不翻譯」訊號（translate="no" / notranslate）
+      // 與 icon 字型 ligature（只看 el 自身：computed font-family 已含祖先繼承，
+      // 祖先層再查是重複成本）。判斷本體在 content-ns.js SK.isNoTranslateMarked /
+      // SK.isIconFontLigature，與序列化層 isAtomicPreserve 共用。
+      {
+        const _tr = cur.getAttribute && cur.getAttribute('translate');
+        if (_tr != null && _tr.trim().toLowerCase() === 'yes') {
+          if (yesIdx < 0) yesIdx = visited.length - 1;
+        } else if (yesIdx < 0 && SK.isNoTranslateMarked(cur) && !isDocumentLevelNoTranslate(cur)) {
+          result = true; break;
+        }
+        if (cur === el && SK.isIconFontLigature(cur)) { result = true; break; }
+      }
       if (tag === 'FOOTER' && isContentFooter(cur)) {
         cur = cur.parentElement;
         continue;
@@ -448,12 +511,18 @@
     }
 
     if (memo) {
-      for (const v of visited) memo.set(v, result);
+      const cacheUpTo = yesIdx >= 0 ? yesIdx + 1 : visited.length;
+      for (let i = 0; i < cacheUpTo; i++) memo.set(visited[i], result);
     }
     return result;
   }
 
   function isInteractiveWidgetContainer(el) {
+    // 2026-09-14 批次 7：「直接文字 >= 100 字 = prose 主體」這條早退（原本排在
+    // button 掃描之後）結論與 button 數量無關——命中時無論後面算出什麼都回 false，
+    // 提到最前讓 querySelectorAll + 祖先 walk 只在真的可能是 widget 的 block 上跑。
+    // 判斷本身見下方 prose 段落註腳按鈕註解。
+    if (directTextLength(el) >= 100) return false;
     const buttons = el.querySelectorAll('button, [role="button"]');
     if (buttons.length === 0) return false;
     // 程式碼區塊複製按鈕（GitHub `<clipboard-copy>` / 通用「button 跟 <pre> 同
@@ -509,8 +578,7 @@
     // 直接文字 >= 100 字 = prose 主體、按鈕只是內嵌註記 → 放行(序列化端 BUTTON 走
     // PRESERVE / reuse-node 佔位符，譯文注入後原按鈕 DOM 與事件監聽保留)。
     // 100 字門檻刻意高於 Case 系列的 20 字：短文字 + 按鈕的容器(toast / Follow 卡)
-    // 維持 widget 跳過的既有行為。
-    if (directTextLength(el) >= 100) return false;
+    // 維持 widget 跳過的既有行為。（判斷已提到函式開頭，見上方）
     // v1.6.9: 此處刻意保留 innerText（不改 textContent）。語意上「>=300 字
     // 視為非 widget」要的是「使用者實際看得到的字數」，改成 textContent 會把
     // 隱藏 modal/menu/dropdown 的字也算進來，可能讓本應被視為 widget 的元件
@@ -778,8 +846,27 @@
   // ─── collectParagraphs ────────────────────────────────
 
   SK.collectParagraphs = function collectParagraphs(root, stats, opts) {
+    // 2026-09-14 批次 7：整輪偵測共用 computed style 快取（SK.getCS，見 content-ns.js）。
+    // 偵測期間不改 DOM，live 宣告物件讀值與逐次 getComputedStyle 完全相同。
+    SK.beginStyleMemo();
+    try {
+      return _collectParagraphsImpl(root, stats, opts);
+    } finally {
+      SK.endStyleMemo();
+    }
+  };
+  function _collectParagraphsImpl(root, stats, opts) {
     root = root || document.body;
     stats = stats || null;
+    // 2026-09-14 批次 7：open shadow root 清單一輪只走一次（原本殭屍 marker reconcile
+    // 與 shadow descent 各走一遍整棵樹）
+    let _shadowRootsCache = null;
+    const _getShadowRoots = () => {
+      if (_shadowRootsCache === null) {
+        _shadowRootsCache = (typeof SK.findOpenShadowRoots === 'function') ? SK.findOpenShadowRoots(root) : [];
+      }
+      return _shadowRootsCache;
+    };
     // 批次 8 A7:opts.includeRoot——scoped rescan(SPA 對「已翻譯容器內晚載節點」
     // 以該節點為 root 補收)需要 root 自身也進候選:TreeWalker 依 spec 不對 root 跑
     // filter,晚載節點本身就是段落(如 <p>)時 scoped collect 會收 0。
@@ -832,9 +919,7 @@
         // open shadow root 內的元素同樣會被 framework 重用(下方 processScope 明確
         // 收集 shadow 內容),querySelectorAll 不穿 shadow boundary → 各 shadow root
         // 各跑一次,否則 shadow 內殭屍 marker 永不清、內容永遠停在原文(review A6)
-        if (typeof SK.findOpenShadowRoots === 'function') {
-          for (const _sr of SK.findOpenShadowRoots(root)) _reconcileScope(_sr);
-        }
+        for (const _sr of _getShadowRoots()) _reconcileScope(_sr);
         if (_staleCount > 0) {
           SK.sendLog?.('info', 'detect', 'stale conversion markers reconciled (framework-reused elements unmarked)', { count: _staleCount });
           if (stats) stats.staleMarkerReconciled = _staleCount;
@@ -986,15 +1071,36 @@
         // 一條極薄的視覺分隔線。FILTER_SKIP 不收為 unit、但允許 walker 進子節點
         //(防誤殺「父 font-size:0 消 inline-block whitespace gap、子各自設字級」的
         // 合法用法)。
+        // 2026-09-14 批次 7：非 block 元素若「無直接文字（>= 2 字的 text node）且直接
+        // 子元素 < 3」，下方 Case A–F 沒有一條能成立（A / C / D / E 要 hasDirectText、
+        // B 的 directTextLength >= 20 蘊含直接文字、F 要 >= 3 個直接子）——結局必是
+        // FILTER_SKIP 且不收任何單元。這類元素（A / SPAN / EM 等 inline wrapper）佔長頁
+        // 元素大宗，在這裡直接 SKIP，省掉 font-size:0 守門的 getComputedStyle、
+        // isVisible 與 isInsideExcludedContainer 三段成本。font-size:0 在這條路徑上
+        // 本來也是 SKIP（只差 stats 計數歸類：fontSizeZero → notBlockTag），單元集合不變。
+        const _isBlockTag = SK.BLOCK_TAGS_SET.has(el.tagName);
+        let hasDirectText = false;
+        if (!_isBlockTag) {
+          for (const child of el.childNodes) {
+            if (child.nodeType === Node.TEXT_NODE && child.nodeValue.trim().length >= 2) {
+              hasDirectText = true;
+              break;
+            }
+          }
+          if (!hasDirectText && el.children.length < 3) {
+            if (stats) stats.notBlockTag = (stats.notBlockTag || 0) + 1;
+            return NodeFilter.FILTER_SKIP;
+          }
+        }
         {
-          const _cs = el.ownerDocument?.defaultView?.getComputedStyle?.(el);
+          const _cs = SK.getCS(el);
           if (_cs && _cs.fontSize === '0px') {
             if (stats) stats.fontSizeZero = (stats.fontSizeZero || 0) + 1;
             return NodeFilter.FILTER_SKIP;
           }
         }
         // v1.1.9: 統一使用 BLOCK_TAGS_SET.has() 取代舊版 BLOCK_TAGS.includes()
-        if (!SK.BLOCK_TAGS_SET.has(el.tagName)) {
+        if (!_isBlockTag) {
           if (stats) stats.notBlockTag = (stats.notBlockTag || 0) + 1;
           // v1.4.7 / v1.4.9: 非 block-tag 容器（DIV、SECTION 等）的補抓邏輯。
           // 典型案例：XenForo <div class="bbWrapper">
@@ -1006,13 +1112,7 @@
           // 內容照收照翻純燒 token。block 路徑的 isVisible REJECT 只擋得住 block 元素
           // 自身隱藏，擋不住非 block 隱藏容器直接成 unit。
           if (!fragmentExtracted.has(el) && SK.isVisible(el) && !isInsideExcludedContainer(el, excludedMemo)) {
-            let hasDirectText = false;
-            for (const child of el.childNodes) {
-              if (child.nodeType === Node.TEXT_NODE && child.nodeValue.trim().length >= 2) {
-                hasDirectText = true;
-                break;
-              }
-            }
+            // hasDirectText 已在上方 gate 算好
             if (hasDirectText && SK.containsBlockDescendant(el)) {
               // Case A (v1.4.7)：有 block 子孫 → 抽 inline fragment
               const frags = extractInlineFragments(el);
@@ -1221,8 +1321,7 @@
               !seen.has(el) &&
               !fragmentExtracted.has(el) &&
               (() => {
-                const win = el.ownerDocument?.defaultView;
-                const selfCs = win?.getComputedStyle?.(el);
+                const selfCs = SK.getCS(el);
                 const selfDsp = selfCs?.display;
                 if (selfDsp !== 'block' && selfDsp !== 'flex' && selfDsp !== 'grid'
                     && selfDsp !== 'list-item') return false;
@@ -1230,7 +1329,7 @@
                 if (directChildren.length < 3) return false;
                 let wrapperChildCount = 0;
                 for (const c of directChildren) {
-                  const dcs = win?.getComputedStyle?.(c);
+                  const dcs = SK.getCS(c);
                   const dsp = dcs?.display;
                   if (dsp !== 'inline' && dsp !== 'inline-block' && dsp !== 'inline-flex') {
                     return false;
@@ -1253,6 +1352,10 @@
                 if (text.length < 2) continue;
                 if (!SK.isVisible(leaf)) continue;
                 if (!isCandidateText(leaf)) continue;
+                // v2.4.13: leaf 自身或 el 以下的中間層可能帶 translate="no" / notranslate
+                //(Google Chat DM 列表的人名 leaf SPAN),容器層檢查蓋不到,leaf 要各自查
+                //(memo 讓祖先鏈 O(1) 短路)
+                if (isInsideExcludedContainer(leaf, excludedMemo)) continue;
                 results.push({ kind: 'element', el: leaf });
                 seen.add(leaf);
               }
@@ -1346,7 +1449,23 @@
             SK.CONTAINER_TAGS.has(c.tagName));
           if (containerKids.length > 0) {
             let capturedLinks = 0;
+            let deferredProseContainer = false;
             for (const container of containerKids) {
+              // 2026-09-14（code review §8 fixture 實跑證實雙收）：容器自己有段落級直接
+              // 文字（達 Case C 門檻）且含 <a> = 散文連結容器，不是純連結清單。此處若單獨
+              // 把它的 <a> 收成 element unit，walker FILTER_SKIP 後仍會下到該容器走 Case C
+              // 抽整段 fragment（含同一 <a>）→ 同段連結送兩次、element 注入與 fragment 注入
+              // 互踩。散文連結容器一律讓給 Case C 一次原地收齊（fragment 保留 <a> 佔位符，
+              // 符合 §15 原地注入），本 block 仍 FILTER_SKIP 讓 walker 下去。
+              // 只有「散文 + 有 <a>」才 defer：純連結清單容器（直接文字趨近 0）照舊單獨收
+              // <a>；沒有 <a> 的散文 / 非散文容器（例：注入的廣告 DIV）不 defer、不強制
+              // SKIP 本 block——否則含 inline DIV 但沒連結的散文段（eet-china 廣告注入）
+              // 會被誤 SKIP、整段 prose 沒人收（detect-lang-bidirectional 斷言 5）。
+              const _containerHasLink = Array.from(container.children).some(c => c.tagName === 'A');
+              if (_containerHasLink && directTextLength(container) >= (_foreignPage ? 2 : 20)) {
+                deferredProseContainer = true;
+                continue;
+              }
               for (const child of Array.from(container.children)) {
                 if (child.tagName !== 'A') continue;
                 if (seen.has(child)) continue;
@@ -1359,9 +1478,14 @@
                 if (stats) stats.blockContainerLink = (stats.blockContainerLink || 0) + 1;
               }
             }
-            if (capturedLinks > 0) {
-              fragmentExtracted.add(el);
-              if (SK.BLOCK_TAGS_SET.has(el.tagName)) structurallySkippedBlocks.add(el);
+            // 捕捉到連結，或有散文容器要讓給 Case C，都 FILTER_SKIP：讓 walker 下到子容器
+            //（Case C 原地抽散文 fragment），本 block 自己不整顆 clean-slate。deferred 但沒
+            // 捕捉到任何連結時不標 fragmentExtracted（沒抽走任何東西），僅靠 SKIP 遞迴。
+            if (capturedLinks > 0 || deferredProseContainer) {
+              if (capturedLinks > 0) {
+                fragmentExtracted.add(el);
+                if (SK.BLOCK_TAGS_SET.has(el.tagName)) structurallySkippedBlocks.add(el);
+              }
               if (stats) stats.skipBlockWithContainer = (stats.skipBlockWithContainer || 0) + 1;
               return NodeFilter.FILTER_SKIP;
             }
@@ -1555,6 +1679,8 @@
         const lt = (leaf.textContent || '').trim();
         if (lt.length < 2) continue;
         if (!SK.isVisible(leaf)) continue;
+        // v2.4.13: leaf 自身的 translate="no" / notranslate / icon ligature 要各自查
+        if (isInsideExcludedContainer(leaf, excludedMemo)) continue;
         results.push({ kind: 'element', el: leaf });
         seen.add(leaf);
         leaf.querySelectorAll('span').forEach(s => seen.add(s));
@@ -1580,6 +1706,8 @@
         if (txt.length < _sbThreshold) return;
         if (!SK.isVisible(leaf)) return;
         if (!isCandidateText(leaf)) return;
+        // v2.4.13: 同 Case F leaf 補抓——leaf 自身 / 中間層的 translate="no" 要各自查
+        if (isInsideExcludedContainer(leaf, excludedMemo)) return;
         results.push({ kind: 'element', el: leaf });
         seen.add(leaf);
         if (stats) stats.shortBlockLeaf = (stats.shortBlockLeaf || 0) + 1;
@@ -1639,8 +1767,7 @@
       // 對主推文(已被 walker Case F 處理過)無影響:line 962 的
       // fragmentExtracted.has(el) early return 已先擋掉。
       if (!fragmentExtracted.has(el)) {
-        const win = el.ownerDocument?.defaultView;
-        const selfCs = win?.getComputedStyle?.(el);
+        const selfCs = SK.getCS(el);
         const selfDsp = selfCs?.display;
         const isBlockDisplay = selfDsp === 'block' || selfDsp === 'flow-root' ||
                                selfDsp === 'flex' || selfDsp === 'grid' ||
@@ -1661,6 +1788,8 @@
               if (leaf.hasAttribute('data-shinkansen-translated')) continue;
               if (!SK.isVisible(leaf)) continue;
               if (!isCandidateText(leaf)) continue;
+              // v2.4.13: leaf 自身的 translate="no" / notranslate / icon ligature 要各自查
+              if (isInsideExcludedContainer(leaf, excludedMemo)) continue;
               results.push({ kind: 'element', el: leaf });
               seen.add(leaf);
             }
@@ -1811,8 +1940,8 @@
             _cur = _cur.parentElement;
           }
         } else {
-          const cs = getComputedStyle(d);
-          const fs = parseFloat(cs.fontSize) || 0;
+          const cs = SK.getCS(d);
+          const fs = parseFloat(cs?.fontSize) || 0;
           const disp = cs.display;
           const isBlockDisplay = disp === 'block' || disp === 'flex' ||
                                  disp === 'grid' || disp === 'list-item';
@@ -1825,6 +1954,9 @@
     });
 
     // v1.0.22: grid cell leaf text 補抓
+    // 2026-09-11：有界排除檢查用獨立 memo（以 td 父層為界，結論與 excludedMemo 的全程
+    // 結論不同，不可共用）
+    const gridExcludedMemo = new Map();
     scopeRoot.querySelectorAll('table[role="grid"] td').forEach(td => {
       // v1.6.9: textContent 取代 innerText
       const tdText = (td.textContent || '').trim();
@@ -1834,6 +1966,11 @@
       td.querySelectorAll('*').forEach(el => {
         if (seen.has(el)) return;
         if (el.hasAttribute('data-shinkansen-translated')) return;
+        // 2026-09-11 code review §3.2-2：本 pass 用 querySelectorAll 繞過 TreeWalker，
+        // 之前完全沒走 isInsideExcludedContainer——grid 內的 translate="no" / notranslate /
+        // dual wrapper / contenteditable / code 容器全部失效（上方 leaf DIV / anchor 補抓
+        // 路徑都有擋，此處對齊）。以 td 父層為界：grid 本身在 EXCLUDE_ROLES，無界必 true。
+        if (isInsideExcludedContainer(el, gridExcludedMemo, td.parentElement)) return;
 
         for (const child of el.children) {
           if ((child.textContent || '').trim().length >= 15) return;
@@ -1859,12 +1996,9 @@
     // 一次 processScope。host 端 ancestor exclude(footer / role=contentinfo 等)在
     // shadow boundary 自然斷掉(parentElement 走到 shadowRoot 時為 null)— 這對 web
     // component 的隔離語意是預期行為,shadow content 自身結構若含 EXCLUDE_ROLES 仍會被擋。
-    if (typeof SK.findOpenShadowRoots === 'function') {
-      const shadowRoots = SK.findOpenShadowRoots(root);
-      for (const sr of shadowRoots) {
-        if (stats) stats.shadowRootsScanned = (stats.shadowRootsScanned || 0) + 1;
-        processScope(sr);
-      }
+    for (const sr of _getShadowRoots()) {
+      if (stats) stats.shadowRootsScanned = (stats.shadowRootsScanned || 0) + 1;
+      processScope(sr);
     }
 
     return results;

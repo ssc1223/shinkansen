@@ -2,7 +2,7 @@
 //
 // 職責：
 //   1. 從版面 IR 收集所有「送翻譯」類 block(SPEC §17.4.4)
-//   2. 切 chunk(預設 CHUNK_SIZE = 20，跟 content.js 對齊)
+//   2. 切 chunk(DOC_CHUNK_SIZE = 20；使用者可在文件翻譯設定調每批段數)
 //   3. 逐 chunk 透過 chrome.runtime.sendMessage 送 background 的文件翻譯 handler
 //      (Gemini = TRANSLATE_DOC_BATCH / custom provider = TRANSLATE_DOC_BATCH_CUSTOM)
 //   4. 結果寫回 IR(每 block.translation / .translationStatus / .translationError)
@@ -10,8 +10,7 @@
 //
 // 不在這裡：
 //   - preset 選擇(由 caller 傳入 modelOverride)
-//   - cache key blockType / fontSize 桶位(W3-iter2)
-//   - 段落級 retry UI(W5)
+//   - 段落級 retry UI(reader.js / index.js)
 
 import { TRANSLATABLE_TYPES } from './block-types.js';
 import { normalizeNameSeparators } from './epub-engine.js';
@@ -68,12 +67,15 @@ export async function clearTcCacheForTexts(texts) {
  *
  * @param {LayoutDoc} doc
  * @param {number}    maxChars
+ * @param {(page) => boolean} [pageFilter] — 只從回 true 的頁取樣（PDF 翻譯頁數範圍）
  * @returns {string[]} parts — caller 自行 join('\n')
  */
-export function collectGlossaryInputParts(doc, maxChars) {
+export function collectGlossaryInputParts(doc, maxChars, pageFilter = null) {
   const parts = [];
   let acc = 0;
   for (const page of doc.pages) {
+    // pageFilter：PDF 翻譯頁數範圍（index.js pageInCurrentRange）。省略 = 全份取樣
+    if (pageFilter && !pageFilter(page)) continue;
     for (const b of page.blocks) {
       if (!TRANSLATABLE_TYPES.has(b.type)) continue;
       const t = b.plainText && b.plainText.trim();
@@ -149,6 +151,7 @@ export async function translateDocument(doc, options = {}) {
       if (TRANSLATABLE_TYPES.has(block.type) && block.plainText && block.plainText.trim().length > 0) {
         if (blockFilter && !blockFilter(block, page)) continue;
         queue.push(block);
+        snapshotDoneBlock(block);
         block.translationStatus = 'pending';
         block.translation = null;
         block.translationError = null;
@@ -194,12 +197,27 @@ export async function translateDocument(doc, options = {}) {
 
   const markBlocksFailed = (blocks, msg) => {
     blocks.forEach((b) => {
+      // 重翻失敗：已有譯文的 block 還原上一版（含手動編輯），不讓一次失敗把
+      // 使用者已付費 / 已編輯的成果從 session 抹掉。translationError 仍記下、
+      // failedBlocks 仍計數——摘要看得到「這批重翻沒成功」
+      if (restoreDoneBlock(b)) {
+        b.translationError = msg;
+        return;
+      }
       b.translationStatus = 'failed';
       b.translationError = msg;
     });
     failedBlocks += blocks.length;
     translatedBlocks += blocks.length;
     emit();
+  };
+
+  const markBlocksCancelled = (blocks) => {
+    blocks.forEach((b) => {
+      // 取消：已有譯文的 block 原樣還原（狀態 / 譯文 / 編輯都回到翻譯前）
+      if (restoreDoneBlock(b)) return;
+      b.translationStatus = 'cancelled';
+    });
   };
 
   const applyBlockResults = (blocks, result) => {
@@ -222,6 +240,7 @@ export async function translateDocument(doc, options = {}) {
           b.translation = stripPlaceholderTokens(norm);
           b.editedHtml = null; // 重翻覆蓋預覽頁的手動編輯（UI 有提示）
           b.translationStatus = 'done';
+          delete b._skPrevDone; // 新譯文落地，翻譯前快照不再需要
           translatedBlocks++;
           continue;
         }
@@ -233,6 +252,11 @@ export async function translateDocument(doc, options = {}) {
         b.translationSegments = parsed.segments;
         b.translation = parsed.plainText;
         b.translationStatus = 'done';
+        delete b._skPrevDone;
+      } else if (restoreDoneBlock(b)) {
+        // 空譯文 = 這段重翻失敗：還原上一版譯文（同 markBlocksFailed 語意）
+        b.translationError = 'empty translation';
+        failedBlocks++;
       } else {
         b.translation = null;
         b.translationSegments = null;
@@ -263,7 +287,7 @@ export async function translateDocument(doc, options = {}) {
   // 長度 1 不可再切)→ 語言驗證 → 寫回。遞迴上限 log2(chunkSize) ≤ 7
   async function translateSubChunk(blocks, depth) {
     if (signal?.aborted) {
-      blocks.forEach((b) => { b.translationStatus = 'cancelled'; });
+      markBlocksCancelled(blocks);
       emit();
       return;
     }
@@ -314,6 +338,13 @@ export async function translateDocument(doc, options = {}) {
     if (detectDocBatchLangMismatch(response.result, targetLanguage)) {
       console.warn('[Shinkansen] chunk output language mismatch, retrying once', { size: blocks.length, targetLanguage });
       await clearTcCacheForTexts(texts);
+      // 使用者已按取消：不再多打一次（一批最多 100 段的付費請求）。錯譯快取已清，
+      // 這批回到取消狀態（有舊譯文的還原），下次翻譯直接重打 API
+      if (signal?.aborted) {
+        markBlocksCancelled(blocks);
+        emit();
+        return;
+      }
       let retryResp = null;
       try {
         retryResp = await chrome.runtime.sendMessage({ type: messageType, payload });
@@ -351,10 +382,8 @@ export async function translateDocument(doc, options = {}) {
   // 2) 切 chunk 逐批送
   for (let start = 0; start < queue.length; start += chunkSize) {
     if (signal?.aborted) {
-      // 標 cancelled，剩下 block 保留 pending(UI 顯示原文)
-      for (let j = start; j < queue.length; j++) {
-        queue[j].translationStatus = 'cancelled';
-      }
+      // 標 cancelled，剩下 block 保留 pending(UI 顯示原文)；翻譯前已 done 的還原
+      markBlocksCancelled(queue.slice(start));
       break;
     }
     await translateSubChunk(queue.slice(start, start + chunkSize), 0);
@@ -518,16 +547,8 @@ export async function translateSingleBlock(block, options = {}) {
     ? alignTrailingPeriodWithSource(block.plainText, repairDocLlmArtifacts(response.result[0]))
     : response.result[0];
   if (typeof tr === 'string' && tr.length > 0) {
-    // EPUB block：同 translateDocument 的 epub 分支
-    if (block.epubSerializedText != null) {
-      const norm = normalizeNameSeparators(tr);
-      block.translationRaw = norm;
-      block.translation = stripPlaceholderTokens(norm);
-      block.editedHtml = null; // 重翻覆蓋預覽頁的手動編輯
-      block.translationStatus = 'done';
-      block.translationError = null;
-      return { ok: true };
-    }
+    // 只有 PDF reader（reader.js）走這條逐段重翻；EPUB / 文件檔的續翻走 translateDocument
+    //（2026-09-12 批次 6 移除這裡從未被呼叫的 epub 分支）
     const parsed = parseMarkedTranslation(tr, block.linkUrls || []);
     block.translationSegments = parsed.segments;
     block.translation = parsed.plainText;
@@ -678,6 +699,37 @@ export function alignTrailingPeriodWithSource(source, target) {
 // 反序列化重建走 epub-writer 的 SK.deserializeWithPlaceholders，不用這個。
 // v2.0.53:先修畸形標記再掃——否則 ⟦/2» 這種壞 token 只會被「殘留括號」清理
 // 削掉 ⟦,留下「/2»」碎片洩漏到預覽 / session plain
+// ─── 翻譯前快照 / 還原（code review 2026-09-11 §3.8-2）────────────────
+// translateDocument 進場先把每個排入 queue 的 block 重設成 pending，取消 / 批次
+// 失敗時這些 block 停在 cancelled / failed → session 存檔把它們視為「不再 done」
+// 從 IndexedDB 刪掉（含使用者手動編輯的 editedHtml）。改成：重設前對已 done 的
+// block 存一份快照掛在 `_skPrevDone`（不進 session 序列化欄位），失敗 / 取消時
+// 整份還原；新譯文成功落地才丟快照。persistEpubSession 對帶快照的 pending block
+// 也視為「仍有已落地譯文」不刪紀錄，翻譯途中關頁重開也拿得回舊譯文。
+export function snapshotDoneBlock(block) {
+  if (!block || block.translationStatus !== 'done') return false;
+  block._skPrevDone = {
+    translation: block.translation ?? null,
+    translationRaw: block.translationRaw ?? null,
+    translationSegments: block.translationSegments ?? null,
+    editedHtml: block.editedHtml ?? null,
+  };
+  return true;
+}
+
+export function restoreDoneBlock(block) {
+  const prev = block && block._skPrevDone;
+  if (!prev) return false;
+  block.translation = prev.translation;
+  block.translationRaw = prev.translationRaw;
+  block.translationSegments = prev.translationSegments;
+  block.editedHtml = prev.editedHtml;
+  block.translationStatus = 'done';
+  block.translationError = null;
+  delete block._skPrevDone;
+  return true;
+}
+
 export function stripPlaceholderTokens(s) {
   const repaired = repairDocLlmArtifacts(s || '');
   const SK = (typeof window !== 'undefined' && window.__SK) || null;

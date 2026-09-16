@@ -5,23 +5,30 @@
 // block 切分 / type 分類）在 W2 才會加進來。
 
 import * as pdfjsLib from '../lib/vendor/pdfjs/pdf.min.mjs';
+import { pageMayHaveColoredBackground } from './pdf-oplist.js';
 
 // MV3 不能跨 origin 載 worker，必須 vendor 進 extension 並用 chrome.runtime.getURL 指過去
 pdfjsLib.GlobalWorkerOptions.workerSrc = chrome.runtime.getURL('lib/vendor/pdfjs/pdf.worker.min.mjs');
 
 // 上限依 SPEC §17.2
+// 頁數 / 檔案大小硬上限只擋「解析階段吃不消」的極端檔；真正的成本維度（API token）
+// 由 stage-result 的「翻譯頁數」範圍輸入把關——使用者可在解析後只挑要翻的頁。
+// 實測：109 頁 / 10 MB 財報解析（含瀏覽器啟動）11 秒、354 頁操作手冊 3 秒，解析本身
+// 不是瓶頸，故 300 頁的門檻是給 reader render / pdf-lib 重組留的安全邊界。
 // v2.0.86：原本另有 softWarnPages / softWarnBytes 兩個「軟警告」門檻，但頁數門檻
 // 全專案零引用、bytes 門檻只回一句 level:'warn' 訊息而唯一 caller（translate-doc/
 // index.js handleFile）直接忽略 → 使用者從來看不到。依 MVP 原則移除死常數與死分支，
 // 日後真要做大檔提示再連同 UI 一起設計（訊息也要走 i18n，不能像舊分支硬編繁中）
 export const LIMITS = Object.freeze({
-  hardMaxPages: 50,
-  hardMaxBytes: 10 * 1024 * 1024,
+  hardMaxPages: 300,
+  hardMaxBytes: 50 * 1024 * 1024,
 });
 
 // 已知不支援的 PDF 樣態（SPEC §17.2）——抽完文字後再判斷
 const SCANNED_PDF_TEXT_THRESHOLD = 50; // 整份 < 50 個非空白字 → 視為掃描檔
 const GARBLED_FONT_NON_PRINTABLE_RATIO = 0.5; // 非 ASCII printable / 控制字元比例 > 50% → 字型映射不完整
+const TINY_RUN_MIN_FONT_SIZE = 1.5; // 低於此字級的 text run 視為隱藏文字，不進版面 IR
+const ROTATED_PAGE_DOMINANT_RATIO = 0.8; // 丟掉的旋轉 run 佔全部 run ≥ 80% → 整頁旋轉內容，不是掃描檔
 
 // run bbox 落在 viewport 外多遠時視為「PDF 邏輯邊界外」直接丟棄
 // (PowerPoint / Excel 匯出 PDF 常見:寬 table 繪製在邏輯 page 之外,page transform
@@ -41,6 +48,22 @@ function matMul(m1, m2) {
     m1[0] * m2[4] + m1[2] * m2[5] + m1[4],
     m1[1] * m2[4] + m1[3] * m2[5] + m1[5],
   ];
+}
+
+// PDF.js 對部分 CJK PDF（Chromium 列印的 Wikipedia 等）會把共用字形的字回成康熙部首碼位
+// （⽅ U+2F45 而非 方 U+65B9；wiki-zh 7 萬字中 5 千個），poppler 抽同檔為 0。這種碼位送 LLM
+// 是雜訊、「已是目標語」判定會被騙、快取 key 也不穩。只對部首區（U+2E80–2FDF）與相容表意字區
+// （U+F900–FAFF）逐字 NFKC——整串 NFKC 會把上標 ² 變 2、全形英數變半形、連字拆開，不能用
+export function normalizeCjkCompat(str) {
+  if (!str) return str;
+  let out = '';
+  let changed = false;
+  for (const ch of str) {
+    const cp = ch.codePointAt(0);
+    if ((cp >= 0x2e80 && cp <= 0x2fdf) || (cp >= 0xf900 && cp <= 0xfaff)) { out += ch.normalize('NFKC'); changed = true; }
+    else out += ch;
+  }
+  return changed ? out : str;
 }
 
 export class PdfParseError extends Error {
@@ -64,7 +87,7 @@ export function preflightFile(file) {
   }
   if (file.size > LIMITS.hardMaxBytes) {
     const mb = (file.size / 1024 / 1024).toFixed(1);
-    return { level: 'error', message: `檔案 ${mb} MB 超過 ${LIMITS.hardMaxBytes / 1024 / 1024} MB 上限,請先拆分後再上傳` };
+    return { level: 'error', message: `檔案 ${mb} MB 超過 ${LIMITS.hardMaxBytes / 1024 / 1024} MB 上限，請先拆分後再上傳` };
   }
   return { level: 'ok' };
 }
@@ -114,6 +137,19 @@ export async function parsePdf(file, onProgress = () => {}, options = {}) {
   }
 }
 
+// 頁面 viewport 摘要：尺寸之外帶 PDF.js viewport.transform（user space → canvas，含
+// /Rotate 與 CropBox 位移）與 /Rotate 角度。pdf-renderer 對每頁抽 metadata 失敗時
+// 以此當 fallback 反算譯文 overlay 矩陣，/Rotate 頁不再錯位（code review
+// 2026-09-11 §3.9-4）；解析成功即代表這份資料可信，是 overlay 座標的單一來源
+function viewportInfo(page, viewport) {
+  return {
+    width: viewport.width,
+    height: viewport.height,
+    transform: Array.isArray(viewport.transform) ? viewport.transform.slice() : null,
+    rotation: ((page.rotate % 360) + 360) % 360,
+  };
+}
+
 // parsePdf 本體:從已開啟的 pdfDoc 抽每頁 text run。中途 throw 時由 parsePdf
 // 統一釋放 pdfDoc,本函式內不需要逐分支 destroy
 async function extractRawDoc(pdfDoc, file, onProgress, options) {
@@ -128,6 +164,7 @@ async function extractRawDoc(pdfDoc, file, onProgress, options) {
   let nonPrintable = 0;
   let printable = 0;
   let droppedRotatedTotal = 0;
+  let keptRunsTotal = 0;
 
   // metadata(title 用於 result UI)
   let title = file.name || '';
@@ -157,15 +194,16 @@ async function extractRawDoc(pdfDoc, file, onProgress, options) {
 
     let textContent;
     try {
+      // vendored pdf.js 4.10.38 的 getTextContent 一律回每個 text run 一個 item
+      //（舊版 `disableCombineTextItems` 選項已移除，傳了也被靜默忽略——code review
+      // 2026-09-11 §3.9-6），版面分析需要的 per-run bbox 由此保證
       textContent = await page.getTextContent({
-        // 不要把相鄰 item 合成一條長字串——保留每個 text run 的 bbox 才能做版面分析
-        disableCombineTextItems: false,
         includeMarkedContent: false,
       });
     } catch (err) {
       pages.push({
         pageIndex,
-        viewport: { width: viewport.width, height: viewport.height },
+        viewport: viewportInfo(page, viewport),
         textRuns: [],
         textRunError: err && err.message ? err.message : String(err),
       });
@@ -213,8 +251,10 @@ async function extractRawDoc(pdfDoc, file, onProgress, options) {
       }
     }
     // 用 commonObjs 反查字型物件補完(family 沒 keyword 但 font.italic/.bold)
+    let mayHaveColoredBackground;   // 批次 7 §6.4：下方 opList 已載入，順便算給 renderer 用
     try {
-      await page.getOperatorList(); // 觸發 worker font load
+      const opList = await page.getOperatorList(); // 觸發 worker font load
+      mayHaveColoredBackground = pageMayHaveColoredBackground(opList);
       for (const fn of Object.keys(styleIsItalic)) {
         if (styleIsItalic[fn] && styleIsBold[fn]) continue;
         try {
@@ -237,6 +277,7 @@ async function extractRawDoc(pdfDoc, file, onProgress, options) {
     const textRuns = [];
     let droppedOutsideViewport = 0;
     let droppedRotated = 0;
+    let droppedTiny = 0;
     for (const item of textContent.items) {
       // PDF.js TextItem.transform 是 raw text matrix [scaleX, skewY, skewX, scaleY, x, y]
       // 在 PDF 座標系下(y 由下往上)。某些 PDF(PowerPoint/Excel 匯出)的 raw 座標
@@ -273,6 +314,14 @@ async function extractRawDoc(pdfDoc, file, onProgress, options) {
       // PDF.js TextItem.width / height 已是 CSS px(在 scale=1 viewport 下 = pt),
       // 直接加到 baseline 不再乘 fontSize(這是地雷:乘了會把 bbox 暴增 fontSize 倍)。
       const fontSize = Math.hypot(m[2], m[3]);
+      // 極小字(< TINY_RUN_MIN_FONT_SIZE pt)不是給人讀的:SEO 隱藏文字 / 隱形關鍵字層。
+      // 送翻後 pdf-renderer 會以 MIN_FONT_SIZE(5pt)畫譯文,隱藏文字反而現形
+      // (pdf-synth tiny-hidden-text 實測 0.4pt 文字成了可翻譯 block)。結構性規則:
+      // 字級門檻,不看內容
+      if (fontSize < TINY_RUN_MIN_FONT_SIZE) {
+        droppedTiny++;
+        continue;
+      }
       const left = m[4];
       const baselineY = m[5];
       const top = baselineY - fontSize;
@@ -311,8 +360,9 @@ async function extractRawDoc(pdfDoc, file, onProgress, options) {
       const isItalic = !!styleIsItalic[item.fontName];
       const isBold = !!styleIsBold[item.fontName];
 
+      keptRunsTotal++;
       textRuns.push({
-        text: item.str,
+        text: normalizeCjkCompat(item.str),
         // canvas 座標(y 由上往下),bbox = [left, top, right, bottom]
         bbox: [left, top, right, bottom],
         fontSize,
@@ -347,8 +397,12 @@ async function extractRawDoc(pdfDoc, file, onProgress, options) {
 
     pages.push({
       pageIndex,
-      viewport: { width: viewport.width, height: viewport.height },
+      viewport: viewportInfo(page, viewport),
       textRuns,
+      // 批次 7 §6.4：renderer 底色取樣的前置判斷（純文字頁跳過 render）原本要在 renderer
+      // 再 getOperatorList 一次；解析階段已經為了字型載入拿過同一份 opList，在這裡算好
+      // 帶過去，renderer 只在旗標缺席（舊 doc / 這段 throw）時才自己再拿一次
+      mayHaveColoredBackground,
     });
     page.cleanup();
   }
@@ -356,6 +410,11 @@ async function extractRawDoc(pdfDoc, file, onProgress, options) {
   // 偵測掃描 PDF / 字型亂碼（SPEC §17.2）
   const warnings = [];
   if (totalChars < SCANNED_PDF_TEXT_THRESHOLD) {
+    // 內容流本身整頁旋轉（沒設 /Rotate 的橫式掃描 / 匯出）：run 全被當旋轉丟掉，字數不到門檻——
+    // 這不是掃描檔，訊息要說實話（真正支援整頁旋轉內容是另一輪的事）
+    if (droppedRotatedTotal > 0 && droppedRotatedTotal >= (droppedRotatedTotal + keptRunsTotal) * ROTATED_PAGE_DOMINANT_RATIO) {
+      throw new PdfParseError('rotated-content', '此 PDF 的文字整頁旋轉（頁面未設定旋轉屬性），目前不支援翻譯');
+    }
     throw new PdfParseError('scanned', '此 PDF 為掃描影像或無可抽取文字，本工具不支援 OCR');
   }
   const totalCharsForRatio = printable + nonPrintable;

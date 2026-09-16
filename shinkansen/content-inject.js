@@ -443,7 +443,19 @@
 
   function _revertEcho(el, translation) {
     var origHTML = STATE.originalHTML.get(el);
-    if (origHTML != null) el.innerHTML = origHTML;
+    // 2026-09-11 code review §3.1-2：nv-mutate 路徑（framework branch）的 echo 還原改走
+    // backup 逐 text node 寫回 nodeValue，不重 parse innerHTML——整段重 parse 正是這條
+    // 路徑要避免的事（React 持有的 text node ref 變孤兒、後續 re-render 可能崩）。
+    // 非 nv-mutate 路徑維持 innerHTML 還原，但 innerHTML 沒變的元素不重寫。
+    var nvBackup = STATE.nodeValueMutateBackup?.get(el);
+    if (nvBackup && nvBackup.length > 0) {
+      for (var bi = 0; bi < nvBackup.length; bi++) {
+        var b = nvBackup[bi];
+        if (b && b.node && b.node.nodeValue !== b.originalValue) b.node.nodeValue = b.originalValue;
+      }
+    } else if (origHTML != null && el.innerHTML !== origHTML) {
+      el.innerHTML = origHTML;
+    }
     var origLang = STATE.originalLang.get(el);
     if (origLang === null) el.removeAttribute('lang');
     else if (origLang != null) el.setAttribute('lang', origLang);
@@ -933,29 +945,48 @@
     if (!win) return el.textContent || '';
     let text = '';
     const walker = el.ownerDocument.createTreeWalker(el, NodeFilter.SHOW_TEXT, null);
-    let n;
-    while ((n = walker.nextNode())) {
-      let p = n.parentElement;
-      let hidden = false;
-      while (p && p !== el.parentElement) {
-        const cs = win.getComputedStyle(p);
-        if (cs.display === 'none' || cs.visibility === 'hidden') { hidden = true; break; }
+    // 2026-09-14 批次 7：同一呼叫內祖先「自身是否隱藏」結果快取——同段多個 text node
+    // 共用祖先鏈，原本每個 text node 都對每層祖先重跑 getComputedStyle +
+    // getBoundingClientRect。單次呼叫內 DOM 不變，結果等價。
+    const selfHiddenMemo = new Map();
+    const isSelfHidden = (p) => {
+      const hit = selfHiddenMemo.get(p);
+      if (hit !== undefined) return hit;
+      let h = false;
+      const cs = win.getComputedStyle(p);
+      if (cs.display === 'none' || cs.visibility === 'hidden') h = true;
+      else {
         if (cs.position === 'absolute') {
           const r = p.getBoundingClientRect();
-          if (r.width <= 1 && r.height <= 1) { hidden = true; break; }
+          if (r.width <= 1 && r.height <= 1) h = true;
         }
         // SVG `<desc>` / `<title>` 等 a11y metadata 元素 rect 是 0×0(瀏覽器
         // 完全不渲染，只給 screen reader / accessibility tree 用)。Medium
         // 文章按讚 / 留言計數 anchor 用 SVG `<desc>` 放 "A clap icon" 等說明
         // 文字，影響 textContent 但對 sighted user 完全不可見。
-        const r2 = p.getBoundingClientRect();
-        if (r2.width === 0 && r2.height === 0) { hidden = true; break; }
+        if (!h) {
+          const r2 = p.getBoundingClientRect();
+          if (r2.width === 0 && r2.height === 0) h = true;
+        }
+      }
+      selfHiddenMemo.set(p, h);
+      return h;
+    };
+    let n;
+    while ((n = walker.nextNode())) {
+      let p = n.parentElement;
+      let hidden = false;
+      while (p && p !== el.parentElement) {
+        if (isSelfHidden(p)) { hidden = true; break; }
         p = p.parentElement;
       }
       if (!hidden) text += n.nodeValue || '';
     }
     return text;
   }
+
+
+  SK._getVisibleText = getVisibleText;  // 測試 / profile seam（批次 7 等價 spec 與量測）
 
   /** 找最近的 block 祖先（computed display ∈ BLOCK_DISPLAY_VALUES）。
    * 若 el 自身 computed display 已是 block-ish(例如 `<a style="display:flex">`,

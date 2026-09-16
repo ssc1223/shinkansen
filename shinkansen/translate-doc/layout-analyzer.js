@@ -13,10 +13,6 @@
 //      list-item / footnote / page-number / table / paragraph
 //
 // 座標系：全部 canvas 座標(y 由上往下，套過 viewport.transform)。bbox = [left, top, right, bottom]
-//
-// 後續 iter:
-//   W2-iter5: plainText 構建加 de-hyphenation + 行尾續行銜接(SPEC §17.4.4)
-//   W2-iter6: caption / formula / figure 偵測(需 getOperatorList 抓圖片框線 op)
 
 // ----- 啟發式參數 -----
 
@@ -141,7 +137,7 @@ const WRAP_MERGE_MIN_X_OVERLAP_RATIO = 0.7;
 const NARROW_BLOCK_MAX_RIGHT_RATIO = 0.25;
 
 // form-row merge:report / 報價單 / form 文件常出現「label_x_left ... value_x_right」同 y
-// 結構,PDF.js 抽出後會被視為兩 line(因為 SAME_LINE_MAX_X_GAP_FACTOR=4 太嚴),
+// 結構,PDF.js 抽出後會被視為兩 line(因為 SAME_LINE_MAX_X_GAP_FACTOR=2 太嚴),
 // 後續又因 left 跳躍被誤判 table 而不送翻譯。groupIntoLines 後合併「同 y + 左 line
 // 結尾為 : 或 : (label-shape)」的 label-value pair 成單一 line,讓後續 type 分類
 // 看到一致 left 不再誤判 table
@@ -189,6 +185,8 @@ function analyzePage(rawPage) {
     medianLineHeight: 0,
     columnCount: 1,
   };
+  // 批次 7 §6.4：解析階段算好的「可能有彩色底」旗標透傳給 renderer（缺席時 renderer 自己算）
+  if (typeof rawPage.mayHaveColoredBackground === 'boolean') out.mayHaveColoredBackground = rawPage.mayHaveColoredBackground;
   const runs = (rawPage.textRuns || []).slice();
   if (runs.length === 0) return out;
 
@@ -414,7 +412,9 @@ function classifyBlockType(block, ctx) {
   }
 
   // 2) footnote:fontSize 比 body 小一截 + 位於頁面下方 1/4 + 第一字元為 footnote marker
-  const footnoteMarkerRe = /^(?:[0-9]+[.)]|[\^*†‡§])/;
+  // 「1 text」(上標數字吸收回主行後無句點)也是常見形式:字級小 + 頁底兩訊號已在,
+  // 只要求數字 ≤ 3 位且後接空白(pdf-synth footnote-pagenum 實測「1 See the appendix」判成 paragraph)
+  const footnoteMarkerRe = /^(?:[0-9]+[.)]|[0-9]{1,3}\s+\S|[\^*†‡§])/;
   if (
     fontSize > 0 &&
     bodyFontSize > 0 &&
@@ -528,6 +528,34 @@ function newLineFromRun(run) {
 function splitLinesAtCellGaps(lines, medianLineHeight) {
   const gapThreshold = (medianLineHeight || 12) * TABLE_CELL_GAP_FACTOR;
   const formMaxGap = FORM_ROW_MAX_X_GAP_FACTOR * (medianLineHeight || 12);
+  // y 分桶索引（lazy）：桶高 = mlh，每條 line 登記進它 bbox 縱向涵蓋的所有桶；
+  // 查詢 [y0, y1] 取涵蓋桶的聯集（去重）。桶內 line 仍經原本的精確縱向篩選，結果集合
+  // 與全掃相同；residualGapAfterSupFill 內部對區間排序，順序無關
+  const bucketH = Math.max(1, medianLineHeight || 12);
+  let yBuckets = null;
+  const linesOverlappingY = (y0, y1) => {
+    if (!yBuckets) {
+      yBuckets = new Map();
+      for (const l of lines) {
+        const b0 = Math.floor(l.bbox[1] / bucketH), b1 = Math.floor(l.bbox[3] / bucketH);
+        for (let b = b0; b <= b1; b++) {
+          let arr = yBuckets.get(b);
+          if (!arr) { arr = []; yBuckets.set(b, arr); }
+          arr.push(l);
+        }
+      }
+    }
+    const b0 = Math.floor(y0 / bucketH), b1 = Math.floor(y1 / bucketH);
+    if (b0 === b1) return yBuckets.get(b0) || [];
+    const seen = new Set();
+    const res = [];
+    for (let b = b0; b <= b1; b++) {
+      const arr = yBuckets.get(b);
+      if (!arr) continue;
+      for (const l of arr) { if (!seen.has(l)) { seen.add(l); res.push(l); } }
+    }
+    return res;
+  };
   const out = [];
   for (const line of lines) {
     const runs = (line.runs || []);
@@ -542,7 +570,10 @@ function splitLinesAtCellGaps(lines, medianLineHeight) {
     const isSupOccupiedGap = (x0, x1) => {
       const ly0 = line.bbox[1], ly1 = line.bbox[3];
       const otherRuns = [];
-      for (const other of lines) {
+      // 批次 7 §6.4：原本對每個超門檻 gap 掃整頁所有 line（密集表格頁 L 條 line × 多個
+      // gap = O(L²)），改由 y 分桶索引只取縱向可能重疊的 line 再做原本的精確篩選；
+      // 桶只在第一次需要時建（多數頁沒有超門檻 gap 不會建）
+      for (const other of linesOverlappingY(ly0, ly1)) {
         if (other === line) continue;
         if (other.bbox[3] < ly0 || other.bbox[1] > ly1) continue; // 縱向不重疊快篩
         for (const r of (other.runs || [])) otherRuns.push(r);
@@ -644,6 +675,15 @@ function absorbSupSubLines(lines, medianLineHeight) {
     absorbedIdx.add(si);
     if (!hostExtraRuns.has(host)) hostExtraRuns.set(host, []);
     hostExtraRuns.get(host).push(...(s.runs || []));
+    // 鏈式（code review 2026-09-11 §3.9-1）：s 先前已當過別人的 host（上標的上標 /
+    // 巢狀下標，處理順序依 top 排序時內層先被吸進 s），s 自己再被吸走時要把已併入
+    // 的 runs 一起帶到新 host——否則 s 被跳過、hostExtraRuns[s] 沒人合併，內層文字
+    // 從 block 消失但 mask 仍蓋
+    const carried = hostExtraRuns.get(si);
+    if (carried) {
+      hostExtraRuns.get(host).push(...carried);
+      hostExtraRuns.delete(si);
+    }
   }
   if (absorbedIdx.size === 0) return lines;
   const out = [];
@@ -714,8 +754,12 @@ function detectColumns(lines, pageWidth) {
     if (xs.length < k) break;
     const result = kmeans1d(xs, k);
     if (!result) continue;
-    // 邊界 1：中心相距太近的 k 不採用(避免縮排被當多欄)
-    const minGap = pageWidth > 0 ? pageWidth * COLUMN_MIN_GAP_RATIO : 0;
+    // 邊界 1：中心相距太近的 k 不採用(避免縮排被當多欄)。
+    // 門檻隨 k 縮放(× 2 / k):k 欄的欄心間距上限 ≈ 可用寬 / k,固定 0.3 × 頁寬對
+    // k=3 永遠不可能達標(Letter 頁 3 欄實際間距 ≈ 165pt < 184pt),三欄版面一律被
+    // 折成兩欄且左右兩欄交錯(pdf-synth col-three 實測)。k=2 門檻不變,單欄縮排
+    // (24pt)仍遠低於 k=3 的 0.2 × 頁寬
+    const minGap = pageWidth > 0 ? pageWidth * COLUMN_MIN_GAP_RATIO * (2 / k) : 0;
     if (k > 1 && minPairwiseGap(result.centers) < minGap) continue;
     // 邊界 2：最弱 cluster 的 line 數佔比 < MIN_COLUMN_LINE_RATIO 不採用
     // (避免少量裝飾元素 / 浮動標題觸發誤判；典型場景：Quotation 右半三條 single-line
@@ -768,12 +812,19 @@ function kmeans1d(values, k) {
     const mean = values.reduce((a, b) => a + b, 0) / values.length;
     return { centers: [mean], assignment: values.map(() => 0) };
   }
-  // 初始化：取 values 中按位置等距的 k 個 quantile 當 seed
+  // 初始化：取 values 中按位置等距的 k 個 quantile 當 seed。
+  // 以「去重後的值」取 quantile（code review 2026-09-11 §3.9-3）：欄位 x 高度重複
+  //（同欄 line 左緣幾乎同值），少數欄佔比 18%–25% 時原本兩個 quantile 都落在多數欄
+  // 的同一個值 → 兩 seed 相等 → 少數欄 cluster 永遠空 → 回 null → 永遠單欄，
+  // MIN_COLUMN_LINE_RATIO = 0.18 的門檻實際上達不到。去重後不足 k 個相異值時
+  // 本來就分不出 k 群，直接回 null 讓呼叫端退到 k-1
   const sorted = values.slice().sort((a, b) => a - b);
+  const uniq = sorted.filter((v, i) => i === 0 || v !== sorted[i - 1]);
+  if (uniq.length < k) return null;
   let centers = [];
   for (let i = 0; i < k; i++) {
-    const idx = Math.floor((i + 0.5) * sorted.length / k);
-    centers.push(sorted[Math.min(idx, sorted.length - 1)]);
+    const idx = Math.floor((i + 0.5) * uniq.length / k);
+    centers.push(uniq[Math.min(idx, uniq.length - 1)]);
   }
 
   let assignment = new Array(values.length).fill(0);
@@ -890,6 +941,9 @@ function markSiblingsInRow(lines, medianLineHeight) {
       if (xGap >= minGap) {
         a.siblingsInRow = true;
         b.siblingsInRow = true;
+        // 記配對 line,column 偵測後由 splitIntoBlocksByAssignment 回填配對所在欄
+        a.siblingLine = b;
+        b.siblingLine = a;
       }
     }
     groupStart = groupEnd + 1;
@@ -902,6 +956,12 @@ function markSiblingsInRow(lines, medianLineHeight) {
 // 不改行為,純搬移 + export。
 export function splitIntoBlocksByAssignment(lines, assignment, columnCount, medianLineHeight) {
   const initialBlocks = [];
+  // sibling 配對 line 所在欄回填(供 splitColumnIntoBlocks 判「跨欄鄰行」豁免)
+  const colOf = new Map();
+  lines.forEach((l, i) => colOf.set(l, assignment[i]));
+  for (const l of lines) {
+    if (l.siblingsInRow && l.siblingLine) l.siblingColumn = colOf.has(l.siblingLine) ? colOf.get(l.siblingLine) : null;
+  }
   for (let colIdx = 0; colIdx < columnCount; colIdx++) {
     const colLines = lines.filter((_, i) => assignment[i] === colIdx);
     colLines.sort((a, b) => a.bbox[1] - b.bbox[1]);
@@ -921,7 +981,13 @@ function splitColumnIntoBlocks(colLines, medianLineHeight, columnIdx) {
     // siblingsInRow：同視覺行被切散的多條 line(左右分置場景)，強制切獨立 block。
     // 不論 vertical gap / fontSize,prev / cur 任一是 sibling 都切——確保「左段」、
     // 「右段」各自一個 block 翻譯，譯文不會 collapse 成單一字串
-    if (prev.siblingsInRow || cur.siblingsInRow) {
+    // 例外:sibling 的配對 line 若被 column 偵測分到別的欄(prev / cur 自己在本欄),
+    // 這不是「左右分置」而是多欄版面的鄰欄行——雙欄論文左欄段落的短尾行跟右欄同 y
+    // 的整行 x gap 必然很大,原本會被切成獨立 block 單獨送翻(pdf-synth col-two 實測
+    // 「The quick.」孤立成塊)。只有配對 line 也在同欄(或無欄位資訊)才視為 sibling 切分
+    const prevSib = prev.siblingsInRow && (prev.siblingColumn == null || prev.siblingColumn === columnIdx);
+    const curSib = cur.siblingsInRow && (cur.siblingColumn == null || cur.siblingColumn === columnIdx);
+    if (prevSib || curSib) {
       blocks.push(buildBlockFromLines(currentLines, columnIdx));
       currentLines = [cur];
       continue;
@@ -1010,6 +1076,7 @@ function buildBlockFromLines(lines, columnIdx) {
     // 內部 lines 結構，供 list sub-split 與 type 啟發式用
     _lines: internalLines,
     // dev probe alias(harness summary 用，W3 移除)
+    // _devLines：名字帶 dev 但是 production 路徑在用（表格偵測 detectTableBlock 讀 block._devLines 判 row 結構），不可拿掉
     _devLines: internalLines.map((l) => ({ bbox: l.bbox, text: l.plainText.slice(0, 60) })),
   };
 }
@@ -1176,12 +1243,18 @@ function maybeSubsplitListBlock(block) {
   if (lines.length < LIST_SUBSPLIT_MIN_LINES) return [block];
 
   const isMarker = lines.map((l) => LIST_MARKER_RE.test(l.plainText || ''));
+  // 前導非 marker 行(清單前的引言句「The following items…:」)自成一段,marker 比例
+  // 只看引言之後的行——原本「起頭不是 marker 就整塊不切」讓「引言 + 4 個項目」黏成
+  // 單一段落送翻,譯文回填時項目換行全失(pdf-synth list-hanging 實測)
+  let firstMarker = isMarker.indexOf(true);
+  if (firstMarker < 0) return [block];
+  const listLines = lines.length - firstMarker;
   const markerCount = isMarker.filter(Boolean).length;
-  if (markerCount < lines.length * LIST_SUBSPLIT_MARKER_RATIO) return [block];
-  // 起頭那行必須是 marker 才開始切；否則 marker 之間 cluster 不對齊
-  if (!isMarker[0]) return [block];
+  if (listLines < LIST_SUBSPLIT_MIN_LINES || markerCount < listLines * LIST_SUBSPLIT_MARKER_RATIO) return [block];
+  // 引言超過 2 行不視為清單前導(可能是段落內偶然的 dash 行),維持原行為不切
+  if (firstMarker > 2) return [block];
 
-  // 按 marker 起首切 group
+  // 按 marker 起首切 group(前導行為第一個 group)
   const groups = [];
   let current = [];
   for (let i = 0; i < lines.length; i++) {

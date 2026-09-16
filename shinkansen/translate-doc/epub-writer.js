@@ -12,6 +12,8 @@
 //
 // 未翻章節 / 失敗 block：保留原文原樣（部分譯本下載天然支援）。
 
+import { resolveBlockFragment } from './block-output.js';
+
 const XML_SER = new XMLSerializer();
 const XML_DECL = '<?xml version="1.0" encoding="utf-8"?>\n';
 const XHTML_NS = 'http://www.w3.org/1999/xhtml';
@@ -22,22 +24,6 @@ function getSK() {
     throw new Error('serializer not loaded');
   }
   return SK;
-}
-
-// 使用者在預覽頁 contenteditable 編輯過的 HTML → 消毒後 parse 成頁面 frag。
-// 消毒：剝 script / style / template 元素與 on* 事件屬性（貼上內容可能夾帶）
-function editedHtmlToFrag(html) {
-  const container = document.createElement('div');
-  container.innerHTML = html;
-  for (const bad of container.querySelectorAll('script, style, template')) bad.remove();
-  for (const el of container.querySelectorAll('*')) {
-    for (const attr of [...el.attributes]) {
-      if (/^on/i.test(attr.name)) el.removeAttribute(attr.name);
-    }
-  }
-  const frag = document.createDocumentFragment();
-  while (container.firstChild) frag.appendChild(container.firstChild);
-  return frag;
 }
 
 // 譯文寫回單一 block。優先序：
@@ -51,7 +37,11 @@ function editedHtmlToFrag(html) {
 // importNode / replaceChildren 對 DOMParser('text/html') 的 document 同樣成立）
 export function applyBlockTranslation(SK, xhtmlDoc, block, override, bilingual = false) {
   const el = block.el;
-  if (!el) return false;
+  if (!el) {
+    // 容器直接文字的 fragment block（epub-engine collectChapterBlocks，§3.8-9）
+    if (block.fragStart) return applyFragmentTranslation(SK, xhtmlDoc, block, override, bilingual);
+    return false;
+  }
   // 同一份 xhtmlDoc 會被重複下載重複套用（單語 replaceChildren 會毀掉 DOM 內
   // 原文；雙語需要原文還在）：首次套用前快照原文子節點，之後每次先還原再套，
   // 讓「下載單語 → 切雙語重下載」與重複下載都 idempotent
@@ -60,31 +50,70 @@ export function applyBlockTranslation(SK, xhtmlDoc, block, override, bilingual =
   } else {
     el.replaceChildren(...block._srcChildNodes.map((n) => n.cloneNode(true)));
   }
-  let content = null;
-  // override.editedHtml = dedupe 後處理過的編輯版（2026-07-10）
-  const editedHtml = override?.editedHtml ?? block.editedHtml;
-  if (typeof editedHtml === 'string' && editedHtml.length > 0) {
-    content = xhtmlDoc.importNode(editedHtmlToFrag(editedHtml), true);
-  }
-  if (!content) {
-    const raw = override?.translationRaw ?? block.translationRaw;
-    if (typeof raw === 'string' && raw.length > 0 && Array.isArray(block.slots)) {
-      // cloneReuse：frag 不注回序列化來源（HTML clone），slot 一律 clone 殼重建
-      const { frag, ok } = SK.deserializeWithPlaceholders(raw, block.slots, { cloneReuse: true });
-      if (ok || (block.slots.length === 0 && frag.childNodes.length > 0)) {
-        content = xhtmlDoc.importNode(frag, true);
-      }
-    }
-  }
-  if (!content) {
-    const plain = override?.translation ?? block.translation;
-    if (typeof plain === 'string' && plain.length > 0) {
-      content = xhtmlDoc.createTextNode(plain);
-    }
-  }
+  const content = resolveBlockContent(SK, xhtmlDoc, block, override);
   if (!content) return false;
   if (bilingual) return insertDualTranslation(xhtmlDoc, el, content);
   el.replaceChildren(content);
+  return true;
+}
+
+// 譯文內容節點（editedHtml → ⟦N⟧ 反序列化 → 純文字 fallback）：優先鏈走 block-output.js
+// resolveBlockFragment（與 docx / txt / 預覽四個消費端同一份），這裡只負責 importNode 進 xhtmlDoc。
+// element / fragment 兩條寫回路徑共用
+function resolveBlockContent(SK, xhtmlDoc, block, override) {
+  const picked = resolveBlockFragment(SK, block, override);
+  return picked ? xhtmlDoc.importNode(picked.frag, true) : null;
+}
+
+// fragment block 寫回（§3.8-9）：以 fragStart..fragEnd 這段連續 sibling（容器的
+// 裸文字 + inline 元素 run）為單位。首次套用快照 run 的原節點與插入位置（父節點 +
+// run 後方的第一個節點；run 是極大連續段，後方必為區塊元素或 null，不會被其他
+// block 的寫回動到），之後每次先移除上次放進去的節點、還原原文，再套——與
+// element 路徑同樣 idempotent。雙語：原文 run 留著，後面接一個 span.sk-dual-tr
+//（display:block）放譯文
+function applyFragmentTranslation(SK, xhtmlDoc, block, override, bilingual) {
+  if (!block._srcFragNodes) {
+    const nodes = [];
+    let cur = block.fragStart;
+    while (cur) {
+      nodes.push(cur);
+      if (cur === block.fragEnd) break;
+      cur = cur.nextSibling;
+    }
+    const parent = block.fragStart.parentNode;
+    if (!parent) return false;
+    block._fragParent = parent;
+    block._fragNext = block.fragEnd.nextSibling;
+    block._srcFragNodes = nodes.map((n) => n.cloneNode(true));
+    block._placedNodes = nodes;
+  }
+  const parent = block._fragParent;
+  for (const n of block._placedNodes) {
+    if (n.parentNode) n.parentNode.removeChild(n);
+  }
+  const next = (block._fragNext && block._fragNext.parentNode === parent) ? block._fragNext : null;
+  const insert = (node) => parent.insertBefore(node, next);
+  const srcClones = block._srcFragNodes.map((n) => n.cloneNode(true));
+
+  const content = resolveBlockContent(SK, xhtmlDoc, block, override);
+  if (!content) {
+    for (const n of srcClones) insert(n);
+    block._placedNodes = srcClones;
+    return false;
+  }
+  if (bilingual) {
+    for (const n of srcClones) insert(n);
+    const holder = xhtmlDoc.createElementNS(XHTML_NS, 'span');
+    holder.setAttribute('class', 'sk-dual-tr');
+    holder.appendChild(content);
+    for (const n of [...holder.querySelectorAll('[id]')]) n.removeAttribute('id');
+    insert(holder);
+    block._placedNodes = [...srcClones, holder];
+    return true;
+  }
+  const placed = content.nodeType === 11 ? [...content.childNodes] : [content];
+  insert(content);
+  block._placedNodes = placed;
   return true;
 }
 
@@ -497,12 +526,22 @@ export function buildTranslatedEpub(epubDoc, targetLanguage, opts = {}) {
   for (const path of Object.keys(entries)) {
     if (path === 'mimetype') continue;
     if (path.endsWith('/')) continue; // 目錄 entry 不需重建
-    zipInput[path] = modified.has(path) ? strToU8(modified.get(path)) : entries[path];
+    const u8 = modified.has(path) ? strToU8(modified.get(path)) : entries[path];
+    // 批次 7 §6.4：圖片 / 字型 / 音訊等本身已壓縮的 entry 用 STORED（level 0）——
+    // 原本每次下載都對整本書的媒體同步重跑 deflate（大書最花時間的一段）且壓不出空間。
+    // entry 內容位元組不變，只有 zip 內的儲存方式不同
+    zipInput[path] = isPrecompressedMediaPath(path) ? [u8, { level: 0 }] : u8;
   }
   // 新增的 nav 文件（原 zip 沒有的 entry）
   if (navPath && !zipInput[navPath]) zipInput[navPath] = strToU8(modified.get(navPath));
   const bytes = zipSync(zipInput, { level: 6 });
   return { bytes, translatedChapters, appliedBlocks };
+}
+
+/** 已壓縮媒體 / 字型副檔名（epub / docx 重打包共用判準；docx-engine 有同一份鏡像） */
+const PRECOMPRESSED_MEDIA_RE = /\.(?:png|jpe?g|gif|webp|avif|bmp|tiff?|ico|ttf|otf|woff2?|eot|mp3|m4a|aac|ogg|oga|wav|mp4|m4v|webm|ogv|zip|jar|gz|br|pdf)$/i;
+export function isPrecompressedMediaPath(path) {
+  return PRECOMPRESSED_MEDIA_RE.test(String(path || ''));
 }
 
 /** 下載檔名：<原檔名>-shinkansen.epub（雙語版 -shinkansen-dual.epub，兩版可並存不互蓋） */

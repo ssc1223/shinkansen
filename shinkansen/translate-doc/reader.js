@@ -52,11 +52,12 @@ let _renderReaderGen = 0;
  * @param {string}      [opts.modelOverride]  — retry 用的 preset model id
  * @param {string|null} [opts.extraPrompt]    — 本文件額外翻譯指令（retry 也要帶，跟主翻譯同 cache key）
  * @param {(failedCount: number) => void} [opts.onFailedCountChange]
+ * @param {() => void} [opts.onFontFallback] — 遠端字型抓不到退回內建 TC 時呼叫（提示用）
  * @returns {Promise<ReaderHandle>}
  */
 export async function renderReader(doc, originalPdfDoc, originalArrayBuffer, originalCol, translatedCol, opts = {}) {
   const _myRenderGen = ++_renderReaderGen;   // G3：見 _renderReaderGen 註解
-  const { modelOverride, engine, glossary, extraPrompt = null, onFailedCountChange = () => {} } = opts;
+  const { modelOverride, engine, glossary, extraPrompt = null, onFailedCountChange = () => {}, onFontFallback = null } = opts;
   let currentZoom = opts.initialZoom || 1.0;
   let syncEnabled = opts.initialSyncEnabled !== false;
 
@@ -85,7 +86,10 @@ export async function renderReader(doc, originalPdfDoc, originalArrayBuffer, ori
       try { await translatedPdfDoc.destroy(); } catch (_) { /* ignore */ }
       translatedPdfDoc = null;
     }
-    const built = await buildBilingualPdf(originalArrayBuffer, doc);
+    // 共用解析階段的 PDF.js doc：renderer 不再重新解析整份 PDF（§6.4）
+    const built = await buildBilingualPdf(originalArrayBuffer, doc, { pdfDoc: originalPdfDoc });
+    // zh-CN / ja / ko 需要遠端字型但抓不到 → 已退回內建 TC，讓 index.js 提示使用者
+    if (built.fontFallback && typeof onFontFallback === 'function') onFontFallback(built.fontSource);
     translatedBytes = built.bytes;
     translatedFilename = built.filename;
     // slice(0) 給 PDF.js 一份新 buffer 避免它 detach 我們的 cache。
@@ -312,6 +316,14 @@ export async function renderReader(doc, originalPdfDoc, originalArrayBuffer, ori
       sync.destroy();
       leftIO.disconnect();
       rightIO.disconnect();
+      // 已 render 的 canvas bitmap 一併釋放（每頁約 18MB）：換檔 / 重開 reader 時
+      // 舊欄的 page div 雖然會被 innerHTML = '' 清掉，bitmap 仍等 GC；主動歸零
+      //（code review 2026-09-11 §3.8-6）
+      for (const [pageEl, meta] of pageMeta) {
+        meta.rendered = false;
+        releaseCanvas(pageEl);
+      }
+      pageMeta.clear();
       if (window.__skReaderRenderAll === renderAllPages) delete window.__skReaderRenderAll;
       if (translatedPdfDoc) {
         translatedPdfDoc.destroy().catch(() => {});
