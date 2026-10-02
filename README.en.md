@@ -10,7 +10,7 @@ The name *Shinkansen* (新幹線, "bullet train") evokes a fast, smooth, frictio
 
 ## Recent major updates
 
-- **iOS / iPadOS version** is now on the [App Store](https://apps.apple.com/tw/app/shinkansen-web-translator/id6776958298) — Safari extension with four-finger touch translate and the floating button, ready out of the box.
+- **iOS / iPadOS version** is now on the [App Store](https://apps.apple.com/tw/app/shinkansen-web-translator/id6776958298) — Safari extension with multi-finger touch translate and the floating button, ready out of the box.
 - Added **Word (.docx) document translation** — the translation is written back into the original file with layout, styles, tables, and comments fully preserved; bilingual output available.
 - Added **subtitle file translation** — SRT / WebVTT / ASS files are translated cue by cue with timing and style tags preserved; download monolingual or bilingual subtitles.
 - **PDF translation: higher limits and layout fixes** — limits raised to 50 MB / 300 pages, translate a chosen page range, fixes for two-column short lines, colored backgrounds, rotated pages and overflowing paragraphs, and on-demand fonts for Simplified Chinese / Japanese / Korean output.
@@ -41,6 +41,7 @@ We stress-tested Shinkansen on the English Wikipedia article for *Taiwan* (over 
 - **Free Chinese variant conversion**: when your target language is Traditional or Simplified Chinese, content in the opposite variant is converted locally with built-in OpenCC dictionaries — no API key, no API calls, works offline, with phrase-level Taiwan-convention mapping (软件→軟體, 视频→影片, 内存→記憶體). "Auto-convert Chinese variants" is on by default — pages in the opposite variant convert automatically on load, no manual trigger needed; you can turn it off in the toolbar icon menu (unchecking reverts the current page immediately); on mixed-language pages only the Chinese paragraphs use the free conversion while the rest go through your chosen engine.
 - **Custom AI models**: any OpenAI-compatible endpoint — OpenRouter / Together / Groq / local Ollama, hundreds of models.
 - **Three customizable shortcuts**: `Alt+A` / `Alt+S` / `Alt+D` each bound to its own translation preset (engine + model + label). Pick the right engine per content type with one keystroke (e.g., Flash for reading material, Google MT for casual browsing). Details in "Translation shortcuts and presets" below.
+- **Hover translate**: pick a modifier key (Shift / Option / Control) in settings, then hold it and rest the pointer on a paragraph to translate just that paragraph in place — handy when you want to read the original first or only need part of a page. Pressing a shortcut afterwards translates the rest of the page; press again to restore. Hover translations are bilingual by default (original stays, translation appended below) and can be switched to replace-original in the same place, independently of the full-page display mode.
 - **Floating button**: a floating button pinned to the left/right edge of the page — tap to translate the page, long-press to switch translation engine or open the menu; on by default on all platforms, with adjustable button size and opacity.
 - **Document translation (PDF / EPUB / Word / TXT / Markdown / HTML / subtitles)**: upload a file and translate the whole thing — PDFs keep the original layout in the translated output; EPUB supports a book-wide glossary (consistent name translations across chapters), per-chapter translation, preview editing, and bilingual output; Word (.docx) files get the translation written back into the original file with layout, styles, and tables fully preserved, with optional bilingual output; TXT / Markdown / HTML files reuse the same chapter pipeline, and the translated file keeps the same format as the original; SRT / WebVTT / ASS subtitle files are translated cue by cue with timing preserved, with optional bilingual output. Details in "Document translation" below.
 - **YouTube subtitle translation**: detects YouTube captions and replaces them in real time with your target language (Traditional Chinese by default); styling matches the native YouTube subtitle look. Details in "YouTube subtitle translation" below.
@@ -97,7 +98,7 @@ Go to the [Firefox Add-ons listing](https://addons.mozilla.org/firefox/addon/shi
     - All three keybindings, engines, models, and labels are customizable in the "Translation shortcuts" section of settings
     - Press any shortcut while translated → restore original
     - Press any shortcut while translating → cancel translation
-- **iOS / iPadOS four-finger touch**: on iPhone / iPad Safari, tap the page with four fingers to translate (same as the primary preset shortcut — tap again to restore or cancel); a four-finger long-press uses the secondary preset. On by default; if it triggers accidentally, turn it off under "Four-finger touch translate" in settings — the floating button and external-keyboard shortcuts are unaffected.
+- **iOS / iPadOS touch gesture**: on iPhone / iPad Safari, tap the page with several fingers to translate (same as the primary preset shortcut — tap again to restore or cancel); a multi-finger long-press uses the secondary preset. Four fingers by default; switch to three for one-handed use on iPhone under "Touch gesture translate" in settings, or turn it off there if it triggers accidentally — the floating button and external-keyboard shortcuts are unaffected.
 - **YouTube subtitle translation**: open a video with captions (manual or auto-generated), make sure CC is on, click the toolbar icon → toggle "YouTube subtitle translation" on
 - **Auto-translate sites**: add domains to the "Auto-translate sites" list in settings; pages on those sites translate on load (toast shows the `[Auto]` prefix)
 - **Custom glossary**: add term mappings in the "Glossary" tab; translations are forced to use your preferred renderings
@@ -263,7 +264,7 @@ Every translation's token usage, cost, and cache hit rate is logged and viewable
 
 In the "Glossary" tab in settings, you can pin specific source terms to your preferred translations. For example, force "Arrow" to always translate as "艾蘿" instead of "箭頭", or specifically as "乙太翠雀之箭" on DC Comics-related sites.
 
-The glossary has two layers: "Global" applies to all sites; "Domain-specific" only applies to designated domains. When the same term appears in both, domain rules override global.
+The glossary has two layers: "Global" applies to all sites; "Domain-specific" only applies to designated domains. When the same term appears in both, domain rules override global. Append a path to a domain (e.g. `example.com/news`) to limit the scope to pages under that path, so different sections or series on the same site can each have their own glossary; path rules override site-wide rules.
 
 The custom glossary takes priority over auto glossary consistency. During translation, glossary instructions are placed at the very end of the system prompt — the position the LLM weights most heavily. After editing the glossary, no need to manually clear the cache; Shinkansen invalidates old entries automatically.
 
@@ -335,7 +336,7 @@ Off by default. Recommended only for articles where precision matters (e.g., lon
 
 ## Current version
 
-v2.5.1 — full feature list and specs in [SPEC.md](SPEC.md) (Traditional Chinese only).
+v2.5.7 — full feature list and specs in [SPEC.md](SPEC.md) (Traditional Chinese only).
 
 ## License
 
