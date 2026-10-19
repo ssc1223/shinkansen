@@ -678,6 +678,9 @@
   function extractInlineFragments(el, opts) {
     const containerBoundary = !!(opts && opts.containerBoundary);
     const requireDirectText = !!(opts && opts.requireDirectText);
+    //   extraBoundary — (node) => bool,額外的 run 邊界判斷(自成段落的容器,見
+    //     _collectParagraphsImpl 的 isSelfCollectingContainer)
+    const extraBoundary = (opts && opts.extraBoundary) || null;
     const fragments = [];
     const children = Array.from(el.childNodes);
     let runStart = null;
@@ -747,8 +750,9 @@
     };
 
     for (const child of children) {
-      const isBoundaryContainer = containerBoundary &&
-        child.nodeType === Node.ELEMENT_NODE && SK.CONTAINER_TAGS.has(child.tagName);
+      const isBoundaryContainer = (containerBoundary &&
+        child.nodeType === Node.ELEMENT_NODE && SK.CONTAINER_TAGS.has(child.tagName)) ||
+        (extraBoundary && extraBoundary(child));
       if (!isBoundaryContainer && SK.isInlineRunNode(child)) {
         if (!runStart) runStart = child;
         runEnd = child;
@@ -1017,6 +1021,27 @@
       }
       return true;
     })();
+    // 「自成段落的容器」：CONTAINER_TAGS 元素（DIV / SECTION…）直接文字達 Case B / C 門檻
+    // ——walker 走到它時 Case A / B / C 會把它自己收成單元。DIV 不在 BLOCK_TAGS_SET，
+    // containsBlockDescendant 看不到它，祖先若因此被整顆收成單元（TD / LI / BLOCKQUOTE
+    // 包多個 <div> 段落、或 Case B 的「文字 + BR + 子 DIV 段落」），同段文字會被收兩次
+    //（祖先 element 單元 + 子 DIV fragment），整顆祖先也可能大到單段撐爆輸出上限。
+    // 祖先遇到這種子孫時改走容器路徑：只抽「不屬於這些容器」的 inline run，walker 往下
+    // 讓各容器自己成段（與 containsBlockDescendant 同一處理模式）。結構通則（§8）。
+    const _selfContainerMinText = _foreignPage ? 2 : 20;
+    function isSelfCollectingContainer(d) {
+      return SK.CONTAINER_TAGS.has(d.tagName) && directTextLength(d) >= _selfContainerMinText;
+    }
+    function containsSelfCollectingContainer(el) {
+      for (const d of el.querySelectorAll(SK.CONTAINER_TAG_SELECTOR)) {
+        if (isSelfCollectingContainer(d)) return true;
+      }
+      return false;
+    }
+    // extractInlineFragments 的 run 邊界：自成段落的容器本身、或包著它的 inline wrapper
+    //（<font> / <span> 包 DIV 段落）都不可被吸進祖先的 inline run
+    const _selfContainerBoundary = (n) => n.nodeType === Node.ELEMENT_NODE &&
+      (isSelfCollectingContainer(n) || containsSelfCollectingContainer(n));
     // v1.6.9: per-call memo for isInsideExcludedContainer。整個 collectParagraphs
     // 期間 DOM 不變，同一祖先鏈只算一次。
     const excludedMemo = new Map();
@@ -1173,9 +1198,11 @@
           // 自身隱藏，擋不住非 block 隱藏容器直接成 unit。
           if (!fragmentExtracted.has(el) && SK.isVisible(el) && !isInsideExcludedContainer(el, excludedMemo)) {
             // hasDirectText 已在上方 gate 算好
-            if (hasDirectText && SK.containsBlockDescendant(el)) {
+            if (hasDirectText && (SK.containsBlockDescendant(el) || containsSelfCollectingContainer(el))) {
               // Case A (v1.4.7)：有 block 子孫 → 抽 inline fragment
-              const frags = extractInlineFragments(el);
+              // 自成段落的子容器同樣視為 block 子孫(見 isSelfCollectingContainer):否則
+              // 「文字 + BR + 子 DIV 段落」會走 Case B 整顆收、子 DIV 再被 Case C 收一次
+              const frags = extractInlineFragments(el, { extraBoundary: _selfContainerBoundary });
               if (frags.length > 0) {
                 fragmentExtracted.add(el);
                 // v1.10.45:Case A 容器同時是「其他 block 單元的祖先」。fragment 注入路徑
@@ -1609,10 +1636,16 @@
           if (SK.BLOCK_TAGS_SET.has(el.tagName)) structurallySkippedBlocks.add(el);
           return NodeFilter.FILTER_SKIP;
         }
-        if (SK.containsBlockDescendant(el)) {
+        // 自成段落的子容器(TD / LI / BLOCKQUOTE 包多個 <div> 段落)與 block 子孫同等處理:
+        // 本 block 不整顆收(否則與子 DIV 的 Case C 單元雙收、且整顆可能超大),見
+        // isSelfCollectingContainer
+        const _hasBlockDesc = SK.containsBlockDescendant(el);
+        const _hasSelfContainer = !_hasBlockDesc && containsSelfCollectingContainer(el);
+        if (_hasSelfContainer && stats) stats.selfContainerDescendant = (stats.selfContainerDescendant || 0) + 1;
+        if (_hasBlockDesc || _hasSelfContainer) {
           if (stats) stats.hasBlockDescendant = (stats.hasBlockDescendant || 0) + 1;
           if (!fragmentExtracted.has(el)) {
-            const frags = extractInlineFragments(el);
+            const frags = extractInlineFragments(el, { extraBoundary: _selfContainerBoundary });
             if (frags.length > 0) {
               fragmentExtracted.add(el);
               for (const f of frags) {
