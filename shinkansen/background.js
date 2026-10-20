@@ -878,6 +878,12 @@ const messageHandlers = {
     async: true,
     handler: (payload, sender) => _handleAsrSubtitleBatch(payload, sender, '_drive_yt_asr', 'drive'),
   },
+  // 2026-10-19:X（Twitter）影片 ASR 字幕（content-x.js）。D' 模式同 Drive，獨立 cache key
+  // '_x_asr' 不跟 YouTube / Drive 互打；設定沿用 ytSubtitle
+  TRANSLATE_X_ASR_SUBTITLE_BATCH: {
+    async: true,
+    handler: (payload, sender) => _handleAsrSubtitleBatch(payload, sender, '_x_asr', 'x'),
+  },
   // Drive 影片 ASR 字幕 URL 偵測——iframe(youtube.googleapis.com/embed）的
   // content-drive-iframe.js 用 PerformanceObserver 抓到 timedtext URL 後送來。
   // 為什麼 background fetch 而不直接 iframe fetch:iframe 內 fetch 會被 PerformanceObserver
@@ -1013,6 +1019,11 @@ const messageHandlers = {
     async: true,
     handler: (payload, sender) => handleTranslateGoogle(payload, sender, '_gt_drive'),
   },
+  // 2026-10-19:X 影片字幕走 Google Translate（cache key '_gt_x'，同 Drive '_gt_drive' 分區慣例）
+  TRANSLATE_X_BATCH_GOOGLE: {
+    async: true,
+    handler: (payload, sender) => handleTranslateGoogle(payload, sender, '_gt_x'),
+  },
   // v1.5.7: OpenAI-compatible 自訂 Provider 翻譯（chat.completions endpoint）
   // cache key 加 baseUrl hash + model 分區。
   TRANSLATE_BATCH_CUSTOM: {
@@ -1074,6 +1085,20 @@ const messageHandlers = {
         temperature: yt.temperature ?? 0.1,
       };
       return handleTranslateCustom(payload, sender, '_oc_drive_yt_asr', overrides, false, false,
+        { temperatureDefault: DEFAULT_SETTINGS.ytSubtitle.temperature });
+    },
+  },
+  // 2026-10-19:X 影片 ASR 字幕走自訂 Provider（cache key '_oc_x_asr'，結構同 Drive 版）
+  TRANSLATE_X_ASR_SUBTITLE_BATCH_CUSTOM: {
+    async: true,
+    handler: async (payload, sender) => {
+      const s = await getSettingsCached();
+      const yt = s.ytSubtitle || {};
+      const overrides = {
+        systemPrompt: getEffectiveAsrSubtitleSystemPrompt(s.targetLanguage, payload?.sourceLanguage || 'en'),
+        temperature: yt.temperature ?? 0.1,
+      };
+      return handleTranslateCustom(payload, sender, '_oc_x_asr', overrides, false, false,
         { temperatureDefault: DEFAULT_SETTINGS.ytSubtitle.temperature });
     },
   },
@@ -1330,7 +1355,8 @@ const messageHandlers = {
       // 換模型或超過 1 小時才拆新筆。網頁翻譯仍走 logTranslation。
       // v2.0.78: Drive 字幕（source='drive-subtitle'，videoId=Drive 檔案 id）同構，
       // 走同一條 upsert（合併鍵含 source，兩種來源不互相合併）。
-      if ((record.source === 'youtube-subtitle' || record.source === 'drive-subtitle') && record.videoId) {
+      // 2026-10-19: X 影片字幕（source='x-subtitle'，videoId=X mediaId）同構
+      if ((record.source === 'youtube-subtitle' || record.source === 'drive-subtitle' || record.source === 'x-subtitle') && record.videoId) {
         await usageDB.upsertYouTubeUsage(record);
       } else {
         await usageDB.logTranslation(record);

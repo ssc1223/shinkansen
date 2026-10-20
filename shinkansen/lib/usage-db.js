@@ -549,7 +549,8 @@ function csvEscape(str) {
 export function shouldSkipUsageRecord(record) {
   if (!record) return true;
   // drive-subtitle（v2.0.78）同 youtube-subtitle 走 upsert 累計合併路徑，不跳過
-  if (record.source === 'youtube-subtitle' || record.source === 'drive-subtitle') return false;
+  // x-subtitle（2026-10-19，X 影片字幕）同理
+  if (record.source === 'youtube-subtitle' || record.source === 'drive-subtitle' || record.source === 'x-subtitle') return false;
   const ip = Number(record.inputTokens) || 0;
   const op = Number(record.outputTokens) || 0;
   const ch = Number(record.chars) || 0;

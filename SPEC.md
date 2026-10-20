@@ -7,7 +7,7 @@
 - 最後更新：2026-09-14（v2.4.19，對照程式碼校正）
 - 目標平台：Chrome（Manifest V3）
 - 作業系統：macOS 26
-- 目前 Extension 版本：2.6.1
+- 目前 Extension 版本：2.6.2
 
 ---
 
@@ -32,7 +32,7 @@ Shinkansen 是一款 Chrome 擴充功能，將英文（或其他外語）網頁�
 
 ## 2. 功能範圍
 
-### 2.1 已實作（v2.6.1 為止）
+### 2.1 已實作（v2.6.2 為止）
 
 詳細版本歷史見 [`CHANGELOG.md`](CHANGELOG.md)。
 
@@ -41,6 +41,7 @@ Shinkansen 是一款 Chrome 擴充功能，將英文（或其他外語）網頁�
 | 網頁翻譯 | ✅ | Option+S / Option+A（Gemini）/ Option+D（Google Translate）三組快速鍵；單語覆蓋 / 雙語對照雙模式；漸進分批注入；還原原文 |
 | 雙語對照模式 | ✅ | 譯文以 wrapper 形式附在原段落後；4 種視覺標記；顯示模式同時決定字幕雙語與否 |
 | YouTube 字幕翻譯 | ✅ | 自動偵測字幕即時翻譯；ASR（自動字幕）AI 分句，譯文字幕統一比語音提前 1 秒出現；時間視窗批次；雙語 overlay；字幕大小與顏色跟隨原生設定；行動版 `m.youtube.com` 支援；`/watch` 與 `/live/<id>`（直播 / 直播存檔分享連結）路徑皆支援 |
+| X（Twitter）影片字幕翻譯 | ✅ | X 自動產生字幕（auto-generated）的影片，開聲音播放時自動翻譯（時間軸上自動靜音播放不翻）；AI 分句後以譯文字幕軌顯示，外觀同 X 原生字幕；X 的 CC 鈕兼當譯文字幕開關；雙語跟隨顯示模式；引擎 / 模型沿用 YouTube 字幕設定；沒有字幕軌的影片不支援 |
 | SPA 支援 | ✅ | 站內導航自動偵測；動態載入內容補翻；譯文防覆蓋保護；續翻模式 |
 | 段落偵測 | ✅ | 結構化 DOM walker；技術性排除（code / 表單 / 站底 footer）；尊重頁面宣告的 `translate="no"` / `notranslate` 與 icon 字型；內容品味判斷交給 system prompt |
 | 佔位符序列化 | ✅ | 行內元素（連結 / 粗斜體等）與媒體在譯文中完整保留 |
@@ -65,7 +66,7 @@ Shinkansen 是一款 Chrome 擴充功能，將英文（或其他外語）網頁�
 
 ### 2.3 明確不做
 
-滑鼠懸停顯示、原文樣式客製、輸入框翻譯、劃詞翻譯、DeepL / Yandex 等第三方付費翻譯服務、影片字幕（YouTube 除外，已支援）、延遲載入、淺色/深色主題切換。
+滑鼠懸停顯示、原文樣式客製、輸入框翻譯、劃詞翻譯、DeepL / Yandex 等第三方付費翻譯服務、影片字幕（YouTube / Google Drive / X 除外，已支援）、延遲載入、淺色/深色主題切換。
 
 > 備注：v1.4.0 起已加入 Google Translate 非官方免費端點（Opt+D，不需 API Key），同時保留 Gemini（Opt+S）。Google 官方 Cloud Translation v2 API（付費）不在支援範圍內。
 
@@ -241,7 +242,7 @@ target 為中文變體時，偵測為**相反變體**的段落不送 LLM，改�
 
 另支援暗色主題自動配色與自訂強調色（`dualAccentColor`：預設色 token 或自訂 hex，三種標記共用同色）。
 
-**字幕跟隨顯示模式**：YouTube 與 Google Drive 影片字幕的雙語與否由 `displayMode === 'dual'` 決定（單一資料源，無獨立設定），播放中切換即時生效。字幕雙語走獨立 overlay 呈現，與整頁 dual 的 wrapper 機制無關。
+**字幕跟隨顯示模式**：YouTube、Google Drive 與 X 影片字幕的雙語與否由 `displayMode === 'dual'` 決定（單一資料源，無獨立設定），播放中切換即時生效。字幕雙語走獨立 overlay 呈現，與整頁 dual 的 wrapper 機制無關。
 
 **YouTube 字幕大小**（`ytSubtitle.captionScale`，%，預設 100 = 跟隨原生）：全平台統一旋鈕，涵蓋 overlay、視窗內原生字幕、iPhone／iPad 原生全螢幕三條渲染路徑。設定位於 popup，僅 YouTube 影片頁顯示，即時生效。
 
@@ -298,6 +299,7 @@ shinkansen/
 ├── content-fw-detect-main.js # main world framework 偵測 bridge（MAIN world）
 ├── content-drive.js          # Google Drive 影片 ASR 字幕翻譯（top frame 浮層 overlay）
 ├── content-drive-iframe.js   # Drive ASR 字幕 URL 偵測（iframe）
+├── content-x.js              # X（Twitter）影片 ASR 字幕翻譯（原生 text track 顯示）
 ├── content-touch.js          # iOS 多指 tap 手勢（三指 / 四指；IS_IOS_BUILD gate，桌面 build 為 no-op）
 ├── content.js                # 主協調層（translatePage、Debug API、初始化）
 ├── content-shortcuts.js      # 自訂快速鍵 keydown capture 比對 → 本地 dispatch（§10.1）
@@ -660,6 +662,7 @@ iOS Safari 背景 event page 掛起的續命處理（長批次翻譯期間保持
 - 術語表一致化 toggle
 - YouTube 字幕翻譯 toggle + 字幕大小 select（YouTube 影片頁顯示）
 - Drive 影片字幕翻譯 toggle（Drive 影片頁顯示）
+- X 影片字幕翻譯 toggle（X 推文頁顯示，與 YouTube / Drive 共用同一個字幕自動翻譯設定）
 - 快取統計 + 清除快取按鈕
 - 累計費用 / token 顯示 +「清除」按鈕（只重設顯示基準點，不刪用量紀錄）
 - 狀態列（未設 Gemini API Key 且有 preset 用 Gemini 時顯示提示，該列可點，點了直接開設定頁）

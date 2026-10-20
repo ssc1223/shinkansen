@@ -1477,6 +1477,7 @@ if (window.__shinkansen_loaded) {
       reason, me: SK.INSTANCE.version, other: other ? `${other.version}@${other.id}` : null,
     });
     try { if (SK.YT?.active) SK.stopYouTubeTranslation?.(); } catch (_) {}
+    try { SK.stopXSubtitles?.(); } catch (_) {}
   }
   window.addEventListener(_INSTANCE_PING, (e) => {
     const d = e.detail;

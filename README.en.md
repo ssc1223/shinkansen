@@ -45,7 +45,8 @@ We stress-tested Shinkansen on the English Wikipedia article for *Taiwan* (over 
 - **Floating button**: a floating button pinned to the left/right edge of the page — tap to translate the page, long-press to switch translation engine or open the menu; on by default on all platforms, with adjustable button size and opacity.
 - **Document translation (PDF / EPUB / Word / TXT / Markdown / HTML / subtitles)**: upload a file and translate the whole thing — PDFs keep the original layout in the translated output; EPUB supports a book-wide glossary (consistent name translations across chapters), per-chapter translation, preview editing, and bilingual output; Word (.docx) files get the translation written back into the original file with layout, styles, and tables fully preserved, with optional bilingual output; TXT / Markdown / HTML files reuse the same chapter pipeline, and the translated file keeps the same format as the original; SRT / WebVTT / ASS subtitle files are translated cue by cue with timing preserved, with optional bilingual output. Details in "Document translation" below.
 - **YouTube subtitle translation**: detects YouTube captions and replaces them in real time with your target language (Traditional Chinese by default); styling matches the native YouTube subtitle look. Details in "YouTube subtitle translation" below.
-- **Bilingual subtitles**: when the display mode is set to "Bilingual", subtitles show two lines simultaneously — English on top, Chinese below. Useful for listening practice or proofreading. Applies to both YouTube and Google Drive videos. Details in "Bilingual subtitles" below.
+- **Bilingual subtitles**: when the display mode is set to "Bilingual", subtitles show two lines simultaneously — English on top, Chinese below. Useful for listening practice or proofreading. Applies to YouTube, Google Drive and X videos. Details in "Bilingual subtitles" below.
+- **X (Twitter) video subtitle translation**: X videos with auto-generated captions are translated into your target language when played with sound, shown in X's native caption style. Details in "X video subtitle translation" below.
 - **YouTube AI re-segmentation** (ASR-only): YouTube auto-generated captions arrive as broken word fragments without punctuation. Shinkansen sends the whole batch to AI for semantic re-segmentation, then translates — Chinese subtitles go from "shattered words" to "complete sentences". Details in "AI smart segmentation" below.
 - **Custom glossary**: pin specific terms to your preferred translations so proper nouns are always rendered consistently. Two layers (global + domain-specific) where domain rules override global. Details in "Custom glossary" below.
 - **Blocked-word list**: an editable list of words you don't want in the translation. Works for any target language — write your own substitution pairs (defaults to empty for most targets; ships with 26 entries for Traditional Chinese targets). Injected as a high-prominence block at the end of the system prompt. Details in "Blocked-word list" below.
@@ -218,6 +219,15 @@ Shinkansen has a dedicated pipeline for ASR captions:
 
 Human-uploaded captions (professional / community-contributed) are unaffected by this setting; they continue using the original sentence-by-sentence translation pipeline.
 
+### X video subtitle translation
+
+For X (Twitter) videos that have auto-generated captions, Shinkansen translates the captions into your target language **when the video plays with sound (unmuted)**. Fragments are re-segmented into full sentences by AI, and the translation is shown as a caption track at the bottom of the video, styled like X's own captions (also in fullscreen). Videos auto-playing muted in the timeline are not translated, so scrolling past them costs nothing.
+
+- **X's CC button doubles as the translated-caption toggle**: "Hide captions" hides the translation, "Show captions" brings it back (showing the translation, not the English original). Right after the translation first appears, the first CC press may do nothing — press it again
+- **Toggle**: on an X post page, the Shinkansen toolbar icon menu shows an "X video subtitle translation" toggle; it shares the same setting as YouTube subtitle translation
+- **Engine and model** follow the YouTube subtitle settings; bilingual display follows the display mode
+- Captions already in the target language are not sent for translation; videos for which X provides no captions cannot be translated
+
 ### Bilingual subtitles
 
 Subtitle bilingual display follows the display mode setting: click the Shinkansen toolbar icon and pick the "Bilingual" display mode — subtitles will then show both original and translation simultaneously (English on top, Chinese below). The "Replace" mode (default) shows Chinese only. Page translation and subtitles share the same display mode, no separate setting needed.
@@ -228,7 +238,7 @@ Best for:
 - **Language learning**: use subtitles as bilingual study material
 
 Implementation notes:
-- **YouTube and Google Drive videos share the same display mode** (switching to Bilingual affects both)
+- **YouTube, Google Drive and X videos share the same display mode** (switching to Bilingual affects all of them)
 - **Live switch**: changing the mode during playback takes effect immediately, no reload
 - **Compatible with AI segmentation**: bilingual subtitles work cleanly on AI-segmented full sentences — full English sentence + full Chinese sentence on two lines
 
@@ -336,7 +346,7 @@ Off by default. Recommended only for articles where precision matters (e.g., lon
 
 ## Current version
 
-v2.6.1 — full feature list and specs in [SPEC.md](SPEC.md) (Traditional Chinese only).
+v2.6.2 — full feature list and specs in [SPEC.md](SPEC.md) (Traditional Chinese only).
 
 ## License
 

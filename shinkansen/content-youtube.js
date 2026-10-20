@@ -4746,6 +4746,8 @@
     // 與 ASR 片段行間接合（依語言決定是否補空白）
     findActiveCueIdx: _findActiveCueIdx,
     joinSegTexts,
+    // 2026-10-19：X 影片字幕（content-x.js）共用「字幕已是目標語言就不翻」集合
+    skipLangsByTarget: SKIP_LANGS_BY_TARGET,
   };
 
 })(window.__SK);

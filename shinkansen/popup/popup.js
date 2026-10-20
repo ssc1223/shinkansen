@@ -432,7 +432,9 @@ async function init() {
     // isYouTubePage 同步）
     const isYtWatch = /youtube\.com\/(watch|live\/)/.test(url);
     const isDriveFile = /^https:\/\/drive\.google\.com\/file\//.test(url);
-    if (isYtWatch || isDriveFile) {
+    // 2026-10-19:X 推文頁（content-x.js 字幕翻譯同樣共用 ytSubtitle.autoTranslate）
+    const isXStatus = /^https:\/\/(?:[\w-]+\.)?(?:x|twitter)\.com\/[^/]+\/status\/\d+/.test(url);
+    if (isYtWatch || isDriveFile || isXStatus) {
       // 批次 8 D10:三個 toggle 共用同一筆 ytSubtitle,合併成一次 sync.get(原本連讀 2-3 次)
       const { ytSubtitle = {} } = await browser.storage.sync.get('ytSubtitle');
       if (isYtWatch) {
@@ -448,6 +450,10 @@ async function init() {
       if (isDriveFile) {
         $('drive-subtitle-row').hidden = false;
         $('drive-subtitle-toggle').checked = ytSubtitle.autoTranslate !== false;
+      }
+      if (isXStatus) {
+        $('x-subtitle-row').hidden = false;
+        $('x-subtitle-toggle').checked = ytSubtitle.autoTranslate !== false;
       }
       // v2.0.85:字幕雙語對照 toggle 已移除——雙語與否跟隨「顯示模式」(displayMode),
       // content-youtube.js / content-drive.js 由 displayMode === 'dual' 導出
@@ -597,7 +603,8 @@ $('yt-subtitle-toggle').addEventListener('change', async (e) => {
 // commit 5a':Drive toggle 共用 ytSubtitle.autoTranslate（寫 storage，跟 YouTube popup
 // 的 SET_SUBTITLE message 設計不同——因 Drive 沒 SPA 切影片，單純 storage 即時 sync 即可。
 // content-drive.js listen onChanged 即時生效）。
-$('drive-subtitle-toggle').addEventListener('change', async (e) => {
+// 2026-10-19:X 影片字幕 toggle 同一條路徑（content-x.js 也 listen onChanged）
+async function _setSubtitleAutoTranslateFromToggle(e) {
   const enabled = e.target.checked;
   try {
     const { ytSubtitle = {} } = await browser.storage.sync.get('ytSubtitle');
@@ -608,7 +615,9 @@ $('drive-subtitle-toggle').addEventListener('change', async (e) => {
     statusEl.textContent = t('popup.status.subtitleToggleFailed');
     statusEl.style.color = '#ff3b30';
   }
-});
+}
+$('drive-subtitle-toggle').addEventListener('change', _setSubtitleAutoTranslateFromToggle);
+$('x-subtitle-toggle').addEventListener('change', _setSubtitleAutoTranslateFromToggle);
 
 // 字幕大小 scale change handler（寫 ytSubtitle.captionScale；content-youtube onChanged
 // 即時套用 overlay + iOS ::cue,不需 reload 影片頁）
@@ -705,6 +714,7 @@ browser.storage.onChanged.addListener((changes, area) => {
   const enabled = newVal.autoTranslate !== false;
   $('yt-subtitle-toggle').checked = enabled;
   $('drive-subtitle-toggle').checked = enabled;
+  $('x-subtitle-toggle').checked = enabled;
   // 字幕大小 scale 同步
   if (newVal.captionScale != null) $('yt-caption-size').value = String(newVal.captionScale);
 });
