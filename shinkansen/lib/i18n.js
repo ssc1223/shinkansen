@@ -363,6 +363,7 @@
     'options.io.importPartial': '匯入完成，但部分欄位被略過：\n\n{warnings}',
     'options.io.importOk': '匯入成功',
     'options.io.importFooter': '\n\n（API Key 不在匯入範圍，請自行輸入）',
+    'options.io.importCpKeyCleared': '\n\n自訂模型的 API 端點已改為 {url}，為安全起見已清除原本的自訂模型 API Key，請確認端點無誤後重新輸入',
     'options.io.importFailed': '匯入失敗：{error}',
 
     // ── options 回復預設 ─────────────────────────────────
@@ -1423,6 +1424,7 @@
     'options.io.importPartial': '导入完成，但部分字段被略过：\n\n{warnings}',
     'options.io.importOk': '导入成功',
     'options.io.importFooter': '\n\n（API Key 不在导入范围，请自行输入）',
+    'options.io.importCpKeyCleared': '\n\n自定义模型的 API 端点已改为 {url}，为安全起见已清除原本的自定义模型 API Key，请确认端点无误后重新输入',
     'options.io.importFailed': '导入失败：{error}',
 
     // ── options 恢复默认 ─────────────────────────────────
@@ -2481,6 +2483,7 @@
     'options.io.importPartial': 'Import complete, but some fields were skipped:\n\n{warnings}',
     'options.io.importOk': 'Import successful',
     'options.io.importFooter': '\n\n(API Key not in import scope, please enter manually)',
+    'options.io.importCpKeyCleared': '\n\nThe custom model API endpoint was changed to {url}. For your security, the existing custom model API Key was cleared — please verify the endpoint and enter the key again',
     'options.io.importFailed': 'Import failed: {error}',
 
     // ── options reset ─────────────────────────────────────
@@ -3539,6 +3542,7 @@
     'options.io.importPartial': 'インポート完了、ただし一部の項目はスキップされました：\n\n{warnings}',
     'options.io.importOk': 'インポート成功',
     'options.io.importFooter': '\n\n（API Key はインポート対象外のため、ご自分で入力してください）',
+    'options.io.importCpKeyCleared': '\n\nカスタムモデルの API エンドポイントが {url} に変更されたため、安全のため既存のカスタムモデル API Key を削除しました。エンドポイントを確認のうえ再入力してください',
     'options.io.importFailed': 'インポート失敗：{error}',
 
     // ── options デフォルト復元 ─────────────────────────────
@@ -4597,6 +4601,7 @@
     'options.io.importPartial': '가져오기 완료, 일부 필드는 건너뛰어짐:\n\n{warnings}',
     'options.io.importOk': '가져오기 성공',
     'options.io.importFooter': '\n\n(API Key는 가져오기 범위에 포함되지 않으므로 직접 입력하세요)',
+    'options.io.importCpKeyCleared': '\n\n사용자 지정 모델 API 엔드포인트가 {url}(으)로 변경되어 보안을 위해 기존 사용자 지정 모델 API Key를 삭제했습니다. 엔드포인트를 확인한 후 다시 입력하세요',
     'options.io.importFailed': '가져오기 실패: {error}',
 
     // ── options 기본값 복원 ─────────────────────────────
@@ -5654,6 +5659,7 @@
     'options.io.importPartial': 'Importación completa, pero se omitieron algunos campos:\n\n{warnings}',
     'options.io.importOk': 'Importación correcta',
     'options.io.importFooter': '\n\n(La API Key no se importa, debes introducirla manualmente)',
+    'options.io.importCpKeyCleared': '\n\nEl endpoint de la API del modelo personalizado cambió a {url}. Por seguridad se borró la API Key anterior del modelo personalizado: verifica el endpoint e introdúcela de nuevo',
     'options.io.importFailed': 'Error de importación: {error}',
 
     // ── options restaurar valores predeterminados ─────────────────────────────
@@ -6711,6 +6717,7 @@
     'options.io.importPartial': 'Import terminé, mais certains champs ont été ignorés :\n\n{warnings}',
     'options.io.importOk': 'Import réussi',
     'options.io.importFooter': '\n\n(L\'API Key n\'est pas dans le périmètre de l\'import, veuillez la saisir vous-même)',
+    'options.io.importCpKeyCleared': '\n\nLe point de terminaison de l\'API du modèle personnalisé a été remplacé par {url}. Par sécurité, l\'API Key existante du modèle personnalisé a été effacée : vérifiez le point de terminaison puis saisissez-la à nouveau',
     'options.io.importFailed': 'Échec de l\'import : {error}',
 
     // ── options restauration des paramètres par défaut ─────────────────────────────
@@ -7768,6 +7775,7 @@
     'options.io.importPartial': 'Import abgeschlossen, einige Felder wurden übersprungen:\n\n{warnings}',
     'options.io.importOk': 'Import erfolgreich',
     'options.io.importFooter': '\n\n(API Key ist nicht im Import enthalten, bitte selbst eingeben)',
+    'options.io.importCpKeyCleared': '\n\nDer API-Endpunkt des benutzerdefinierten Modells wurde auf {url} geändert. Aus Sicherheitsgründen wurde der bisherige API Key des benutzerdefinierten Modells gelöscht – bitte Endpunkt prüfen und den Key erneut eingeben',
     'options.io.importFailed': 'Import fehlgeschlagen: {error}',
 
     // ── options Standard wiederherstellen ─────────────────────────────

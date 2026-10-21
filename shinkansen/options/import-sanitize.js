@@ -379,3 +379,24 @@ export function sanitizeImport(raw, _t, SC = globalThis.__SKShortcuts) {
 
   return { clean, warnings };
 }
+
+// 2026-10-20 security review：匯入的 customProvider.baseUrl 與目前已存的 origin 不同時，
+// 既有的 customProviderApiKey 必須清掉。匯入檔本來就視為不可信（apiKey 一律剝除），
+// 若只換目的地不換金鑰，一份「推薦設定」JSON 就能把使用者的 Bearer key 連同頁面原文
+// 導到攻擊者主機。同 origin（只改 path，例如 /v1 → /api/v1）視為同一服務，金鑰保留。
+//
+// @param {string} currentBaseUrl  目前 storage 內的 customProvider.baseUrl
+// @param {object} clean  sanitizeImport 回傳的 clean 物件
+// @returns {boolean}  true = 呼叫端應清掉 customProviderApiKey
+export function importChangesCustomProviderOrigin(currentBaseUrl, clean) {
+  const nextBaseUrl = clean && clean.customProvider && clean.customProvider.baseUrl;
+  if (typeof nextBaseUrl !== 'string') return false; // 匯入檔沒帶 baseUrl = 目的地不變
+  const originOf = (u) => {
+    try { return new URL(String(u || '').trim()).origin; } catch { return null; }
+  };
+  const prev = originOf(currentBaseUrl);
+  const next = originOf(nextBaseUrl);
+  // 任一端解析不了 → 無法證明是同一服務，保守清掉
+  if (!prev || !next) return true;
+  return prev !== next;
+}

@@ -7,7 +7,7 @@
 - 最後更新：2026-09-14（v2.4.19，對照程式碼校正）
 - 目標平台：Chrome（Manifest V3）
 - 作業系統：macOS 26
-- 目前 Extension 版本：2.6.2
+- 目前 Extension 版本：2.6.3
 
 ---
 
@@ -32,7 +32,7 @@ Shinkansen 是一款 Chrome 擴充功能，將英文（或其他外語）網頁�
 
 ## 2. 功能範圍
 
-### 2.1 已實作（v2.6.2 為止）
+### 2.1 已實作（v2.6.3 為止）
 
 詳細版本歷史見 [`CHANGELOG.md`](CHANGELOG.md)。
 
@@ -528,7 +528,7 @@ shinkansen/
 
 - `chrome.storage.sync` 自動跨裝置同步設定（不含 API Key，也不含固定術語表 / 禁用詞清單——兩者存 local，§8.2）
 - 翻譯快取與術語表快取只存 local，不同步
-- 設定頁提供匯出/匯入 JSON（API Key 不含在匯出範圍），匯入時 `sanitizeImport()` 驗證所有欄位
+- 設定頁提供匯出/匯入 JSON（API Key 不含在匯出範圍），匯入時 `sanitizeImport()` 驗證所有欄位；匯入檔把自訂模型 `customProvider.baseUrl` 換到不同 origin（scheme + host + port）時，既有的自訂模型 API Key 會被清除並提示使用者重新輸入（只改 path 視為同一服務、金鑰保留），避免匯入檔把金鑰導到別的主機
 
 ---
 

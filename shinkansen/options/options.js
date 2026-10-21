@@ -4,7 +4,7 @@
 import { browser } from '../lib/compat.js';
 import { DEFAULT_SETTINGS, DEFAULT_SYSTEM_PROMPT, DEFAULT_GLOSSARY_PROMPT, DEFAULT_SUBTITLE_SYSTEM_PROMPT, DEFAULT_FORBIDDEN_TERMS, isLegacyDefaultForbiddenTerms, TARGET_LANGUAGES, UI_LANGUAGES, getEffectiveSystemPrompt, getEffectiveSubtitleSystemPrompt, getEffectiveGlossaryPrompt, isPromptUnchangedFromDefault, isPromptUnchangedFromAnyTargetDefault, LOCAL_SETTINGS_KEYS, migrateLargeKeysToLocalIfNeeded, overlayLocalSettings, splitSettingsPatch } from '../lib/storage.js';
 import { formatTokens, formatUSD, formatMoney, parseUserNum, buildUsageCsvFilename, formatYmdHms } from '../lib/format.js';
-import { sanitizeImport as sanitizeImportImpl } from './import-sanitize.js';
+import { sanitizeImport as sanitizeImportImpl, importChangesCustomProviderOrigin } from './import-sanitize.js';
 import { isWorthNotifying, buildUpdateDownloadUrl } from '../lib/update-check.js'; // v1.6.5
 import { IS_MAS_BUILD, IS_IOS_BUILD } from '../lib/distribution.js';
 import { isTouchScreenDevice } from '../lib/platform.js';
@@ -1905,6 +1905,19 @@ $('import-input').addEventListener('change', async (e) => {
       alert(_t('options.io.importNoFields'));
       return;
     }
+    // 2026-10-20 security review：baseUrl 換到不同 origin 時清掉既有自訂模型金鑰，
+    // 避免匯入檔把使用者的 Bearer key 導到別的主機（規則見 importChangesCustomProviderOrigin）
+    let cpKeyClearedNote = '';
+    const { customProvider: curCp } = await browser.storage.sync.get('customProvider');
+    const curBaseUrl = (curCp && typeof curCp.baseUrl === 'string')
+      ? curCp.baseUrl : DEFAULT_SETTINGS.customProvider.baseUrl;
+    if (importChangesCustomProviderOrigin(curBaseUrl, clean)) {
+      const { customProviderApiKey } = await browser.storage.local.get('customProviderApiKey');
+      if (customProviderApiKey) {
+        await browser.storage.local.remove('customProviderApiKey');
+        cpKeyClearedNote = _t('options.io.importCpKeyCleared', { url: clean.customProvider.baseUrl });
+      }
+    }
     // 固定術語表 / 禁用詞走 local（批次 6）
     const { syncPart, localPart } = splitSettingsPatch(clean);
     if (Object.keys(localPart).length > 0) await browser.storage.local.set(localPart);
@@ -1913,7 +1926,7 @@ $('import-input').addEventListener('change', async (e) => {
     const msg = warnings.length > 0
       ? _t('options.io.importPartial', { warnings: warnings.join('\n') })
       : _t('options.io.importOk');
-    alert(msg + _t('options.io.importFooter'));
+    alert(msg + cpKeyClearedNote + _t('options.io.importFooter'));
   } catch (err) {
     alert(_t('options.io.importFailed', { error: err.message }));
   } finally {
