@@ -361,8 +361,9 @@
     // 洞 1 的暫停期 nv sweep(reapplyOnly)已涵蓋大多數,這條是雙保險,同時接住
     // reapplyOnly 刻意跳過的「內容已變」entry(此處走完整版,可 unmark+rescan)。
     // 編輯模式 contenteditable 豁免在 runContentGuardNvMutate 迴圈內,不會被打破。
-    if (wasPaused && !contentGuardExternallyPaused && STATE.translated
-        && STATE.translatedMode !== 'dual') {
+    // 不看 translatedMode：雙語頁也可能有原地注入的段落（簡繁轉換段一律原地取代，issue #76）；
+    // 沒有 nv-mutate 紀錄時 runContentGuardNvMutate 自己會直接結束
+    if (wasPaused && !contentGuardExternallyPaused && STATE.translated) {
       try { runContentGuardNvMutate(true); } catch (_) {}
     }
   };
@@ -647,6 +648,9 @@
       const text = (unit.el.textContent || '').trim();
       const savedHTML = STATE.translatedHTMLByText.get(text);
       if (!savedHTML) { remaining.push(unit); continue; }
+      // 框架管理中的元素不直接寫 innerHTML（會把框架掛著的子節點換成孤兒，之後的更新對不上）：
+      // 丟回正常翻譯路徑，那條路徑對這類元素走 nodeValue 改寫 / dual；譯文有背景快取，不會重新計費
+      if (SK.isFrameworkManaged?.(unit.el)) { remaining.push(unit); continue; }
       // LRU touch:命中即重插,讓熱 entry(virtualization 反覆 remount 的段)
       // 不被容量淘汰(review B8)
       STATE.translatedHTMLByText.delete(text);
@@ -662,6 +666,9 @@
         unit.el.setAttribute('data-shinkansen-translated', '1');
         STATE.translatedHTML.set(unit.el, savedHTML);
         STATE.originalText?.set?.(unit.el, text);
+        // 祖先若也在 translatedHTML（外層段落同時被收成單元），它的 baseline 還是 reuse 前的內容，
+        // 不刷新的話下一輪 Guard 會拿舊 baseline 把這裡沖回原文
+        SK.refreshAncestorSavedHTML?.(unit.el);
         SK._guardObserveEl?.(unit.el);
         reused.push(unit);
       } catch (_) {
@@ -705,6 +712,8 @@
     stopPrescanObserver();
     spaObserverRescanCount = 0;
     spaObserverSeenTexts.clear();
+    // 待補收的 scoped rescan 節點一併丟掉：observer 停了不會再消費，留著只是抓住已離開頁面的節點
+    _scopedRescanRoots.clear();
   }
   SK.stopSpaObserver = stopSpaObserver;
 
@@ -726,18 +735,15 @@
     // 完整 inject pipeline、會動結構);內容已變的 entry 留給 resume 補課
     // (setContentGuardPaused(false) 的全量 reconcile)。
     if (contentGuardExternallyPaused) {
-      if (STATE.translatedMode !== 'dual') runContentGuardNvMutate(false, true);
+      runContentGuardNvMutate(false, true);
       return;
     }
-    // v1.5.0: dual 模式分派——監看 wrapper 被 SPA 刪除後 re-append。
-    if (STATE.translatedMode === 'dual') {
-      runContentGuardDual(false);
-      return;
-    }
-    // v1.9.27: 混合模式(single 全局 + framework-managed element 走 dual)場景,
-    // STATE.translationCache 會有項。先跑 dual sweep 守 wrapper,再跑 single
-    // sweep 守 innerHTML。互不打架(分別走 STATE.translatedHTML / translationCache)。
-    if (STATE.translationCache && STATE.translationCache.size > 0) {
+    // 兩種注入可以同頁並存，不以 translatedMode 二選一：
+    //   - single 全局 + framework-managed element 走 dual（v1.9.27）
+    //   - dual 全局 + 簡繁轉換段 / fragment 單元原地取代（issue #76）
+    // 先跑 dual sweep 守 wrapper，再跑 single sweep 守 innerHTML。互不打架（分別走
+    // STATE.translationCache / STATE.translatedHTML，沒有對應注入的那張表是空的）。
+    if (STATE.translatedMode === 'dual' || (STATE.translationCache && STATE.translationCache.size > 0)) {
       runContentGuardDual(false);
     }
     runContentGuardNvMutate(false);
@@ -1017,12 +1023,9 @@
   // 暴露給 Debug API
   SK.testRunContentGuard = function testRunContentGuard() {
     if (!STATE.translated) return 0;
-    if (STATE.translatedMode === 'dual') {
-      return runContentGuardDual(true);
-    }
     let restored = 0;
-    // v1.9.27: 混合模式下也 sweep dual wrapper(對應 production runContentGuard)
-    if (STATE.translationCache && STATE.translationCache.size > 0) {
+    // 對應 production runContentGuard：dual sweep 與 single sweep 都跑（兩種注入可同頁並存）
+    if (STATE.translatedMode === 'dual' || (STATE.translationCache && STATE.translationCache.size > 0)) {
       restored += runContentGuardDual(true);
     }
     for (const [el, savedHTML] of STATE.translatedHTML) {

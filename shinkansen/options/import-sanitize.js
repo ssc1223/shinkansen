@@ -81,6 +81,35 @@ export function sanitizeImport(raw, _t, SC = globalThis.__SKShortcuts) {
     clean[key] = v;
   }
 
+  // 通用規則只驗型別的三個欄位，補內容檢查。消費端各自有防呆（讀到怪值會退回預設），這裡擋的是
+  // 「匯入檔塞任意內容進同步儲存空間」：同步空間單項 8KB、總量 100KB，被佔滿後所有設定都存不進去
+  if ('dualAccentColor' in clean && !/^(auto|[a-z][a-z-]{0,23}|#[0-9a-fA-F]{6})$/.test(clean.dualAccentColor.trim())) {
+    warnings.push(_t('options.import.warningSkipOneOf', { key: 'dualAccentColor', value: String(clean.dualAccentColor).slice(0, 40) }));
+    delete clean.dualAccentColor;
+  }
+  if ('floatingIconPos' in clean) {
+    const fp = clean.floatingIconPos;
+    const okPos = fp && !Array.isArray(fp) && (fp.edge === 'left' || fp.edge === 'right')
+      && typeof fp.offsetY === 'number' && Number.isFinite(fp.offsetY) && fp.offsetY >= 0 && fp.offsetY <= 1;
+    if (okPos) clean.floatingIconPos = { edge: fp.edge, offsetY: fp.offsetY };
+    else { warnings.push(_t('options.import.warningSkipType', { key: 'floatingIconPos' })); delete clean.floatingIconPos; }
+  }
+  if ('modelPricingOverrides' in clean) {
+    const src = clean.modelPricingOverrides;
+    const out = {};
+    if (src && !Array.isArray(src)) {
+      for (const [model, ov] of Object.entries(src).slice(0, 200)) {
+        if (typeof model !== 'string' || !model || model.length > 120 || !ov || typeof ov !== 'object' || Array.isArray(ov)) continue;
+        const entry = {};
+        for (const f of ['inputPerMTok', 'outputPerMTok', 'cachedDiscount']) {
+          if (typeof ov[f] === 'number' && Number.isFinite(ov[f]) && ov[f] >= 0) entry[f] = ov[f];
+        }
+        if (Object.keys(entry).length > 0) out[model] = entry;
+      }
+    }
+    clean.modelPricingOverrides = out;
+  }
+
   // geminiConfig 子物件
   if (raw.geminiConfig && typeof raw.geminiConfig === 'object') {
     const gc = raw.geminiConfig;
@@ -225,6 +254,8 @@ export function sanitizeImport(raw, _t, SC = globalThis.__SKShortcuts) {
         && ['auto', 'off', 'low', 'medium', 'high'].includes(cp.thinkingLevel)) {
       cpClean.thinkingLevel = cp.thinkingLevel;
     }
+    // apiFormat:enum，非法值不收（維持現值）
+    if (cp.apiFormat === 'chat' || cp.apiFormat === 'responses') cpClean.apiFormat = cp.apiFormat;
     // extraBodyJson：自由字串（save 端只 trim，不在此驗 JSON 合法性，維持與 saveSettings 一致）
     if (typeof cp.extraBodyJson === 'string') cpClean.extraBodyJson = cp.extraBodyJson.trim();
     // useStrongSegMarker:boolean(預設 true，讀取走 !== false)
@@ -232,6 +263,8 @@ export function sanitizeImport(raw, _t, SC = globalThis.__SKShortcuts) {
     if (Object.prototype.hasOwnProperty.call(cp, 'apiKey')) {
       warnings.push(_t('options.import.warningCpApiKey'));
     }
+    // extraHeadersJson（自訂 request headers，issue #78）刻意不收：值可能是憑證，比照 apiKey
+    // 不在匯入範圍——匯出檔本來就不含它，匯入檔若帶了也不寫入
     if (Object.keys(cpClean).length > 0) clean.customProvider = cpClean;
   }
 
@@ -380,23 +413,57 @@ export function sanitizeImport(raw, _t, SC = globalThis.__SKShortcuts) {
   return { clean, warnings };
 }
 
+// 匯入時要「現值 ← 匯入值」逐欄合併的設定子物件（code review 2026-11-15 O-2）。
+// 清單 = getSettings 以 `{ ...DEFAULT, ...saved }` 逐欄合併的那幾顆；陣列 / 表格型
+//（translatePresets、fixedGlossary、forbiddenTerms、customShortcuts 等）維持整顆取代。
+// 為什麼要合併：寫入是 storage.sync.set 整顆取代，匯入檔只帶部分欄位時，沒列到的欄位
+// 會從 storage 消失、由 getSettings 補回預設值——customProvider 只帶 model 不帶 baseUrl
+// 的檔會讓端點悄悄回到預設主機，而既有金鑰留著（繞過下方的 origin 防護）。
+export const IMPORT_MERGE_KEYS = [
+  'geminiConfig', 'pricing', 'domainRules', 'glossary',
+  'ytSubtitle', 'partialMode', 'customProvider', 'translateDoc',
+];
+
+// @param {object} clean  sanitizeImport 回傳的 clean 物件
+// @param {object} currentSync  目前 storage.sync 內的對應子物件（storage.sync.get(IMPORT_MERGE_KEYS) 的結果）
+// @returns {object}  要寫入的物件（不改動傳入的 clean）
+export function mergeImportOverCurrent(clean, currentSync) {
+  const out = { ...clean };
+  for (const k of IMPORT_MERGE_KEYS) {
+    const incoming = clean[k];
+    if (!incoming || typeof incoming !== 'object' || Array.isArray(incoming)) continue;
+    const cur = currentSync && currentSync[k];
+    if (cur && typeof cur === 'object' && !Array.isArray(cur)) out[k] = { ...cur, ...incoming };
+  }
+  return out;
+}
+
+const _originOf = (u) => {
+  try { return new URL(String(u || '').trim()).origin; } catch { return null; }
+};
+
+// 兩個端點網址是否屬於不同 origin。任一端解析不了 → 無法證明是同一服務，保守視為不同
+export function isDifferentOrigin(a, b) {
+  const oa = _originOf(a);
+  const ob = _originOf(b);
+  if (!oa || !ob) return true;
+  return oa !== ob;
+}
+
 // 2026-10-20 security review：匯入的 customProvider.baseUrl 與目前已存的 origin 不同時，
 // 既有的 customProviderApiKey 必須清掉。匯入檔本來就視為不可信（apiKey 一律剝除），
 // 若只換目的地不換金鑰，一份「推薦設定」JSON 就能把使用者的 Bearer key 連同頁面原文
 // 導到攻擊者主機。同 origin（只改 path，例如 /v1 → /api/v1）視為同一服務，金鑰保留。
 //
-// @param {string} currentBaseUrl  目前 storage 內的 customProvider.baseUrl
-// @param {object} clean  sanitizeImport 回傳的 clean 物件
-// @returns {boolean}  true = 呼叫端應清掉 customProviderApiKey
-export function importChangesCustomProviderOrigin(currentBaseUrl, clean) {
-  const nextBaseUrl = clean && clean.customProvider && clean.customProvider.baseUrl;
-  if (typeof nextBaseUrl !== 'string') return false; // 匯入檔沒帶 baseUrl = 目的地不變
-  const originOf = (u) => {
-    try { return new URL(String(u || '').trim()).origin; } catch { return null; }
-  };
-  const prev = originOf(currentBaseUrl);
-  const next = originOf(nextBaseUrl);
-  // 任一端解析不了 → 無法證明是同一服務，保守清掉
-  if (!prev || !next) return true;
-  return prev !== next;
+// 2026-11-15（O-2 / O-3）：呼叫端要傳 mergeImportOverCurrent 合併後的物件——合併後
+// 「沒帶 baseUrl」才真的等於「目的地不變」。回傳 true 時呼叫端除了清金鑰，還要先跳
+// 確認並顯示新網址（不論原本有沒有金鑰：端點一換，之後的頁面原文就送往新主機）。
+//
+// @param {string} currentBaseUrl  目前生效的 customProvider.baseUrl（storage 沒存時為預設值）
+// @param {object} merged  mergeImportOverCurrent 的結果
+// @returns {boolean}  true = 端點 origin 會改變
+export function importChangesCustomProviderOrigin(currentBaseUrl, merged) {
+  const nextBaseUrl = merged && merged.customProvider && merged.customProvider.baseUrl;
+  if (typeof nextBaseUrl !== 'string') return false; // 合併後仍沒有 baseUrl = 目的地不變（維持預設）
+  return isDifferentOrigin(currentBaseUrl, nextBaseUrl);
 }

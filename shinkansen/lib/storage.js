@@ -79,6 +79,8 @@ PDF 文件翻譯時,文字可能含 inline 樣式邊界標記:
 3. 連結文字可翻譯,連結編號 N 不可變動。
 4. 標記可巢狀(如 ⟦b⟧⟦i⟧粗斜體⟦/i⟧⟦/b⟧),翻譯後須維持結構;不可交叉(⟦b⟧⟦i⟧X⟦/b⟧⟦/i⟧ 是錯的)。
 5. 若原文無標記,譯文也不要無中生有加標記。
+6. 原文裡的方括號引用編號（例如 [12]、[162][138]）是文獻參照，不是樣式標記：逐字保留在譯文對應的位置，不可省略、不可合併、不可改寫成其他括號或標記樣式。
+7. ⟦l:N⟧…⟦/l⟧ 是超連結標記，不是書名號：不可因為文字是連結就在外面或裡面加上《》、〈〉、「」，也不可用這些符號或「譯名（原文）」之類的寫法取代標記。原文有幾個 ⟦l:N⟧，譯文就要有幾個，每個都與對應的 ⟦/l⟧ 成對保留。
 </inline_style_markers>`;
 
 // v1.0.2: 術語表擷取用的預設 prompt（結構化重寫，強化排除規則與輸出格式約束）
@@ -901,6 +903,10 @@ export const DEFAULT_SETTINGS = {
     // API 請求逾時（秒）。預設 15 對齊 Gemini 路徑;本機 LLM(Ollama 等)冷啟動
     // 載入模型到 VRAM 可能需 60-300 秒,使用者可自行調高
     fetchTimeoutSec: 90,
+    // API 格式（issue #74）：'chat' = Chat Completions（POST /chat/completions，各家相容端點的
+    // 最大公約數）；'responses' = Responses API（POST /responses）。既有使用者升級後 undefined，
+    // lib/openai-compat.js normalizeApiFormat 視為 'chat'。
+    apiFormat: 'chat',
   },
 };
 
@@ -912,6 +918,10 @@ export const DEFAULT_SETTINGS = {
 // 避免機密跨裝置同步）。讀取時注入 merged.customProvider.apiKey，存 sync 時要剝掉。
 const API_KEY_STORAGE_KEY = 'apiKey';
 const CUSTOM_PROVIDER_API_KEY = 'customProviderApiKey';
+// 自訂模型的額外 request headers（JSON 字串，issue #78）。值可能含機密（例如 `api-key`），
+// 比照 API Key 只存 local：不跨裝置同步、不進匯出檔、不被 Debug Bridge GET_STORAGE 帶出。
+// 讀取時注入 merged.customProvider.extraHeadersJson，存 sync 時要剝掉。
+const CUSTOM_PROVIDER_HEADERS_KEY = 'customProviderHeaders';
 
 // v1.8.14: storage.sync legacy key cleanup
 // 之前移除的設定欄位仍躺在使用者 sync storage 佔 quota(8KB / item, 100KB total)。
@@ -1123,6 +1133,7 @@ function _bindSettingsCacheInvalidator() {
   browser.storage.onChanged.addListener((changes, area) => {
     if (area !== 'sync' && !(area === 'local' && changes
       && (API_KEY_STORAGE_KEY in changes || CUSTOM_PROVIDER_API_KEY in changes
+        || CUSTOM_PROVIDER_HEADERS_KEY in changes
         || LOCAL_SETTINGS_KEYS.some((k) => k in changes)))) return;
     _settingsCachePromise = null;
   });
@@ -1150,7 +1161,7 @@ export async function getSettings() {
   // 大項設定（固定術語表 / 禁用詞）存 local：sync 殘留先搬過去，再以 local 為準（批次 6）
   await migrateLargeKeysToLocalIfNeeded(saved);
   // local 一次讀完：apiKey（v0.62 起的正規位置）+ customProvider apiKey + 大項設定
-  const localAll = await browser.storage.local.get([API_KEY_STORAGE_KEY, CUSTOM_PROVIDER_API_KEY, ...LOCAL_SETTINGS_KEYS]);
+  const localAll = await browser.storage.local.get([API_KEY_STORAGE_KEY, CUSTOM_PROVIDER_API_KEY, CUSTOM_PROVIDER_HEADERS_KEY, ...LOCAL_SETTINGS_KEYS]);
   for (const k of LOCAL_SETTINGS_KEYS) {
     if (Object.prototype.hasOwnProperty.call(localAll, k)) saved[k] = localAll[k];
   }
@@ -1198,6 +1209,9 @@ export async function getSettings() {
   merged.apiKey = apiKey;
   // v1.5.7: customProvider apiKey 也在 local（上面一次讀完）
   merged.customProvider.apiKey = localAll[CUSTOM_PROVIDER_API_KEY] || '';
+  // 自訂 headers 同樣只在 local；sync 內若混進同名欄位（舊檔 / 手動寫入）一律不採信
+  const savedHeaders = localAll[CUSTOM_PROVIDER_HEADERS_KEY];
+  merged.customProvider.extraHeadersJson = typeof savedHeaders === 'string' ? savedHeaders : '';
   return merged;
 }
 
@@ -1245,6 +1259,13 @@ export async function setSettings(patch) {
     const cp = { ...rest.customProvider };
     await browser.storage.local.set({ [CUSTOM_PROVIDER_API_KEY]: cp.apiKey });
     delete cp.apiKey;
+    rest.customProvider = cp;
+  }
+  // 自訂模型額外 headers：同樣抽出寫 local，不進 sync
+  if (rest.customProvider && Object.prototype.hasOwnProperty.call(rest.customProvider, 'extraHeadersJson')) {
+    const cp = { ...rest.customProvider };
+    await browser.storage.local.set({ [CUSTOM_PROVIDER_HEADERS_KEY]: typeof cp.extraHeadersJson === 'string' ? cp.extraHeadersJson : '' });
+    delete cp.extraHeadersJson;
     rest.customProvider = cp;
   }
 

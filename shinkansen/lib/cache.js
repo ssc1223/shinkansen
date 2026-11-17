@@ -31,6 +31,7 @@ const EVICTION_CHECK_INTERVAL_MS = 30_000; // 最多每 30 秒檢查一次
 const pendingTouches = {};
 let touchFlushTimer = null;
 const TOUCH_FLUSH_DELAY_MS = 5000; // 5 秒後統一 flush
+const TOUCH_MIN_AGE_MS = 24 * 60 * 60 * 1000; // 時間戳超過一天才更新（見 getBatch）
 
 function scheduleTouchFlush() {
   if (touchFlushTimer) return; // 已排程，不重複
@@ -326,7 +327,9 @@ export async function getBatch(texts, keySuffix = '') {
   const results = keys.map(k => {
     if (!(k in stored)) return null;
     const val = extractValue(stored[k]);
-    if (val != null) {
+    // 時間戳還新（一天內寫過 / 讀過）的不回寫：LRU 淘汰順序精確到「天」就夠用，
+    // 省掉「同一頁當天再開一次就把所有命中條目整包重寫」（實測 1,700 條一次 55–180ms 的背景寫入）
+    if (val != null && Date.now() - extractTimestamp(stored[k]) > TOUCH_MIN_AGE_MS) {
       pendingTouches[k] = wrapValue(val);
     }
     return val;
@@ -553,6 +556,55 @@ export async function migrateClearGoogleMtCacheOnce(flagKey) {
   }
   await browser.storage.local.set({ [flagKey]: true });
   return { cleared: gtKeys.length, ranMigration: true };
+}
+
+/**
+ * 一次性 migration：只清掉 LLM 文件翻譯（PDF / EPUB 等）的翻譯 cache（cacheTag '_doc' / '_oc_doc'）。
+ * 網頁、字幕、Google MT、術語表（含 EPUB 全書術語表 bookgloss_）都不動。
+ *
+ * 用在文件翻譯專用的提示變動時：cache key 不含提示文字，舊提示產的譯文會一直 cache hit，
+ * 使用者升級後看不到修正。清的範圍只限文件翻譯，不讓使用者為此損失網頁翻譯的快取。
+ * 比對方式與 clearDocTranslationCache 相同（cacheTag 緊接在 sha1 之後，錨定比對）。
+ *
+ * @param {string} flagKey 例 '__shinkansen_v269_doc_cache_cleared'
+ * @returns {Promise<{ cleared: number, ranMigration: boolean }>}
+ */
+export async function migrateClearDocTranslationCacheOnce(flagKey) {
+  const flagged = await browser.storage.local.get(flagKey);
+  if (flagged[flagKey]) return { cleared: 0, ranMigration: false };
+  const all = await browser.storage.local.get(null);
+  const docRe = /^tc_[0-9a-f]{40}(?:_oc)?_doc(?:_|$)/;
+  const docKeys = Object.keys(all).filter((k) => docRe.test(k));
+  if (docKeys.length > 0) {
+    await browser.storage.local.remove(docKeys);
+  }
+  await browser.storage.local.set({ [flagKey]: true });
+  return { cleared: docKeys.length, ranMigration: true };
+}
+
+/**
+ * 一次性 migration：清掉網頁翻譯與影片字幕的翻譯 cache（tc_* 當中不屬於 LLM 文件翻譯的全部）。
+ * LLM 文件翻譯（cacheTag '_doc' / '_oc_doc'）、術語表（含 EPUB 全書術語表 bookgloss_）都不動——
+ * 整本書的譯文重翻成本高，文件翻譯的快取另由 migrateClearDocTranslationCacheOnce 視需要處理。
+ *
+ * 用在網頁 / 字幕路徑累積了一批會改變譯文的修正時：cache key 不含這些修正，舊譯文會一直
+ * cache hit，使用者升級後看不到修正。
+ * 「是不是文件翻譯」的比對方式與 clearDocTranslationCache 相同（cacheTag 緊接在 sha1 之後，錨定比對）。
+ *
+ * @param {string} flagKey 例 '__shinkansen_v270_page_subtitle_cache_cleared'
+ * @returns {Promise<{ cleared: number, ranMigration: boolean }>}
+ */
+export async function migrateClearPageAndSubtitleCacheOnce(flagKey) {
+  const flagged = await browser.storage.local.get(flagKey);
+  if (flagged[flagKey]) return { cleared: 0, ranMigration: false };
+  const all = await browser.storage.local.get(null);
+  const docRe = /^tc_[0-9a-f]{40}(?:_oc)?_doc(?:_|$)/;
+  const keys = Object.keys(all).filter((k) => k.startsWith(KEY_PREFIX) && !docRe.test(k));
+  if (keys.length > 0) {
+    await browser.storage.local.remove(keys);
+  }
+  await browser.storage.local.set({ [flagKey]: true });
+  return { cleared: keys.length, ranMigration: true };
 }
 
 /**

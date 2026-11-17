@@ -305,6 +305,94 @@
 
   // ─── 工具 ──────────────────────────────────────────────────
 
+  // ─── 狀態歸零的單一資料源 ─────────────────────────────────
+  // SK.YT 每個欄位在哪些情境歸零，全部登記在這張表；歸零一律走 resetYtState(scope)。
+  // 新增欄位時在這裡加一列決定它的歸零範圍——不要在各情境的函式裡另外手寫「YT.<欄位> = 初值」
+  // （歷史上五處各自手列，漏改其中一處造成換片 / 停止後殘留舊狀態的 bug 反覆發生）。
+  // test/regression/youtube-state-reset-scopes.spec.js 鎖：本檔任何被賦值的 YT 欄位都必須
+  // 登記在表內，且各情境歸零結果與 golden 相同。
+  //
+  // 情境（scope）：
+  //   sourceSwitch 字幕來源換了（使用者切 CC 軌 / chooser 切回原始軌）
+  //   cacheClear   使用者清翻譯快取（session 延續，in-flight 視窗照跑）
+  //   stop         停止字幕翻譯
+  //   spaNav       換影片 / 離開 watch 頁（先前若 active 會先走一次 stop）
+  //   activate     啟動字幕翻譯
+  //
+  // on：會歸零的情境（空白分隔）；init：歸零後的值（每次呼叫產生新物件）。
+  // manual：不走表的欄位，寫明由誰管——需要先做副作用才能清的 handle（observer 要
+  //   disconnect、timer 要 clearTimeout）、只增不減的計數、依當下環境重算的值
+  const YT_RESET_TABLE = {
+    // 譯文與視窗簿記（跟著字幕來源走）
+    captionMap:               { on: 'sourceSwitch cacheClear stop spaNav',          init: () => new Map() },
+    translatedWindows:        { on: 'sourceSwitch cacheClear stop spaNav activate', init: () => new Set() },
+    displayCues:              { on: 'sourceSwitch cacheClear stop spaNav activate', init: () => [] },
+    translatedUpToMs:         { on: 'sourceSwitch cacheClear stop spaNav',          init: () => 0 },
+    captionMapCoverageUpToMs: { on: 'sourceSwitch cacheClear activate',             init: () => 0 },
+    // captionMap 清掉時取用紀錄必須一起清，否則重翻視窗把所有片段當「已取走」→ 收 0 條
+    asrSegConsumed:           { on: 'sourceSwitch cacheClear stop',                 init: () => new Set() },
+    // 進行中的工作。cacheClear 刻意不清：讓當前 session 延續，in-flight 完成後由世代比對擋寫回
+    translatingWindows:       { on: 'sourceSwitch stop spaNav activate',            init: () => new Set() },
+    pendingQueue:             { on: 'sourceSwitch stop spaNav',                     init: () => new Map() },
+    flushing:                 { on: 'stop',                                         init: () => false },
+    // 字幕來源身份（XHR listener 收到新字幕時寫入）
+    rawSegments:              { on: 'stop spaNav',                                  init: () => [] },
+    isAsr:                    { on: 'stop spaNav',                                  init: () => false },
+    captionLang:              { on: 'stop spaNav',                                  init: () => null },
+    captionSourceId:          { on: 'stop spaNav',                                  init: () => null },
+    // 設定快取：歸 null 讓下次 getYtConfig 重讀
+    config:                   { on: 'spaNav activate',                              init: () => null },
+    // CC 暫停狀態：activate 後 attachVideoListener → _observeCcButton 依實際狀態重設
+    ccPaused:                 { on: 'stop activate',                                init: () => false },
+    // 每次啟動重新計的 session 用量與診斷欄位
+    sessionUsage:             { on: 'activate', init: () => ({ inputTokens: 0, outputTokens: 0, cachedTokens: 0, billedInputTokens: 0, billedCostUSD: 0, segments: 0, cacheHits: 0 }) },
+    sessionStartTime:         { on: 'activate', init: () => Date.now() },
+    lastApiMs:                { on: 'activate', init: () => 0 },
+    batchApiMs:               { on: 'activate', init: () => [] },
+    adaptiveLookaheadMs:      { on: 'activate', init: () => 0 },
+    staleSkipCount:           { on: 'activate', init: () => 0 },
+    onTheFlyTotal:            { on: 'activate', init: () => 0 },
+    firstBatchSize:           { on: 'activate', init: () => 8 },
+    lastLeadMs:               { on: 'activate', init: () => 0 },
+    _autoCcToggled:           { on: 'activate', init: () => false },
+    _errorNotified:           { on: 'activate', init: () => false },
+    _firstCacheHitLogged:     { on: 'cacheClear activate', init: () => false },
+
+    // ── 不走表的欄位 ──
+    active:            { manual: 'translateYouTubeSubtitles 設 true、stopYouTubeTranslation 設 false' },
+    videoId:           { manual: '啟動與換影片時設為當前網址的 videoId（不是固定初值）' },
+    captionSourceGen:  { manual: '世代計數只增不歸零；哪些情境 +1 見 YT_RESET_BUMPS_GEN' },
+    observer:          { manual: 'handle：stopYouTubeTranslation disconnect 後清' },
+    batchTimer:        { manual: 'handle：stopYouTubeTranslation clearTimeout 後清' },
+    videoEl:           { manual: 'handle：stopYouTubeTranslation 解除事件監聽後清' },
+    _ccButtonObserver: { manual: 'handle：stopYouTubeTranslation disconnect 後清' },
+    _mwebCcRetryTimer: { manual: 'handle：_clearMwebCcRetry（stop / activate 呼叫）' },
+    _mwebCcRetries:    { manual: '隨 _clearMwebCcRetry 歸零' },
+    _popupDeferTimer:  { manual: 'handle：_clearPopupDefer（stop / activate 呼叫）' },
+    _popupDeferSince:  { manual: '隨 _clearPopupDefer 歸零' },
+    _skipLoggedForLang:{ manual: 'XHR listener 每次收到字幕時重設' },
+    _activateSeq:      { manual: '啟動序號只增不歸零（啟動流程的過期判斷）' },
+    _windowStartSeq:   { manual: '視窗啟動序號只增不歸零' },
+    _overlayProf:      { manual: 'overlay 效能量測（Debug Bridge PROFILE_* 開關控制）' },
+  };
+  // 這些情境會讓「之前送出、還沒回來」的翻譯批次失效：世代 +1，所有 async 寫回點比對世代、
+  // 失配即丟棄。spaNav 不在內——先前 active 時已由 stop +1；非 active 時沒有 in-flight 批次
+  const YT_RESET_BUMPS_GEN = new Set(['sourceSwitch', 'cacheClear', 'stop']);
+  const YT_RESET_SCOPES = new Set(['sourceSwitch', 'cacheClear', 'stop', 'spaNav', 'activate']);
+  for (const def of Object.values(YT_RESET_TABLE)) {
+    if (def.on) def.on = new Set(def.on.split(/\s+/).filter(Boolean));
+  }
+
+  function resetYtState(scope) {
+    if (!YT_RESET_SCOPES.has(scope)) throw new Error(`resetYtState: unknown scope ${scope}`);
+    const YT = SK.YT;
+    if (YT_RESET_BUMPS_GEN.has(scope)) YT.captionSourceGen = (YT.captionSourceGen || 0) + 1;
+    for (const [field, def] of Object.entries(YT_RESET_TABLE)) {
+      if (def.on && def.on.has(scope)) YT[field] = def.init();
+    }
+  }
+  SK._ytResetTable = YT_RESET_TABLE;  // 測試 seam
+
   SK.isYouTubePage = function isYouTubePage() {
     // m.youtube.com(行動版)v1.10.25 起支援:mweb 用同一套 html5 player 核心,
     // /api/timedtext XHR 格式同桌面(fmt=json3),#movie_player API 齊全(已 probe 實證)。
@@ -495,15 +583,7 @@
   // 呼叫點：XHR listener 偵測到來源身份變更 / chooser 'switch' 主動切軌。
   function _resetCaptionSourceBookkeeping(reason, extra) {
     const YT = SK.YT;
-    YT.captionSourceGen = (YT.captionSourceGen || 0) + 1;
-    YT.translatedWindows  = new Set();
-    YT.translatingWindows = new Set();
-    YT.captionMap         = new Map();
-    YT.pendingQueue       = new Map();
-    YT.displayCues        = [];
-    YT.translatedUpToMs   = 0;
-    YT.captionMapCoverageUpToMs = 0;
-    YT.asrSegConsumed     = new Set();  // v2.0.54: 換軌後片段時間軸全新,取用紀錄一併歸零
+    resetYtState('sourceSwitch');  // 歸零欄位與世代 +1 見 YT_RESET_TABLE
     SK.sendLog('info', 'youtube', `caption source bookkeeping reset (${reason})`, {
       gen: YT.captionSourceGen, ...(extra || {}),
     });
@@ -1244,9 +1324,12 @@
   // 影片原始語從 captionTracks 的「原音 ASR 軌」languageCode 動態決定（_pickSourceAsrTrack）：
   //   - 只有一條 kind='asr' → 就是它（一般影片，語言對應原始口說語）
   //   - 多條 kind='asr'（自動配音影片：每條配音音軌各一條 ASR，順序每次載入不同）→ 依
-  //     bridge 帶來的 YouTube 訊號挑：hints.defaultCaptionTrackIndex（原音軌推薦字幕 index）
-  //     → hints.originalAudioLang（原音軌語言）→ 都沒有才退回第一條（舊行為，並記 log）
-  //   沒 ASR 軌（罕見：創作者只上手動字幕沒讓 YT 跑 ASR）→ 無法可靠決定 sourceLang → noop。
+  //     bridge 帶來的 YouTube 訊號挑：hints.originalAudioLang（原音軌語言，與觀看者無關）
+  //     → hints.defaultCaptionTrackIndex（原音軌推薦字幕 index，會受帳號字幕偏好影響）
+  //     → 都沒有才退回第一條（舊行為，並記 log）
+  //   沒 ASR 軌（創作者上傳手動字幕後 YouTube 常不再列自動字幕，並不罕見）→ _resolveSourceLanguage
+  //   依序退：原音音軌語言 → 唯一手動軌 → 標題文字系統；全無訊號才 noop
+  //   （active 是 YT 自動翻譯軌時仍切回未翻譯版，避免二手翻譯）。
   //   非原音的 ASR 軌（配音 ASR = 機器配音再辨識的二手字幕）不當 P1 原生候選。
   //
   // Pure function：單純看 tracks + activeTrack + targetLanguage + hints，不 mutate STATE、不 dispatch。
@@ -1290,8 +1373,15 @@
     if (asrTracks.length === 1) return { track: asrTracks[0], asrCount: 1, via: 'single' };
     // 多條 ASR = 自動配音影片。順序不可信（每次載入不同），必須靠 YouTube 訊號。
     const h = hints || {};
-    const byIdx = Number.isInteger(h.defaultCaptionTrackIndex) ? tracks[h.defaultCaptionTrackIndex] : null;
-    if (byIdx && byIdx.kind === 'asr') return { track: byIdx, asrCount: asrTracks.length, via: 'default-index' };
+    // 原音音軌語言不可信時（多音軌影片找不到原音標記、bridge 只能退「預設音軌」——預設音軌與
+    // defaultCaptionTrackIndex 都會依觀看者語言指向配音）：標題文字系統能定案的先認標題
+    if (h.originalAudioLangExplicit === false) {
+      const byTitle = _findTrackByLang(asrTracks, _guessLangFromTitle(h.title));
+      if (byTitle) return { track: byTitle, asrCount: asrTracks.length, via: 'title-lang' };
+    }
+    // 先認原音音軌語言（bridge 由 YouTube 明示的 original 標記取得，與觀看者無關），
+    // 再退 defaultCaptionTrackIndex：後者會受觀看者帳號的字幕語言偏好影響
+    // （實測 KRqTLZ1YCLg 登入帳號下，日文原音音軌的 defaultCaptionTrackIndex 指向英文軌）
     if (typeof h.originalAudioLang === 'string' && h.originalAudioLang) {
       const full = h.originalAudioLang.toLowerCase();
       const base = full.split('-')[0];
@@ -1301,10 +1391,81 @@
                   || asrTracks.find(t => (t.languageCode || '').toLowerCase().split('-')[0] === base);
       if (byLang) return { track: byLang, asrCount: asrTracks.length, via: 'audio-lang' };
     }
+    const byIdx = Number.isInteger(h.defaultCaptionTrackIndex) ? tracks[h.defaultCaptionTrackIndex] : null;
+    if (byIdx && byIdx.kind === 'asr') return { track: byIdx, asrCount: asrTracks.length, via: 'default-index' };
     return { track: asrTracks[0], asrCount: asrTracks.length, via: 'first-fallback' };
   }
 
   SK._pickSourceAsrTrack = _pickSourceAsrTrack;
+
+  // 依語言碼找軌：先全碼相等，再 base-lang 相等（音軌 `en-US` ↔ 字幕軌 `en`）。pred 可限 kind。
+  function _findTrackByLang(tracks, lang, pred) {
+    if (!lang) return null;
+    const full = String(lang).toLowerCase();
+    const base = full.split('-')[0];
+    const ok = pred || (() => true);
+    return tracks.find(t => ok(t) && (t.languageCode || '').toLowerCase() === full)
+        || tracks.find(t => ok(t) && (t.languageCode || '').toLowerCase().split('-')[0] === base)
+        || null;
+  }
+
+  // 由標題文字系統猜語言（只認文字系統本身能定案的：假名 → ja、諺文 → ko、純漢字 → zh）。
+  // 拉丁字母分不出英 / 西 / 法 / 德 → null。刻意不用 SK.detectTextLang（它會被頁面 html lang 短路）。
+  function _guessLangFromTitle(title) {
+    if (typeof title !== 'string' || !title) return null;
+    let kana = 0, hangul = 0, han = 0, latin = 0;
+    for (const ch of title) {
+      const c = ch.codePointAt(0);
+      // 假名區段扣掉 ゠（30A0）・（30FB）ー（30FC）：中黑點與長音符中文標題也用（外國人名的間隔號），
+      // 算進去會把「凱蒂・佩芮・演唱會」這類中文標題判成日文
+      if ((c >= 0x3040 && c <= 0x30FF) && c !== 0x30A0 && c !== 0x30FB && c !== 0x30FC) kana++;
+      else if (c >= 0xAC00 && c <= 0xD7AF) hangul++;
+      else if ((c >= 0x4E00 && c <= 0x9FFF) || (c >= 0x3400 && c <= 0x4DBF)) han++;
+      else if ((c >= 0x41 && c <= 0x5A) || (c >= 0x61 && c <= 0x7A)) latin++;
+    }
+    if (kana >= 2) return 'ja';
+    if (hangul >= 2) return 'ko';
+    if (han >= 4 && han > latin) return 'zh';
+    return null;
+  }
+
+  // 影片原始語推導的單一入口。回傳 { lang, asrTrack, via }：
+  //   1) 有 ASR 軌 → 原音 ASR 的語言（_pickSourceAsrTrack；via = single / default-index / audio-lang / first-fallback）
+  //   以下是「沒有任何 ASR 軌」的影片（創作者上傳手動字幕後 YouTube 不再列自動字幕，
+  //   實測 KRqTLZ1YCLg：日文原音 + 英文自動配音，字幕軌只有手動 ja / en）：
+  //   2) 原音音軌語言（hints.originalAudioLang）且有該語言的軌 → via 'audio-lang-manual'
+  //   3) 只有一條手動軌 → 就是它（via 'single-manual'）
+  //   4) 標題文字系統對得上某條手動軌 → via 'title-lang'
+  //   都沒有 → lang=null（caller 決定 noop / 拿掉自動翻譯）
+  function _resolveSourceLanguage(tracks, hints, sourceAsr) {
+    const picked = sourceAsr || _pickSourceAsrTrack(tracks, hints);
+    if (picked.track) return { lang: picked.track.languageCode, asrTrack: picked.track, via: picked.via };
+    const h = hints || {};
+    // 標題判定。純漢字標題只能說「中文或日文」：字幕軌同時有中文與日文時不下結論
+    //（純漢字的日文標題很常見，判成中文會選錯軌）
+    const titleTrack = () => {
+      const guess = _guessLangFromTitle(h.title);
+      if (!guess) return null;
+      if (guess === 'zh' && _findTrackByLang(tracks, 'ja')) return null;
+      return _findTrackByLang(tracks, guess);
+    };
+    const audioTrusted = h.originalAudioLangExplicit !== false;
+    if (!audioTrusted) {
+      const byTitle = titleTrack();
+      if (byTitle) return { lang: byTitle.languageCode, asrTrack: null, via: 'title-lang' };
+    }
+    if (typeof h.originalAudioLang === 'string' && h.originalAudioLang) {
+      const byAudio = _findTrackByLang(tracks, h.originalAudioLang);
+      if (byAudio) return { lang: byAudio.languageCode, asrTrack: null, via: 'audio-lang-manual' };
+    }
+    if (tracks.length === 1) return { lang: tracks[0].languageCode, asrTrack: null, via: 'single-manual' };
+    const byTitle = titleTrack();
+    if (byTitle) return { lang: byTitle.languageCode, asrTrack: null, via: 'title-lang' };
+    return { lang: null, asrTrack: null, via: 'none' };
+  }
+
+  SK._resolveSourceLanguage = _resolveSourceLanguage;
+  SK._guessLangFromTitle = _guessLangFromTitle;
 
   // tracks: [{ languageCode, kind: '' | 'asr', isTranslatable?, vssId?, name? }]
   // activeTrack: { languageCode, kind, translationLanguageCode } | null
@@ -1359,17 +1520,28 @@
       }
     }
 
-    // 從原音 ASR track 動態推導影片原始語（多條 ASR 時由 _pickSourceAsrTrack 依 hints 挑）
-    const asrTrack = sourceAsr.track;
-    if (!asrTrack) {
-      // 沒 ASR 軌 → 無法可靠決定 sourceLang（rare：創作者只上手動字幕）→ noop
-      return { action: 'noop', reason: 'no-source-asr-track' };
+    // 影片原始語推導（_resolveSourceLanguage：原音 ASR → 原音音軌語言 → 唯一手動軌 → 標題文字系統）
+    const source = _resolveSourceLanguage(tracks, hints, sourceAsr);
+    if (!source.lang) {
+      // 原始語完全無從判斷。至少把 YT 自動翻譯拿掉（避免「原文 → YT 機翻 → Shinkansen 再翻」二手翻譯）：
+      // active 是某軌的自動翻譯版 → 切回同一條軌的未翻譯版
+      if (activeTrack && activeTrack.translationLanguageCode) {
+        const base = tracks.find(t => t.languageCode === activeTrack.languageCode
+          && (t.kind || '') === (activeTrack.kind || ''));
+        if (base) {
+          return { action: 'switch', track: base, sourceLanguage: base.languageCode, reason: 'p4-drop-auto-translation', sourceVia: 'none' };
+        }
+      }
+      return { action: 'noop', reason: 'no-source-signal', sourceVia: 'none' };
     }
-    const sourceLang = asrTrack.languageCode;
+    const sourceLang = source.lang;
 
-    // P2: 原始語 manual track（creator-uploaded，品質高過 ASR）
-    const p2 = tracks.find(t => t.languageCode === sourceLang && (!t.kind || t.kind === ''));
-    const desired = p2 || asrTrack;
+    // P2: 原始語 manual track（creator-uploaded，品質高過 ASR）；P3: 原音 ASR
+    const p2 = _findTrackByLang(tracks, sourceLang, t => !t.kind || t.kind === '');
+    const desired = p2 || source.asrTrack;
+    if (!desired) {
+      return { action: 'noop', reason: 'no-source-lang-track', sourceLanguage: sourceLang, sourceVia: source.via };
+    }
 
     // 當前 active track 已是目標 track 且沒被自翻譯 → 不必再切
     const alreadyOnTarget = activeTrack
@@ -1377,7 +1549,7 @@
       && (activeTrack.kind || '') === (desired.kind || '')
       && !activeTrack.translationLanguageCode;
     if (alreadyOnTarget) {
-      return { action: 'noop', track: desired, sourceLanguage: sourceLang, reason: 'already-on-target', sourceVia: sourceAsr.via };
+      return { action: 'noop', track: desired, sourceLanguage: sourceLang, reason: 'already-on-target', sourceVia: source.via };
     }
 
     return {
@@ -1385,7 +1557,7 @@
       track: desired,
       sourceLanguage: sourceLang,
       reason: p2 ? 'p2-source-manual' : 'p3-source-asr',
-      sourceVia: sourceAsr.via,
+      sourceVia: source.via,
     };
   }
 
@@ -1411,6 +1583,8 @@
     const hints = {
       defaultCaptionTrackIndex: detail.defaultCaptionTrackIndex,
       originalAudioLang:        detail.originalAudioLang,
+      originalAudioLangExplicit: detail.originalAudioLangExplicit,
+      title:                    detail.title,
     };
     const decision = _chooseBestCaptionTrack(detail.captionTracks, detail.activeTrack, targetLanguage, hints);
     const asrCount = Array.isArray(detail.captionTracks) ? detail.captionTracks.filter(t => t.kind === 'asr').length : 0;
@@ -1468,6 +1642,12 @@
     return document.querySelector('#movie_player')
         || document.querySelector('.html5-video-player')
         || null;
+  }
+
+  // 播放器正在播廣告：YouTube 在播放器根元素掛 ad-showing（廣告結束即移除）
+  function _isAdPlaying() {
+    const root = _getPlayerRoot();
+    return !!(root && root.classList && root.classList.contains('ad-showing'));
   }
 
   function _ensureOverlay() {
@@ -2134,6 +2314,12 @@
       return;
     }
     if (!YT.videoEl) return;
+    // 廣告播放中：廣告與正片共用同一個 <video>，currentTime 是廣告的時間——照它查 cue 會把正片
+    // 開頭的譯文疊在廣告畫面上。廣告期間清空，廣告結束後下一次 timeupdate 自然恢復
+    if (_isAdPlaying()) {
+      _setOverlayContent('');
+      return;
+    }
     // v2.3.0:播畢狀態為準——'ended' 事件清空後,若仍有晚到的 timeupdate(YouTube
     // endscreen 等會再 fire),不擋住會被 _findActiveCue 重新寫回(最後一句 endMs
     // 經閱讀補償常超過影片長度,currentTime=duration 仍命中)。與 onVideoEnded
@@ -2383,7 +2569,7 @@
     }
     track.mode = showNow ? 'showing' : 'hidden';
     for (const c of cues) {
-      try { track.addCue(new VTTCue(c.startSec, c.endSec, c.text)); } catch (e) { /* 單 cue 失敗不影響其他 */ }
+      try { track.addCue(new VTTCue(c.startSec, c.endSec, SK.escapeCueText(c.text))); } catch (e) { /* 單 cue 失敗不影響其他 */ }
     }
     return track;
   }
@@ -2781,6 +2967,7 @@
     // 世代快照：await 回來後 SPA 換片 / stop-restart 會換掉 captionMap / displayCues
     // (物件同一個 YT，屬性換新)，不比對就把舊影片的譯文與 cue 寫進新影片 session
     const _myGen = YT.captionSourceGen || 0;
+    const _origin = _usageOrigin();
     const lastSeg = subSegs[subSegs.length - 1];
     // v2.0.54:子批末條 e 改用 rawSegments 真實後繼片段起點(下一子批首條 = 本值,
     // 子批間仍不重疊),不再固定 +1500ms——固定值讓 LLM 對末句時距的認知系統性偏短
@@ -2810,9 +2997,11 @@
       SK.sendLog('info', 'youtube', 'asr sub-batch result discarded (session changed)', {
         batchIdx, gen: _myGen, currentGen: YT.captionSourceGen, active: YT.active,
       });
+      // 譯文丟棄，但這批已經計費：記到送出時那支影片名下
+      _logWindowUsage(subSegs.length, res.usage, _origin, true);
       return;
     }
-    _logWindowUsage(subSegs.length, res.usage);
+    _logWindowUsage(subSegs.length, res.usage, _origin);
 
     const rawText = res.result?.[0] || '';
     const entries = _parseAsrLlmOutput(rawText, subSegs, batchEndMs);
@@ -2999,6 +3188,7 @@
     const _batchApiMs = new Array(batches.length).fill(0);
     // 世代快照——await 回來後 SPA 換片 / stop-restart 時丟棄結果(同 _runAsrSubBatch)
     const _myGen = YT.captionSourceGen || 0;
+    const _origin = _usageOrigin();
 
     // 依 ytSubtitle.engine 路由(同非 ASR 字幕，單元已是英文整句不走 ASR JSON 模式)
     const _heuristicMsgType = SK.getSubtitleBatchType(SK.YT.config?.engine, false);
@@ -3015,9 +3205,10 @@
           SK.sendLog('info', 'youtube', 'asr heuristic batch result discarded (session changed)', {
             batchIdx: b, gen: _myGen, currentGen: YT.captionSourceGen, active: YT.active,
           });
+          _logWindowUsage(batchUnits.length, res.usage, _origin, true);
           return;
         }
-        _logWindowUsage(batchUnits.length, res.usage);
+        _logWindowUsage(batchUnits.length, res.usage, _origin);
         // v1.10.39(code review 2026-06-09 M8):防 res.ok=true 但 res.result 缺失時
         // res.result[j] 直接 throw(對齊非 ASR 主路徑 _injectBatchResult 的 res.result || [])
         const results = res.result || [];
@@ -3124,15 +3315,17 @@
     return segs.slice(0, 30).map(s => s.text || '').join('').slice(0, 500);
   }
   function _shouldSkipBecauseAlreadyInTarget() {
-    const captionLang = SK.YT.captionLang;
+    return _isCaptionAlreadyInTarget(SK.YT.captionLang, _sampleCaptionText(), SK.STATE?.targetLanguage || 'zh-TW');
+  }
+  // 「字幕已是目標語言」的判斷本體（YouTube 與 Drive 共用，SK.ASR.isCaptionAlreadyInTarget）：
+  // captionLang 命中 skip 集合；或是模糊的 `zh`，再由字幕內容補判
+  function _isCaptionAlreadyInTarget(captionLang, sample, target) {
     if (!captionLang) return false;
-    const target = SK.STATE?.targetLanguage || 'zh-TW';
     const skipSet = SKIP_LANGS_BY_TARGET[target];
     if (skipSet && skipSet.has(captionLang)) return true;
     // 模糊 lang fallback:用內容偵測補判
     const ambig = _AMBIGUOUS_LANGS_BY_TARGET[target];
     if (ambig && ambig.has(captionLang)) {
-      const sample = _sampleCaptionText();
       if (sample) {
         // v2.0.72: target=zh-TW 對模糊 `zh` 軌,內容偵測到繁中「或簡中」都 skip
         // (跟上面 skip set 的簡中系決策一致;不動 isAlreadyInTarget——那是整頁翻譯共用,
@@ -3146,6 +3339,18 @@
       }
     }
     return false;
+  }
+  // 字幕語言解析：timedtext 網址的 tlang / lang 參數優先；沒有就由字幕文字的文字系統猜
+  //（只認文字系統本身能定案的：假名 → ja、諺文 → ko、漢字為主 → zh；拉丁字母分不出語言 → ''）
+  function _resolveCaptionLang(url, sample) {
+    try {
+      if (url) {
+        const u = new URL(url, 'https://www.youtube.com');
+        const fromUrl = u.searchParams.get('tlang') || u.searchParams.get('lang');
+        if (fromUrl) return fromUrl;
+      }
+    } catch (_) { /* 非網址：往下由文字猜 */ }
+    return _guessLangFromTitle(sample) || '';
   }
   // P1 deprecation alias:既有 spec(youtube-skip-already-zh-hant.spec.js)reference 此舊名
   function _shouldSkipBecauseAlreadyTraditionalChinese() {
@@ -3205,17 +3410,29 @@
     // 結尾不得把 windowStartMs 標進（新軌的）translatedWindows，否則新軌該視窗被誤跳過。
     const _myCaptionGen = YT.captionSourceGen || 0;
 
+    // 防重入標記要在第一個 await 之前加：原本「檢查在 await 前、加入在 await 後」，同一個視窗的兩次
+    // 呼叫（timeupdate 與 seeked 幾乎同時觸發）都通過檢查，各送一次翻譯（重複計費）。
+    // v1.10.46: 快照 Set 本身——來源切換（_resetCaptionSourceBookkeeping）會換新 Set,
+    // 舊 run 的 finally 必須刪「自己加進的那個」，不可誤刪新 run 在新 Set 的同 key 標記
+    const _myTranslatingWindows = YT.translatingWindows;
+    _myTranslatingWindows.add(windowStartMs);  // v1.2.54: 加入 Set，允許其他視窗並行
+    // 本視窗執行期間有沒有其他視窗並行（結尾判斷「本視窗有沒有產出」用）
+    const _myWindowSeq = (YT._windowStartSeq = (YT._windowStartSeq || 0) + 1);
+    const _startedSolo = _myTranslatingWindows.size === 1;
+
     // 取得設定
-    const config = await getYtConfig();
+    let config;
+    try {
+      config = await getYtConfig();
+    } catch (err) {
+      _myTranslatingWindows.delete(windowStartMs);
+      throw err;
+    }
     const windowSizeMs = (config.windowSizeS || 30) * 1000;
     const windowEndMs  = windowStartMs + windowSizeMs;
 
     // 標記「已排程翻譯到此位置」，防止 timeupdate 重複觸發
     YT.translatedUpToMs = windowEndMs;
-    // v1.10.46: 快照 Set 本身——來源切換（_resetCaptionSourceBookkeeping）會換新 Set,
-    // 舊 run 的 finally 必須刪「自己加進的那個」，不可誤刪新 run 在新 Set 的同 key 標記
-    const _myTranslatingWindows = YT.translatingWindows;
-    _myTranslatingWindows.add(windowStartMs);  // v1.2.54: 加入 Set，允許其他視窗並行
 
     // v1.3.5: try-finally 確保 translatingWindows.delete 無論如何都會執行
     // （涵蓋：正常完成、!YT.active 提前 return、catch 繼續後到達 finally）
@@ -3657,9 +3874,13 @@
     if (!_genStale) YT.captionMapCoverageUpToMs = Math.max(YT.captionMapCoverageUpToMs, windowEndMs);
     // v1.9.22: 只有「真的有譯文進帳」或「視窗本來就沒字幕」才加 translatedWindows。
     // 全 batches 失敗時不加,下次 seek 此視窗會重跑翻譯(避免「靜默空白」bug)。
-    const _windowProducedTranslation =
+    // captionMap / displayCues 是整支影片共用的：有其他視窗並行時，別的視窗寫進去的譯文會讓這個
+    // 比較誤判成「本視窗有產出」（全批失敗的視窗被標成已翻 → 該段永久空白）。只有本視窗從頭到尾
+    // 沒有其他視窗並行時才採信；並行時以 _okBatchCount（本視窗自己的成功批次數）為準
+    const _ranSolo = _startedSolo && YT._windowStartSeq === _myWindowSeq;
+    const _windowProducedTranslation = _ranSolo && (
       YT.captionMap.size > _cmSizeBefore ||
-      YT.displayCues.length > _cuesCountBefore;
+      YT.displayCues.length > _cuesCountBefore);
     if (_genStale) {
       SK.sendLog('info', 'youtube', 'window finished after caption source switch / cache clear — not marking translated', {
         windowStartMs, gen: _myCaptionGen, currentGen: YT.captionSourceGen,
@@ -3736,6 +3957,8 @@
     if (!YT.active || YT.rawSegments.length === 0) return;
     // CC 關閉時暫停送 API(_observeCcButton 在 CC 重開時會重置 translatedUpToMs + 立刻續翻)
     if (YT.ccPaused) return;
+    // 廣告的 currentTime 與正片時間軸無關，不拿來決定要翻哪個視窗
+    if (_isAdPlaying()) return;
 
     const video = YT.videoEl;
     if (!video) return;
@@ -4016,7 +4239,13 @@
         rawSegCount: SK.YT.rawSegments.length,
       });
     }
-    if (!SK.YT.pendingQueue.has(key)) SK.YT.pendingQueue.set(key, []);
+    if (!SK.YT.pendingQueue.has(key)) {
+      // 佇列以正規化後的 key（轉小寫、壓空白）去重，但送去翻的必須是畫面上的原文：
+      // 送小寫版會讓模型失去專有名詞 / 句首 / 縮寫的大小寫線索（「US」變「us」、人名變普通字）
+      const els = [];
+      els.sourceText = String(original == null ? '' : original).replace(/\s+/g, ' ').trim() || key;
+      SK.YT.pendingQueue.set(key, els);
+    }
     SK.YT.pendingQueue.get(key).push(el);
     clearTimeout(SK.YT.batchTimer);
     SK.YT.batchTimer = setTimeout(flushOnTheFly, 300);
@@ -4041,17 +4270,10 @@
     // 來自已清掉的快取命中），完成後不得回頭標 translatedWindows / 抬高 coverage 高水位，
     // 否則清快取後那個視窗被當「已翻完」跳過，永遠不重翻（spec 內實測 race：reset 後
     // coverage 又被 in-flight 視窗寫回 30000)。與 _resetCaptionSourceBookkeeping 同機制。
-    YT.captionSourceGen          = (YT.captionSourceGen || 0) + 1;
-    YT.captionMap                = new Map();
-    YT.translatedWindows         = new Set();
-    YT.displayCues               = [];
-    YT.translatedUpToMs          = 0;
-    YT.captionMapCoverageUpToMs  = 0;
-    // v2.0.54:不清會讓清快取後的重翻視窗把所有片段當「已取走」→ 收 0 條、字幕永久
-    // 空白(cage 實測踩到:CLEAR_CACHE 後 translatedWindows=[120000,150000] 但
-    // displayCues=0)。asrSegConsumed 必須跟 captionMap / translatedWindows 同生命週期
-    YT.asrSegConsumed            = new Set();
-    YT._firstCacheHitLogged      = false;
+    // v2.0.54:asrSegConsumed 不清會讓清快取後的重翻視窗把所有片段當「已取走」→ 收 0 條、
+    // 字幕永久空白(cage 實測踩到:CLEAR_CACHE 後 translatedWindows=[120000,150000] 但
+    // displayCues=0)——它必須跟 captionMap / translatedWindows 同生命週期（表內同列情境）
+    resetYtState('cacheClear');
     hideCaptionStatus();
     // ASR overlay 內可能殘留中文 cue 文字(displayCues 已清,但渲染還在)。
     // v1.9.22:走 _setOverlayContent('') 而非直接砍 .window.textContent。後者會把
@@ -4100,6 +4322,8 @@
     const queue = new Map(YT.pendingQueue);
     YT.pendingQueue.clear();
     const texts = Array.from(queue.keys());
+    // 送翻用原文（大小寫保留）；captionMap 仍以正規化 key 存取
+    const sendTexts = texts.map((k) => queue.get(k)?.sourceText || k);
 
     if (YT.config?.debugToast) {
       SK.sendLog('info', 'youtube-debug', 'flushOnTheFly batch', {
@@ -4113,7 +4337,7 @@
       const _onTheFlyMsgType = SK.getSubtitleBatchType(YT.config?.engine, false);
       const res = await SK.safeSendMessage({
         type: _onTheFlyMsgType,
-        payload: { texts, glossary: null },
+        payload: { texts: sendTexts, glossary: null },
       });
       if (!res?.ok) throw new Error(SK.i18n.bgErrorMessage(res) || SK.t('common.errorUnknown'));
       // v1.8.20: await 後再次檢查 active——stop 在 await 期間發生時放棄寫入，
@@ -4131,7 +4355,7 @@
       for (let i = 0; i < texts.length; i++) {
         const key = texts[i];
         // v1.8.10 A:strip LLM 偷懶殘留的 SEP / «N» 標記
-        const trans = SK.sanitizeMarkers(results[i] || texts[i]);
+        const trans = SK.sanitizeMarkers(results[i] || sendTexts[i]);
         YT.captionMap.set(key, trans);
         const isBilingual = YT.config?.bilingualMode === true;
         for (const el of (queue.get(key) || [])) {
@@ -4242,31 +4466,48 @@
   // 每次 TRANSLATE_SUBTITLE_BATCH 回傳後，累積到 YT.sessionUsage；
   // 同時立刻送出 LOG_USAGE（逐批紀錄，方便查看每段字幕的費用細目）。
 
-  function _logWindowUsage(batchTexts, usage) {
+  // 送翻當下的歸屬資訊快照。回應回來時若 session 已換（SPA 換片 / 停止再啟動），API 已經計費，
+  // 用量仍要記到「送出時那支影片」名下——不可用回應當下的 location / videoId（那是新影片）
+  function _usageOrigin() {
+    const YT = SK.YT;
+    return {
+      url: location.href,
+      title: document.title,
+      videoId: YT.videoId || getVideoIdFromUrl(),
+      // 自訂模型走不同的 model 來源與計價；不帶 engine 時背景一律當 Gemini 記
+      engine: YT.config?.engine === 'openai-compat' ? 'openai-compat' : 'gemini',
+      model: (YT.config?.model) || undefined,
+    };
+  }
+
+  // origin：送翻當下的 _usageOrigin()；staleSession = 回應屬於已結束的 session（只記帳，不累加到
+  // 目前 session 的合計）
+  function _logWindowUsage(batchTexts, usage, origin, staleSession) {
     if (!usage || (usage.inputTokens === 0 && usage.cacheHits === 0)) return;
     const YT = SK.YT;
     const u = usage;
+    const o = origin || _usageOrigin();
 
     // 累積 session 合計
-    YT.sessionUsage.inputTokens     += u.inputTokens     || 0;
-    YT.sessionUsage.outputTokens    += u.outputTokens    || 0;
-    YT.sessionUsage.cachedTokens    += u.cachedTokens    || 0;
-    YT.sessionUsage.billedInputTokens += u.billedInputTokens || 0;
-    YT.sessionUsage.billedCostUSD   += u.billedCostUSD   || 0;
-    YT.sessionUsage.segments        += batchTexts;
-    YT.sessionUsage.cacheHits       += u.cacheHits       || 0;
-
-    // 取得本次使用的模型名稱（from config，若設定了 ytModel 就帶入）
-    const model = (YT.config?.model) || undefined;
+    if (!staleSession) {
+      YT.sessionUsage.inputTokens     += u.inputTokens     || 0;
+      YT.sessionUsage.outputTokens    += u.outputTokens    || 0;
+      YT.sessionUsage.cachedTokens    += u.cachedTokens    || 0;
+      YT.sessionUsage.billedInputTokens += u.billedInputTokens || 0;
+      YT.sessionUsage.billedCostUSD   += u.billedCostUSD   || 0;
+      YT.sessionUsage.segments        += batchTexts;
+      YT.sessionUsage.cacheHits       += u.cacheHits       || 0;
+    }
 
     SK.safeSendMessage({
       type: 'LOG_USAGE',
       payload: {
-        url:   location.href,
-        title: document.title,
+        url:   o.url,
+        title: o.title,
         source: 'youtube-subtitle',
-        videoId: YT.videoId || getVideoIdFromUrl(),  // v1.4.18: 合併用 key
-        model,
+        videoId: o.videoId,  // v1.4.18: 合併用 key
+        engine: o.engine,
+        model: o.model,
         inputTokens:      u.inputTokens     || 0,
         outputTokens:     u.outputTokens    || 0,
         cachedTokens:     u.cachedTokens    || 0,
@@ -4279,6 +4520,8 @@
       },
     }).catch(() => {});
   }
+  SK._ytLogWindowUsage = _logWindowUsage;   // regression spec 用
+  SK._ytUsageOrigin = _usageOrigin;
 
   // ─── 停止 ─────────────────────────────────────────────────
 
@@ -4305,20 +4548,10 @@
     // 只靠 active 檢查擋不住舊影片 in-flight 批次寫進新 session——所有 async
     // 寫回點(_runAsrSubBatch / heuristic _runBatch / _injectBatchResult /
     // translateWindowFrom 收尾)都比對此世代，失配即丟棄
-    YT.captionSourceGen   = (YT.captionSourceGen || 0) + 1;
-    YT.translatingWindows = new Set();  // v1.2.54
-    YT.translatedWindows  = new Set();  // v1.3.5: 補齊（原僅在 translateYouTubeSubtitles 重置）
-    YT.translatedUpToMs   = 0;
-    YT.rawSegments        = [];         // v1.3.5: 補齊（原僅在 yt-navigate-finish 重置）
-    YT.captionMap         = new Map();
-    YT.pendingQueue       = new Map();
-    YT.flushing           = false;       // v1.8.20: 確保下個 session 重啟後 flushOnTheFly 不被舊 flag 卡住
-    YT.isAsr              = false;
-    YT.captionLang        = null;       // v1.10.46: 補漏——殘留會讓下支影片 activation 早期用舊 lang 跑 already-in-target 判斷
-    YT.captionSourceId    = null;       // v1.10.46: 來源身份隨 session 結束失效
-    YT.displayCues        = [];         // G 路徑:清 overlay 顯示單位
-    YT.asrSegConsumed     = new Set();  // v2.0.54: captionMap 已清,取用紀錄留著會讓重啟後片段永遠不再送翻
-    YT.ccPaused           = false;
+    // 歸零欄位見 YT_RESET_TABLE 的 stop 欄。幾個不可漏的理由：flushing 殘留會讓下個
+    // session 的 flushOnTheFly 卡住；captionLang 殘留會讓下支影片啟動早期用舊語言判斷
+    // 「已是目標語言」；asrSegConsumed 殘留會讓重啟後片段永遠不再送翻
+    resetYtState('stop');
     if (YT._ccButtonObserver) {
       YT._ccButtonObserver.disconnect();
       YT._ccButtonObserver = null;
@@ -4388,33 +4621,20 @@
 
     YT.active  = true;
     YT.videoId = getVideoIdFromUrl();
-    YT.config  = null; // 強制重新讀取設定
-    // v1.2.39: 重置用量累積器
-    YT.sessionUsage = { inputTokens: 0, outputTokens: 0, cachedTokens: 0, billedInputTokens: 0, billedCostUSD: 0, segments: 0, cacheHits: 0 };
-    YT.sessionStartTime = Date.now();
-    // v1.2.40: 重置 debug 診斷欄位
-    YT.lastApiMs           = 0;
-    YT.batchApiMs          = [];   // v1.2.43
-    YT.adaptiveLookaheadMs = 0;    // v1.2.44
-    YT.staleSkipCount            = 0;    // v1.2.45
-    YT.captionMapCoverageUpToMs  = 0;    // v1.2.46
-    YT.translatedWindows         = new Set(); // v1.2.48
-    YT.translatingWindows        = new Set(); // v1.2.54
-    YT.onTheFlyTotal             = 0;
-    YT.firstBatchSize            = 8;         // v1.2.50
-    YT.lastLeadMs                = 0;         // v1.2.50
-    YT._firstCacheHitLogged      = false;     // v1.2.51
-    YT._autoCcToggled            = false;     // v1.6.20 A 路徑:每次啟動翻譯重置 auto-CC 旗標
+    // 啟動流程的守門：下面三個 await 的空檔內使用者可能已關掉字幕翻譯（或關掉又重開一輪）。
+    // 不擋的話這一輪會接著啟動字幕 observer、改播放器的雙語顯示狀態，把已經停掉的功能半開回來
+    const _myActivateSeq = (YT._activateSeq = (YT._activateSeq || 0) + 1);
+    const _activationStale = () => !YT.active || YT._activateSeq !== _myActivateSeq;
+    // 設定快取、session 用量與診斷欄位、視窗簿記、overlay cue 歸零（見 YT_RESET_TABLE 的 activate 欄）
+    resetYtState('activate');
     _clearMwebCcRetry();                      // mweb auto-CC 重試計數 / 排程歸零(新影片重新計)
     _clearPopupDefer();                       // issue #68：popup 延後重載歸零
-    YT._errorNotified            = false;
-    YT.ccPaused                  = false;     // attachVideoListener → _observeCcButton 會依 CC 實際狀態重設
-    YT.displayCues               = [];        // G 路徑:啟動時清空 overlay cue,等本影片字幕回來
 
     // 提前掛 video 監聽器，不等字幕資料回來（使用者可能在等待期間拖進度條）
     attachVideoListener();
 
     const config = await getYtConfig();
+    if (_activationStale()) return;
     _debugUpdate('字幕翻譯已啟動，等待 CC 字幕資料…');
 
     // v1.8.42:確保 player root class / stylesheet / overlay 狀態對齊雙語設定。
@@ -4432,7 +4652,9 @@
     // 而是 YT 已翻譯後 zh-Hans 字幕的問題（_chooseBestCaptionTrack 註解詳述）。
     if (config.preferOriginalTrack !== false) {
       const { targetLanguage = 'zh-TW' } = await browser.storage.sync.get('targetLanguage');
+      if (_activationStale()) return;
       const action = await _runCaptionTrackChooser(targetLanguage);
+      if (_activationStale()) return;
       // skip / switch-to-native:YT 顯示 native target,Shinkansen 沒翻譯工作
       // - 單語:stopYouTubeTranslation 清監聽(target 顯示就是終點)
       // - 雙語:留 Shinkansen 監聽,等使用者手動切到非 target 軌 → XHR interceptor 抓到後
@@ -4643,19 +4865,11 @@
     if (YT.active) stopYouTubeTranslation(); // stopYouTubeTranslation 內已呼叫 hideCaptionStatus + _debugRemove
     hideCaptionStatus(); // v1.2.55: 確保 SPA 導航後殘留的提示也清掉
     _debugRemove(); // 確保即使非 active 狀態也清掉面板（內含 _debugMissedKeys.clear()）
-    YT.rawSegments        = [];
-    YT.captionMap         = new Map();
-    YT.pendingQueue       = new Map();      // v1.3.5: 確保清理 on-the-fly 佇列
-    YT.translatedUpToMs   = 0;
-    YT.translatedWindows  = new Set();      // v1.3.5: 明確重置（原在 translateYouTubeSubtitles 重置）
-    YT.translatingWindows = new Set();      // v1.3.5: 防止 SPA nav 期間的殘留視窗阻塞
-    YT.isAsr              = false;
-    YT.captionLang        = null;           // v1.10.46: 補漏——新影片 activation 早期不可用前一支影片的 lang
-    YT.captionSourceId    = null;           // v1.10.46: 來源身份跨影片失效
-    YT.displayCues        = [];             // G 路徑:SPA nav 清 overlay 顯示單位
+    // 字幕來源、譯文與視窗簿記、設定快取歸零（見 YT_RESET_TABLE 的 spaNav 欄）——非 active
+    // 時 XHR listener 也會寫入字幕來源欄位，所以不能只靠上面的 stop
+    resetYtState('spaNav');
     _setAsrHidingMode(false);
     _removeOverlay();
-    YT.config             = null;
     YT.videoId            = getVideoIdFromUrl();
     SK.sendLog('info', 'youtube', 'SPA navigation reset', { wasActive, newVideoId: YT.videoId });
 
@@ -4723,6 +4937,71 @@
     if (sc != null) _applyYtCaptionScale(sc);
   }).catch(() => { /* 預設 100 */ });
 
+  // ─── 整支字幕的批次派工（X / Drive 共用，2026-11-15 code review Y-3）─────
+  // 兩邊原本各寫一份「切批 → N 個 worker 依序取批」迴圈，而且都沒有逐批狀態：批次失敗
+  // 只寫 log，整輪結束後只要有任何一批成功就當成「已完成」，缺的批次到重新整理前補不
+  // 回來。這裡把逐批狀態收成單一實作：
+  //   state[i] = { status: 'pending' | 'inflight' | 'done' | 'failed', attempts, lastFailAt }
+  // runTranscript 只負責派工與記狀態，不知道 engine / 訊息型別 / 譯文放哪——那些在
+  // 呼叫端的 runBatch(idx) 內，回傳 true 表示該批譯文已落地、false 表示失敗可重試。
+  // 失敗批次不在同一輪自動重打（背景端對暫時性錯誤已有重試；沒設 key 這類錯誤重打只
+  // 是多打一次）：留在 'failed'，由呼叫端決定何時用 reviveFailedBatches 放回 'pending'。
+  // pickNext 讓呼叫端決定下一批（X 依播放位置挑；預設取第一個 pending），回 -1 表示
+  // 目前沒有要派的批次，該 worker 結束。
+  function _createBatchState(n) {
+    return Array.from({ length: n }, () => ({ status: 'pending', attempts: 0, lastFailAt: 0 }));
+  }
+  // 把符合條件的 failed 批次放回 pending。opts.maxAttempts：已嘗試達此次數的不再放回；
+  // opts.backoffMs(attempts) → 距上次失敗至少要過多久；opts.resetAttempts：歸零重算
+  // （使用者改了設定 / 明確重新觸發時用）。回傳放回的批數
+  function _reviveFailedBatches(state, opts) {
+    const o = opts || {};
+    const now = Date.now();
+    let revived = 0;
+    for (const b of state || []) {
+      if (b.status !== 'failed') continue;
+      if (o.resetAttempts) b.attempts = 0;
+      if (o.maxAttempts != null && b.attempts >= o.maxAttempts) continue;
+      if (typeof o.backoffMs === 'function' && now - b.lastFailAt < o.backoffMs(b.attempts)) continue;
+      b.status = 'pending';
+      revived++;
+    }
+    return revived;
+  }
+  function _summarizeBatchState(state) {
+    const out = { done: 0, failed: 0, pending: 0, inflight: 0 };
+    for (const b of state || []) out[b.status] = (out[b.status] || 0) + 1;
+    return out;
+  }
+  async function _runTranscript(opts) {
+    const { state, runBatch } = opts;
+    const maxConcurrent = Math.max(1, opts.maxConcurrent || 1);
+    const shouldStop = typeof opts.shouldStop === 'function' ? opts.shouldStop : () => false;
+    const pickNext = typeof opts.pickNext === 'function'
+      ? opts.pickNext
+      : () => state.findIndex(b => b.status === 'pending');
+    const worker = async () => {
+      while (true) {
+        if (shouldStop()) return;
+        const idx = pickNext();
+        if (!(idx >= 0) || !state[idx] || state[idx].status !== 'pending') return;
+        const b = state[idx];
+        b.status = 'inflight';
+        b.attempts++;
+        let ok = false;
+        try { ok = (await runBatch(idx)) === true; } catch (_) { ok = false; }
+        if (ok) {
+          b.status = 'done';
+        } else {
+          b.status = 'failed';
+          b.lastFailAt = Date.now();
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: maxConcurrent }, worker));
+    return _summarizeBatchState(state);
+  }
+
   // ─── 對外 export:給 content-drive.js(Drive ASR commit 3+)共用 ─────
   // parseJson3:json3 → raw segments [{text, normText, startMs, groupId}]
   // mergeAsr:啟發式合句(kle/Ile/Lle 三段)→ [{startMs, endMs, text, sourceSegs}]
@@ -4748,6 +5027,14 @@
     joinSegTexts,
     // 2026-10-19：X 影片字幕（content-x.js）共用「字幕已是目標語言就不翻」集合
     skipLangsByTarget: SKIP_LANGS_BY_TARGET,
+    // 2026-11-15：Drive 字幕共用的語言解析與「已是目標語言」判斷
+    resolveCaptionLang: _resolveCaptionLang,
+    isCaptionAlreadyInTarget: _isCaptionAlreadyInTarget,
+    // 2026-11-15：X / Drive 共用的整支字幕批次派工與逐批狀態（見 _runTranscript 註解）
+    createBatchState: _createBatchState,
+    reviveFailedBatches: _reviveFailedBatches,
+    summarizeBatchState: _summarizeBatchState,
+    runTranscript: _runTranscript,
   };
 
 })(window.__SK);

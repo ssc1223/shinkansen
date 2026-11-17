@@ -316,6 +316,7 @@
         }
       }
       const node = isString ? target.ownerDocument.createTextNode(content) : content;
+      if (!isString) removeCarriedAtomicOriginals(target, content);
       const textNodes = SK.collectVisibleTextNodes(target);
       if (textNodes.length === 0) {
         target.appendChild(node);
@@ -341,7 +342,8 @@
       }
       const parent = main.parentNode;
       if (parent) {
-        parent.insertBefore(node, main);
+        if (isString) parent.insertBefore(node, main);
+        else mergeAlongAncestorChain(target, main, node);
         parent.removeChild(main);
       } else {
         target.appendChild(node);
@@ -382,6 +384,63 @@
       removedAny = true;
     }
     target.insertBefore(node, insertRef);
+  }
+
+  /**
+   * (B) 路徑專用：移除「譯文 fragment 已帶回 clone」的整顆保留節點。
+   * 字型圖示、inline <code>、註腳 sup 這類節點序列化成 ⟦*N⟧，fragment 裡有它的 deep clone；
+   * (B) 只換文字節點、其餘原節點留在原位，不移除就是原節點 + clone 兩顆。
+   * 只移除 fragment 裡找得到相同節點的那些——模型把標記吃掉時原節點要留著。
+   */
+  function removeCarriedAtomicOriginals(target, frag) {
+    const carried = Array.from(frag.querySelectorAll('*'));
+    if (carried.length === 0) return;
+    const used = new Set();
+    const walker = target.ownerDocument.createTreeWalker(target, NodeFilter.SHOW_ELEMENT, {
+      acceptNode(n) {
+        // 媒體與 SVG 內部不是序列化會產生 slot 的範圍，整棵跳過
+        if (SK.isMediaLikeElement(n)) return NodeFilter.FILTER_REJECT;
+        const atomic = SK.isAtomicPreserve(n)
+          || (n.tagName === 'CODE' && !(n.parentElement && n.parentElement.tagName === 'PRE'));
+        return atomic ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP;
+      },
+    });
+    const originals = [];
+    let o;
+    while ((o = walker.nextNode())) originals.push(o);
+    for (const orig of originals) {
+      if (!orig.isConnected || !target.contains(orig)) continue;
+      const twin = carried.find((c) => !used.has(c) && c.isEqualNode(orig));
+      if (!twin) continue;
+      used.add(twin);
+      orig.remove();
+    }
+  }
+
+  /**
+   * (B) 路徑專用：把譯文 fragment 放到 main（最長文字節點）的位置，沿 main → target 的祖先鏈
+   * 逐層對齊。祖先若是序列化會產生外殼的元素（<a>、帶樣式的 <span>…），fragment 裡有同一顆
+   * 外殼的 clone；整個 fragment 直接塞進 main 的位置會變成 <a><img><a>譯文</a></a>。
+   * 對齊規則：某層祖先在目前這批節點裡找得到同殼的 clone → clone 前後的節點放到祖先前後，
+   * clone 裡面的節點往下一層繼續；找不到（祖先對序列化透明，或模型丟了那對標記）→ 整批往下一層。
+   * 最後剩下的節點插在 main 前面，由呼叫端移除 main。
+   */
+  function mergeAlongAncestorChain(target, main, frag) {
+    const chain = [];
+    for (let p = main.parentNode; p && p !== target; p = p.parentNode) chain.unshift(p);
+    let nodes = Array.from(frag.childNodes);
+    for (const anc of chain) {
+      const shell = anc.cloneNode(false);
+      const at = nodes.findIndex((n) => n.nodeType === Node.ELEMENT_NODE
+        && n.cloneNode(false).isEqualNode(shell));
+      if (at === -1) continue;
+      const twin = nodes[at];
+      for (const n of nodes.slice(0, at)) anc.parentNode.insertBefore(n, anc);
+      const after = anc.nextSibling;
+      for (const n of nodes.slice(at + 1)) anc.parentNode.insertBefore(n, after);
+      nodes = Array.from(twin.childNodes);
+    }
+    for (const n of nodes) main.parentNode.insertBefore(n, main);
   }
 
   /**
@@ -456,28 +515,36 @@
     }
     if (linkSlotIdxs.length === 0) return null;
 
-    // 從原始 DOM 取得每個 <a> 的原始文字（按 DOM 順序）
+    // 先把每個 <a> slot 與它的原始 <a> 一對一配好（slot 是原 <a> 的淺層 clone，兩者都照
+    // DOM 順序）。不可用「在譯文裡找到文字才前進」的指標配對：前面的連結文字被翻掉找不到時，
+    // 後面找到的連結會套上前面連結的外殼，href 指到別的網址
     const originalAnchors = Array.from(el.querySelectorAll('a'));
+    const pairs = [];
+    let anchorPtr = 0;
+    for (const slotIdx of linkSlotIdxs) {
+      for (let k = anchorPtr; k < originalAnchors.length; k++) {
+        if (originalAnchors[k].cloneNode(false).isEqualNode(slots[slotIdx])) {
+          pairs.push({ slotIdx, anchor: originalAnchors[k] });
+          anchorPtr = k + 1;
+          break;
+        }
+      }
+    }
 
     let remaining = text;
     const parts = [];
     let anyFound = false;
-    let slotPtr = 0;
 
-    for (const anchor of originalAnchors) {
+    for (const { slotIdx, anchor } of pairs) {
       const linkText = (anchor.textContent || '').trim();
       if (linkText.length < 2) continue; // 太短容易誤判
       const pos = remaining.indexOf(linkText);
-      if (pos === -1) continue; // 找不到則跳過，不強行猜位置
-
-      const matchIdx = linkSlotIdxs[slotPtr];
-      if (matchIdx === undefined) continue;
+      if (pos === -1) continue; // 找不到則整對跳過，不強行猜位置
 
       if (pos > 0) parts.push({ type: 'text', content: remaining.slice(0, pos) });
-      parts.push({ type: 'link', content: linkText, slotIdx: matchIdx });
+      parts.push({ type: 'link', content: linkText, slotIdx });
       remaining = remaining.slice(pos + linkText.length);
       anyFound = true;
-      slotPtr++;
     }
 
     if (!anyFound) return null;
@@ -614,6 +681,9 @@
     let out = translation;
     for (const rule of rules) {
       if (!out.includes(rule.full)) continue;
+      // 保留完整對照的那個元素已經不在頁面上（注入沒落地 / 該段被頁面移除）→ 視為還沒出現過，
+      // 讓下一個出現處接手。否則「第一次出現」被記在一個看不到的元素上，整頁再也沒有完整對照
+      if (rule.seen && rule.keptEl && !rule.keptEl.isConnected) { rule.seen = false; rule.keptEl = null; }
       const isKeeperEl = !rule.seen || (holderEl != null && rule.keptEl === holderEl);
       let keptThisString = false;
       let from = 0;
@@ -628,9 +698,12 @@
           from = idx + rule.full.length;
           continue;
         }
+        const lenBefore = out.length;
         out = _adSplice(out, idx, idx + rule.full.length, rule.keep);
         rule.seen = true;
-        from = idx + rule.keep.length + 2; // +2 = 最多補兩個空格的餘裕(保守前進)
+        // 前進到「替換後片段的實際結尾」（含 _adSplice 補的空格）。原本固定 +2（假設補滿兩個空格）：
+        // 沒補空格時會多跳 2 個字元，緊接在後的下一個對照剛好被跳過、留著沒裁
+        from = idx + rule.full.length + (out.length - lenBefore);
       }
     }
     return out;
@@ -673,11 +746,16 @@
     var _preText = (unit.kind !== 'fragment' && unit.el)
       ? (unit.el.textContent || '').trim() : null;
 
+    // 本單元的顯示模式：單元自帶（懸停翻譯，顯示方式獨立於整頁）優先，沒帶才讀全域。
+    // 全域值在請求在途時可能被別條路徑改寫（背景簡繁轉換 run 進 translatePage 會寫回整頁設定），
+    // 掛在單元上的值不受影響
+    const injectMode = unit.injectMode || STATE.translatedMode;
+
     // Sibling element 邊界空格:React site(X / Threads)DOM 元素間沒有
     // whitespace text node,各 unit 獨立翻譯後文字直接黏 URL/mention。
     // 在注入前對 translation 尾/首補空格,讓 text node 跟相鄰 element 有間距。
     if (unit.el && unit.el.nodeType === 1 && typeof translation === 'string'
-        && STATE.translatedMode !== 'dual') {
+        && injectMode !== 'dual') {
       var _cs = unit.el.ownerDocument?.defaultView?.getComputedStyle?.(unit.el);
       if (_cs && _cs.display.startsWith('inline')) {
         if (!/\s$/.test(translation)) {
@@ -723,7 +801,7 @@
     // 雙重譯文。元素 unit 內含 dual 原文槽（父段落包住懸停翻過的子段）同理——innerHTML 覆蓋
     // 會連 wrapper 一起吃掉。dual 路徑由 injectDual 內部去重，不在此擋。fragment unit 只動
     // 自己的節點區段，容器內別處有 dual 槽不受影響，只看祖先。
-    if (STATE.translatedMode !== 'dual' && unit.el && unit.el.nodeType === 1) {
+    if (injectMode !== 'dual' && unit.el && unit.el.nodeType === 1) {
       if (unit.el.closest && unit.el.closest('[data-shinkansen-dual-source]')) return;
       if (unit.kind !== 'fragment' && unit.el.querySelector && unit.el.querySelector('[data-shinkansen-dual-source]')) return;
     }
@@ -731,7 +809,7 @@
     // v1.5.0: 雙語對照模式分派——dual 走 SK.injectDual 走另一條路徑。
     // 只 element 走得到 dual（fragment unit 結構特殊，dual 模式直接 fallback 走 single）。
     // 模式由 STATE.translatedMode 決定（translatePage 進入時依 settings.displayMode 設定）。
-    if (STATE.translatedMode === 'dual' && unit.kind !== 'fragment' && SK.injectDual) {
+    if (injectMode === 'dual' && unit.kind !== 'fragment' && SK.injectDual) {
       SK.injectDual(unit, translation, slots);
       return;
     }
@@ -748,7 +826,7 @@
     // 預期的「single 全頁原地替換」+ Readwise Reader 擷取對應段帶 wrapper 噪音。
     // 但對 X / Threads / Reddit 這類 React SPA,寧可保 click 互動 work,使用者
     // 體驗整體較好。詳見 facebook/react#11538 系列。
-    if (STATE.translatedMode !== 'dual' && unit.kind !== 'fragment'
+    if (injectMode !== 'dual' && unit.kind !== 'fragment'
         && SK.injectDual && SK.isFrameworkManaged?.(unit.el)) {
       // v1.9.27 Layer A2 局部 dedup:framework-managed 場景下 collectParagraphs 對
       // X tweetText 可能同時抓父 + 內部 inline 子 element(各為一個 unit)。兩個都
@@ -941,6 +1019,24 @@
 
     if (!startNode || startNode.parentNode !== el) return;
 
+    // 先定出要換掉的區間與插入點，再反序列化：反序列化會把 reuseNode 活節點（inline BUTTON）
+    // 搬進 frag，區間端點若正好是這種節點，之後才沿 nextSibling 找就找不到終點。
+    // endNode 走不到（偵測到注入之間被頁面搬走）時整個單元放棄——沿用「刪到最後一個兄弟」
+    // 會把 run 後面不相干的段落一起刪掉，而且 Guard 會把被清空的狀態當 baseline 守住
+    const toRemove = [];
+    let reachedEnd = false;
+    for (let cur = startNode; cur; cur = cur.nextSibling) {
+      toRemove.push(cur);
+      if (cur === endNode) { reachedEnd = true; break; }
+    }
+    if (!reachedEnd) {
+      SK.sendLog('warn', 'inject', 'fragment endNode unreachable from startNode, unit skipped', {
+        text: (startNode.textContent || '').substring(0, 60),
+      });
+      return;
+    }
+    const anchor = endNode.nextSibling;
+
     SK.snapshotOnce(el);
 
     let newContent;
@@ -954,6 +1050,14 @@
         newContent = cleaned.includes('\n')
           ? buildFragmentFromTextWithBr(cleaned)
           : document.createTextNode(cleaned);
+        // 模型把佔位符全吃掉時，run 內的載體型內容（emoji 圖、圖示外框、註腳上標、活按鈕）
+        // 不能跟著原節點一起被換掉——補在譯文尾端（同 deserializeWithPlaceholders ok 分支的回收）
+        if (SK.appendUnusedCarrierSlots) {
+          const holder = document.createDocumentFragment();
+          holder.appendChild(newContent);
+          SK.appendUnusedCarrierSlots(holder, slots, null, false);
+          newContent = holder;
+        }
       }
     } else {
       // v1.4.8: 無 slots 時也要把 \n 還原為 <br>（字面 \n 已在 injectTranslation 入口轉換完畢）
@@ -964,17 +1068,6 @@
       }
     }
 
-    // v1.6.19: endNode 可能在 collectParagraphs 與 inject 之間被外部重排，
-    // 不再是 el 的直接 child。沿用 endNode.nextSibling 當 anchor 會把 newContent
-    // 加到 el 末尾（順序錯位)。anchor 必須是 el 的直接 child 才合法。
-    const anchor = (endNode && endNode.parentNode === el) ? endNode.nextSibling : null;
-    const toRemove = [];
-    let cur = startNode;
-    while (cur) {
-      toRemove.push(cur);
-      if (cur === endNode) break;
-      cur = cur.nextSibling;
-    }
     for (const n of toRemove) {
       if (n.parentNode === el) el.removeChild(n);
     }
@@ -1433,7 +1526,11 @@
     // style 蓋掉 mark CSS(例如 tint mark 的 padding: 4px 8px 會被 inline padding:0
     // 壓掉)。getComputedStyle 對沒設 padding 的元素回傳 '0px'，是 truthy 字串。
     const winLayout = original.ownerDocument?.defaultView;
-    const csLayout = winLayout?.getComputedStyle?.(original);
+    const csLayoutRaw = winLayout?.getComputedStyle?.(original);
+    // display:contents 的元素沒有自己的盒子：margin / padding / max-width 的 computed 值照樣讀得到
+    // 但完全不影響版面。照抄到 wrapper 會憑空多出縮排，「抵消原段落 padding-bottom」的負 marginTop
+    // 更會把譯文拉上去疊在原文上（那段 padding 根本沒撐出空間）。這類元素不做版面鏡像
+    const csLayout = (csLayoutRaw && csLayoutRaw.display === 'contents') ? null : csLayoutRaw;
     const isNonZero = (v) => v && v !== '0px';
     if (csLayout) {
       if (isNonZero(csLayout.marginLeft))   wrapper.style.marginLeft   = csLayout.marginLeft;
@@ -1958,6 +2055,69 @@
     return false;
   }
 
+  /**
+   * 純文字退路（整段譯文寫進一個文字節點、其餘清空）的落點。
+   * 預設是第一個可見文字節點；但開頭若是「放大首字」——只有幾個字的片段，且包住它的行內盒子
+   * 字級達段落 1.5 倍以上或是浮動盒子（雜誌排版的 drop cap：浮動 + 放大 + 固定高度）——
+   * 整段譯文寫進去會繼承放大字級並塞在固定高度的盒子裡，溢出蓋到相鄰段落（GitHub issue #79）。
+   * 這類開頭節點跳過，落在後面的一般文字節點——優先挑段落直屬的文字節點（首字後面常接一段
+   * 小型大寫的行內元素，寫進去整段的拉丁字母都會變小型大寫），沒有才用第一個非首字節點；
+   * 開頭不是放大首字時維持第 0 個（原行為）。
+   * 判斷只看結構與 computed style，不看 class / 屬性名稱。
+   */
+  const DROPCAP_MAX_CHARS = 3;
+  const DROPCAP_FONT_RATIO = 1.5;
+  function elementFontSize(el) {
+    return parseFloat(el.ownerDocument?.defaultView?.getComputedStyle(el)?.fontSize) || 0;
+  }
+  // 文字節點是不是「放大首字」：只有幾個字，且 el 之下包住它的某層盒子是浮動或放大字級
+  function isEnlargedInitialTextNode(el, node, base) {
+    const win = el.ownerDocument?.defaultView;
+    if (!win) return false;
+    if ((node.nodeValue || '').trim().length > DROPCAP_MAX_CHARS) return false;
+    for (let p = node.parentElement; p && p !== el; p = p.parentElement) {
+      const cs = win.getComputedStyle(p);
+      if (!cs) continue;
+      if (cs.float !== 'none' || (base > 0 && parseFloat(cs.fontSize) >= base * DROPCAP_FONT_RATIO)) return true;
+    }
+    return false;
+  }
+  function pickFlattenTargetIndex(el, textNodes) {
+    if (textNodes.length < 2) return 0;
+    const base = elementFontSize(el);
+    let i = 0;
+    while (i < textNodes.length - 1 && isEnlargedInitialTextNode(el, textNodes[i], base)) i++;
+    if (i === 0) return 0;
+    if (isEnlargedInitialTextNode(el, textNodes[i], base)) return 0; // 全部都是首字型節點
+    for (let j = i; j < textNodes.length; j++) {
+      if (textNodes[j].parentElement === el) return j;
+    }
+    return i;
+  }
+
+  /**
+   * 同構配對（A3）版的同一道防線：配對結果把超過幾個字的譯文分給放大首字節點時
+   *（譯文在第一個行內元素之前有一段文字，對到原文的首字母），把那段文字併到文件順序上
+   * 下一個非首字節點的開頭，首字節點清空。只有一兩個字時照舊留在首字盒子裡（仍是首字放大的樣子）。
+   */
+  function relocateEnlargedInitialOverflow(el, mutations) {
+    if (mutations.length < 2) return;
+    const base = elementFontSize(el);
+    for (const m of mutations) {
+      if ((m.newValue || '').trim().length <= DROPCAP_MAX_CHARS) continue;
+      if (!isEnlargedInitialTextNode(el, m.node, base)) continue;
+      let next = null;
+      for (const c of mutations) {
+        if (c === m || isEnlargedInitialTextNode(el, c.node, base)) continue;
+        if (!(m.node.compareDocumentPosition(c.node) & Node.DOCUMENT_POSITION_FOLLOWING)) continue;
+        if (!next || (c.node.compareDocumentPosition(next.node) & Node.DOCUMENT_POSITION_FOLLOWING)) next = c;
+      }
+      if (!next) continue;
+      next.newValue = m.newValue + (next.newValue || '');
+      m.newValue = '';
+    }
+  }
+
   SK.tryInjectNodeValueMutate = function tryInjectNodeValueMutate(el, translation, slots) {
     if (!el || el.nodeType !== Node.ELEMENT_NODE) return false;
     if (!translation || typeof translation !== 'string') return false;
@@ -1987,6 +2147,7 @@
       // 抓到零 characterData 寫入）。回 false 讓段落走 A3.5 flatten / dual fallback。
       if (mutations.length === 0) return false;
       if (mutations.some(m => !m.node.isConnected)) return false;
+      relocateEnlargedInitialOverflow(el, mutations);
       if (!STATE.nodeValueMutateBackup) STATE.nodeValueMutateBackup = new Map();
       if (!STATE.nodeValueMutateBackup.has(el)) {
         // backup 同時存 originalValue(restorePage 還原用)與 translatedValue(Layer A4
@@ -2035,20 +2196,21 @@
       // Case 3b: chunks < textNodes — React site 把同段落文字拆多個 inline SPAN
       // (X tweetText / Threads / Reddit),inline 分隔不產 \n,翻譯結果自然
       // 比 source text node 少 chunk。策略:整段譯文塞第一個 text node,其餘清空。
+      // 落點由 pickFlattenTargetIndex 決定（開頭是放大首字時往後挪，見該函式說明）。
       if (chunks.length > 0 && chunks.length < textNodes.length) {
+        const targetIdx = pickFlattenTargetIndex(el, textNodes);
         if (!STATE.nodeValueMutateBackup) STATE.nodeValueMutateBackup = new Map();
         if (!STATE.nodeValueMutateBackup.has(el)) {
           STATE.nodeValueMutateBackup.set(el,
             textNodes.map((node, i) => ({
               node,
               originalValue: node.nodeValue,
-              translatedValue: i === 0 ? translation : '',
+              translatedValue: i === targetIdx ? translation : '',
             }))
           );
         }
-        textNodes[0].nodeValue = translation;
-        for (let i = 1; i < textNodes.length; i++) {
-          textNodes[i].nodeValue = '';
+        for (let i = 0; i < textNodes.length; i++) {
+          textNodes[i].nodeValue = i === targetIdx ? translation : '';
         }
         return true;
       }

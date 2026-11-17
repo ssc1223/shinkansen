@@ -187,6 +187,8 @@ function analyzePage(rawPage) {
   };
   // 批次 7 §6.4：解析階段算好的「可能有彩色底」旗標透傳給 renderer（缺席時 renderer 自己算）
   if (typeof rawPage.mayHaveColoredBackground === 'boolean') out.mayHaveColoredBackground = rawPage.mayHaveColoredBackground;
+  // 點陣圖外框透傳:繞圖文字分塊(6.7)與 renderer 擴框阻擋共用
+  if (Array.isArray(rawPage.imageRects)) out.imageRects = rawPage.imageRects;
   const runs = (rawPage.textRuns || []).slice();
   if (runs.length === 0) return out;
 
@@ -230,7 +232,7 @@ function analyzePage(rawPage) {
 
   // 3) Column 偵測：對每條 line 的 left 跑 K-means
   const pageWidth = rawPage.viewport.width || 0;
-  const columnAssignments = detectColumns(lines, pageWidth);
+  const columnAssignments = detectColumns(lines, pageWidth, medianLineHeight);
   out.columnCount = columnAssignments.columnCount;
 
   // 4) 同 column 內切 block(canvas 座標，top 升序 = 視覺由上往下)
@@ -302,6 +304,7 @@ function analyzePage(rawPage) {
     bodyFontSize,
     pageWidth: rawPage.viewport.width,
     pageHeight: rawPage.viewport.height,
+    imageRects: out.imageRects || [],
   };
   for (const b of blocks) {
     b.type = classifyBlockType(b, ctx);
@@ -347,7 +350,13 @@ function analyzePage(rawPage) {
   //      row 序號 cell 插在行序列中間」拆散(sameRow / leftShift 在序號兩側觸發,
   //      描述行永不相鄰)。以幾何配對(不靠序列相鄰)把被插斷的續行接回同一個
   //      翻譯單位,避免句子在行界斷開送翻
-  const merged = mergeWrapFragments(rowSplit, medianLineHeight);
+  const wrapMerged = mergeWrapFragments(rowSplit, medianLineHeight);
+
+  // 6.7) 繞圖文字分塊（見 splitFloatWrappedBlock 註解）。放在所有合併步驟之後，切開的結果不會再被接回去
+  const merged = [];
+  const obstacles = imageObstaclesWithCaptions(ctx.imageRects, wrapMerged, medianLineHeight);
+  const pageLines = wrapMerged.flatMap((b) => (Array.isArray(b._lines) ? b._lines : []));
+  for (const b of wrapMerged) merged.push(...splitFloatWrappedBlock(b, medianLineHeight, ctx, obstacles, pageLines));
 
   // 拆解後重排 reading order + 重編 blockId(維持「同欄由上往下」連續編號)
   merged.sort((a, b) => {
@@ -372,6 +381,130 @@ function analyzePage(rawPage) {
   }
   out.bodyFontSize = bodyFontSize;
   return out;
+}
+
+// 繞圖障礙物 = 圖片外框 + 緊接在圖片正下方、寬度不超出圖片的文字 block(圖說)。段落繞過的
+// 是「圖 + 圖說」整個浮動框,只算圖片本身的話,圖說旁邊那幾行仍會被當成圖下方的寬行。
+// 圖說可能被切成上下幾塊,往下連續接
+function imageObstaclesWithCaptions(imageRects, blocks, medianLineHeight) {
+  const mlh = medianLineHeight || 12;
+  return imageRects.map((img) => {
+    const r = img.slice();
+    for (let grew = true; grew;) {
+      grew = false;
+      for (const b of blocks) {
+        const [x0, y0, x1, y1] = b.bbox;
+        if (x0 < r[0] - mlh || x1 > r[2] + mlh) continue;
+        if (y0 < r[3] - mlh || y0 > r[3] + 3 * mlh || y1 <= r[3]) continue;
+        r[3] = y1;
+        grew = true;
+      }
+    }
+    return r;
+  });
+}
+
+// 繞圖文字分塊:段落繞過浮動圖片時,圖旁的幾行窄、圖片上方 / 下方的行寬。block 外框是所有
+// 行的聯集矩形,窄行與寬行留在同一塊,矩形就會蓋住圖片的位置——譯文照矩形寬度排版會直接
+// 壓在圖上。障礙物見 imageObstaclesWithCaptions。block 的矩形與某個障礙物重疊、但沒有任何一行真的壓在它上面(壓在上面 = 文字
+// 本來就疊在圖上 / 行內夾著的上標碎塊,不是繞圖)→ 沿障礙物的上緣 / 下緣把行分成
+// 「上方 / 旁邊 / 下方」各自成塊,旁邊那一塊的外框就停在障礙物旁邊。
+// 純靠行寬變化猜繞圖會把「剛好比較短的兩行」誤切,所以一定要有圖片外框當依據
+const FLOAT_MARGIN_REACH_FACTOR = VERTICAL_GAP_FACTOR; // 與「同一塊的行距上限」同一個量
+const FLOAT_HUG_MAX_GAP_FACTOR = 3; // 行尾到障礙物邊緣的距離上限（實測 15pt = 1.65× mlh）
+function splitFloatWrappedBlock(block, medianLineHeight, ctx, obstacles, pageLines) {
+  const lines = block._lines;
+  const images = obstacles;
+  if (!Array.isArray(images) || images.length === 0) return [block];
+  if (block._isCellBlock || !Array.isArray(lines) || lines.length < 2) return [block];
+  if (block.type !== 'paragraph' && block.type !== 'list-item') return [block];
+  const mlh = medianLineHeight || 12;
+  const overlaps = (a, b) => Math.min(a[2], b[2]) - Math.max(a[0], b[0]) >= mlh
+    && Math.min(a[3], b[3]) - Math.max(a[1], b[1]) >= mlh * 0.5;
+  // 浮動框的實際範圍比「圖片 + 圖說」的文字外框大一圈（框的上下留白）：緊貼在障礙物上緣 /
+  // 下緣之外的那一兩行仍然是窄行。所以除了原本「外框蓋到障礙物」的 block,垂直上在障礙物
+  // FLOAT_MARGIN_REACH_FACTOR × mlh 以內的 block 也進來檢查——這一類只有在找到「框邊窄行」
+  // 時才切，找不到就原樣放行
+  const reach = FLOAT_MARGIN_REACH_FACTOR * mlh;
+  const near = (a, b) => Math.min(a[2], b[2]) - Math.max(a[0], b[0]) >= mlh
+    && Math.min(a[3], b[3]) - Math.max(a[1], b[1]) >= -reach;
+  for (const img of images) {
+    const covers = overlaps(block.bbox, img);
+    if (!covers && !near(block.bbox, img)) continue;
+    if (lines.some((l) => overlaps(l.bbox, img))) continue;
+    const above = [], beside = [], below = [];
+    for (const l of lines) {
+      const cy = (l.bbox[1] + l.bbox[3]) / 2;
+      (cy < img[1] ? above : cy > img[3] ? below : beside).push(l);
+    }
+    // 框邊窄行：障礙物下緣之後一行接一行（行距內）、水平上完全沒碰到障礙物、靠障礙物的那一端
+    // 貼近它（排到框邊才折行）的行，還在浮動框旁邊 → 併進「旁邊」。
+    // 只有後面剩下的行裡有伸進障礙物水平範圍的才算數：那代表這幾行與寬行同塊，外框會寬到
+    // 蓋住障礙物；沒有寬行就沒有東西要切。
+    // 實測（百科圖文頁）：圖說文字底 333,其後兩行（頂 331 / 345）右緣仍停在 396(圖片左緣
+    // 411,距離 15pt = 1.65× mlh),第三行才回到整頁寬 555——不切的話譯文第一行從塊頂照
+    // 整頁寬排，直接壓到圖說上。
+    // 另外兩條擋誤判（簡報頁圖表下方的短首行、只有項目符號的行，後面接著寬行）：
+    //   - 「貼近」：行尾離障礙物太遠的不是排到框邊才折行
+    //   - 這個障礙物旁邊（垂直範圍內）在整頁裡真的有同一欄的繞圖行——同一側、貼近、左緣對齊。
+    //     沒有就代表這張圖不是嵌在這一欄文字裡的浮動框，下方的短行只是短行
+    // 上緣不做對稱處理：障礙物正上方的短行多半是上一段的尾行（它也沒碰到障礙物、行尾也可能
+    // 剛好靠近框邊),切出去會把句子從中間斷開；而上方的塊底緣本來就在障礙物之上，不會壓到它
+    const clearOf = (l) => Math.min(l.bbox[2], img[2]) - Math.max(l.bbox[0], img[0]) < 1;
+    const hugs = (l) => Math.min(Math.abs(img[0] - l.bbox[2]), Math.abs(l.bbox[0] - img[2])) < FLOAT_HUG_MAX_GAP_FACTOR * mlh;
+    below.sort((a, b) => a.bbox[1] - b.bbox[1]);
+    let n = 0;
+    let edge = Math.max(img[3], ...beside.map((l) => l.bbox[3]));
+    while (n < below.length && clearOf(below[n]) && hugs(below[n]) && below[n].bbox[1] - edge < reach) {
+      edge = below[n].bbox[3];
+      n++;
+    }
+    const flanked = n > 0 && (pageLines || lines).some((l) => {
+      const cy = (l.bbox[1] + l.bbox[3]) / 2;
+      return cy >= img[1] && cy <= img[3] && clearOf(l) && hugs(l)
+        && (l.bbox[2] <= img[0]) === (below[0].bbox[2] <= img[0])
+        && Math.abs(l.bbox[0] - below[0].bbox[0]) < mlh * 0.25;
+    });
+    const marginLines = flanked && below.slice(n).some((l) => !clearOf(l));
+    // 只是靠近障礙物（外框沒蓋到它）的 block:找不到框邊窄行就不是繞圖，原樣放行
+    if (!covers && !marginLines) continue;
+    // 框邊窄行接在「旁邊」那幾行後面成同一塊（同一段文字）；字級不同就各自成塊——「旁邊」
+    // 只有一行小標題、框邊窄行是它下面的內文時，不可以把標題併進內文
+    let margin = [];
+    if (marginLines) {
+      margin = below.splice(0, n);
+      const last = beside.reduce((m, l) => (!m || l.bbox[3] > m.bbox[3] ? l : m), null);
+      // 行的字級取「字數最多的那個字級」：line.fontSize 會被行首的引用編號（內文的 80%）帶偏
+      const bodySize = (l) => {
+        const w = new Map();
+        for (const r of l.runs || []) {
+          const k = Math.round((r.fontSize || 0) * 10) / 10;
+          w.set(k, (w.get(k) || 0) + (r.text || '').length);
+        }
+        let best = l.fontSize || 0, bestW = -1;
+        for (const [k, n2] of w) if (n2 > bestW) { best = k; bestW = n2; }
+        return best;
+      };
+      const fa = last ? bodySize(last) : 0;
+      const fb = bodySize(margin[0]);
+      if (!last || Math.abs(fa - fb) <= 0.05 * Math.max(fa, fb, 1)) {
+        beside.push(...margin);
+        margin = [];
+      }
+    }
+    const parts = [above, beside, margin, below].filter((p) => p.length > 0);
+    if (parts.length < 2) continue;
+    const out = [];
+    for (const part of parts) {
+      part.sort((a, b) => a.bbox[1] - b.bbox[1]);
+      const nb = buildBlockFromLines(part, block.column);
+      nb.type = classifyBlockType(nb, ctx);
+      // 同一塊可能還繞過另一張圖
+      out.push(...splitFloatWrappedBlock(nb, medianLineHeight, ctx, obstacles, pageLines));
+    }
+    return out;
+  }
+  return [block];
 }
 
 // ---------- Body fontSize estimate(供 type 分類比較) ----------
@@ -477,17 +610,26 @@ function groupIntoLines(runs, medianLineHeight) {
   const sorted = runs.slice().sort((a, b) => a.bbox[1] - b.bbox[1]);
   const sameLineMaxXGap = medianLineHeight * SAME_LINE_MAX_X_GAP_FACTOR;
 
-  const lines = [];
-  let i = 0;
-  while (i < sorted.length) {
-    // 階段 1:以本 row 第一條(top 最小)run 的 top 為 refTop,收同 row 的 runs
+  // 階段 1:以 row 第一條(top 最小)run 的 top 為 refTop,收同 row 的 runs
+  const rows = [];
+  for (let i = 0; i < sorted.length;) {
     const refTop = sorted[i].bbox[1];
     let j = i;
     while (j + 1 < sorted.length && Math.abs(sorted[j + 1].bbox[1] - refTop) <= SAME_LINE_Y_TOLERANCE) {
       j++;
     }
+    rows.push({ refTop, runs: sorted.slice(i, j + 1) });
+    i = j + 1;
+  }
+  // 階段 1.5:同基線歸位（見 regroupRunsByBaseline 註解）
+  regroupRunsByBaseline(rows, sorted, sameLineMaxXGap);
+
+  const lines = [];
+  for (const rowInfo of rows) {
+    if (rowInfo.runs.length === 0) continue;
+    const refTop = rowInfo.refTop;
     // 階段 2:row 內按 left 升序,x gap 過大處切開(雙欄 / 左右分置)
-    const row = sorted.slice(i, j + 1).sort((a, b) => a.bbox[0] - b.bbox[0]);
+    const row = rowInfo.runs.slice().sort((a, b) => a.bbox[0] - b.bbox[0]);
     // sup/sub 洞豁免(review H4,與 splitLinesAtCellGaps 同名豁免同構):gap 被
     // 「別的 row 的上標/下標 run」填補後殘餘空白仍 ≤ 門檻,代表這段空白是行內
     // sup/sub 挪出來的洞(「dimension d⟨model⟩ = 512」的 model 佔位),不是跨欄
@@ -508,9 +650,114 @@ function groupIntoLines(runs, medianLineHeight) {
       }
     }
     lines.push(finalizeLine(currentLine));
-    i = j + 1;
   }
   return lines;
+}
+
+// 階段 1.5:同基線歸位。階段 1 只比 run 頂邊（= 基線 − 字級），兩種情況會把同一視覺行的
+// run 分到不同 row：
+//   (a) 同一條基線上混用字級（假 small caps 標題的大小字母、行內放大的詞）——頂邊差 = 字級差
+//   (b) refTop 連鎖：row 由頂邊較高的上標起頭時，同字級但頂邊差零點幾 pt 的 run（連結字型的
+//       度量略有不同）剛好落在 2pt 容忍之外，整句被切成「連結文字」「其餘文字」兩排碎塊
+// 歸位規則：run 與另一個 row 裡的某個 run「基線相同（差 ≤ 0.5pt）且水平緊鄰（間隔絕對值 ≤
+// 較小字級的一半；兩者字級相同時改用一般同行間距）」，而且對方 row 的字數比自己 row 剩下的多 → 搬過去。只搬「緊鄰」的 run：
+// 內文旁邊隔著欄距、恰好同基線的小字圖說不會被接進內文行。上標 / 下標的基線不同，不受影響
+const BASELINE_MATCH_TOLERANCE = 0.5;
+const BASELINE_ADJACENT_GAP_FACTOR = 0.5;
+function regroupRunsByBaseline(rows, runs, sameLineMaxXGap) {
+  if (rows.length < 2) return;
+  const rowOf = new Map();
+  for (const row of rows) {
+    row.weight = 0;
+    for (const r of row.runs) { rowOf.set(r, row); row.weight += (r.text || '').length; }
+  }
+  const byBaseline = new Map();
+  for (const r of runs) {
+    const key = Math.round(r.bbox[3]);
+    let arr = byBaseline.get(key);
+    if (!arr) { arr = []; byBaseline.set(key, arr); }
+    arr.push(r);
+  }
+  // 每個 row 被搬走的 run（收尾時判斷「留下來的要不要跟著走」用）
+  const movedOutOf = new Map();
+  // 搬動會改變 row 的字數，最多掃 4 輪到穩定（實務上 1～2 輪）
+  for (let pass = 0; pass < 4; pass++) {
+    let moved = false;
+    for (const r of runs) {
+      const own = rowOf.get(r);
+      const rLen = (r.text || '').length;
+      const key = Math.round(r.bbox[3]);
+      let best = null;
+      for (let k = key - 1; k <= key + 1; k++) {
+        const bucket = byBaseline.get(k);
+        if (!bucket) continue;
+        for (const q of bucket) {
+          const other = rowOf.get(q);
+          if (other === own) continue;
+          if (Math.abs(q.bbox[3] - r.bbox[3]) > BASELINE_MATCH_TOLERANCE) continue;
+          const gap = Math.max(q.bbox[0], r.bbox[0]) - Math.min(q.bbox[2], r.bbox[2]);
+          // 字級相同的兩個 run 本來就該同 row（只是被 refTop 連鎖切開），用一般同行間距；
+          // 字級不同才要求緊鄰
+          const sameSize = Math.abs((q.fontSize || 0) - (r.fontSize || 0)) <= BASELINE_MATCH_TOLERANCE;
+          const limit = sameSize
+            ? sameLineMaxXGap
+            : BASELINE_ADJACENT_GAP_FACTOR * Math.min(q.fontSize || 0, r.fontSize || 0);
+          let effGap = gap;
+          // （間隔超過 4 倍門檻的直接跳過：逐字成 run 的 CJK 頁每條基線上百個 run，不設上限會變成三重迴圈）
+          if (sameSize && gap > limit && gap <= limit * 4) {
+            // 中間夾著自己 row 的其他 run（把這個 run 帶偏的上標）時，扣掉它們佔的寬度
+            const x0 = Math.min(q.bbox[2], r.bbox[2]);
+            const x1 = Math.max(q.bbox[0], r.bbox[0]);
+            for (const m of own.runs) {
+              if (m !== r && m.bbox[0] >= x0 - 1 && m.bbox[2] <= x1 + 1) effGap -= (m.bbox[2] - m.bbox[0]);
+            }
+          }
+          if (effGap > limit || (!sameSize && gap < -limit)) continue;
+          if (!best || other.weight > best.weight) best = other;
+        }
+      }
+      if (best && best.weight > own.weight - rLen) {
+        own.runs.splice(own.runs.indexOf(r), 1);
+        own.weight -= rLen;
+        best.runs.push(r);
+        best.weight += rLen;
+        rowOf.set(r, best);
+        let outArr = movedOutOf.get(own);
+        if (!outArr) { outArr = []; movedOutOf.set(own, outArr); }
+        outArr.push(r);
+        moved = true;
+      }
+    }
+    if (!moved) break;
+  }
+  // 留下來的 run 跟著原本同 row 的多數走：階段 1 已判定它們同一視覺行，只是基線不同（行內
+  // 較小字級的引用編號「[160]」、上標）所以沒被上面的同基線規則搬動。主行文字整批搬到別的
+  // row 之後，它們會孤零零留在原 row 變成獨立的一行，之後還可能把主行從中間切成兩段
+  // （編號佔的位置變成一個超過同行間距的洞）。搬走的字數比留下的多 → 留下的一起搬過去；
+  // 是否真的接成同一條 line 仍由階段 2 的水平間距決定
+  for (const [row, outArr] of movedOutOf) {
+    if (row.runs.length === 0) continue;
+    const destWeight = new Map();
+    for (const r of outArr) {
+      const dest = rowOf.get(r);
+      if (dest === row) continue;
+      destWeight.set(dest, (destWeight.get(dest) || 0) + (r.text || '').length);
+    }
+    let dest = null;
+    let destW = 0;
+    for (const [d, w] of destWeight) { if (w > destW) { dest = d; destW = w; } }
+    if (!dest || !(destW > row.weight)) continue;
+    for (const r of row.runs) { dest.runs.push(r); rowOf.set(r, dest); }
+    dest.weight += row.weight;
+    row.runs = [];
+    row.weight = 0;
+  }
+  for (const row of rows) {
+    if (row.runs.length === 0) continue;
+    let top = Infinity;
+    for (const r of row.runs) { if (r.bbox[1] < top) top = r.bbox[1]; }
+    row.refTop = top;
+  }
 }
 
 function newLineFromRun(run) {
@@ -744,7 +991,120 @@ function finalizeLine(line) {
 
 // ---------- 2) Column 偵測：1-D K-means + silhouette ----------
 
-function detectColumns(lines, pageWidth) {
+// 「表格頁」判別（多欄文字 vs 表格）：
+//   detectColumns 以每行左緣分群，表格的欄位左緣剛好形成 2–3 群就會被當成多欄版面，同欄
+//   各列縱向併成一塊，列與列的對應消失。單欄路徑的 splitOnSameRow / splitOnLeftShift 會把
+//   每個儲存格切成獨立 block,所以「整頁其實是一張表」時應該不分欄。
+//
+//   表格列 = 同一視覺列上有 ≥ TABLE_ROW_MIN_CELLS 條 line,且其中有一對相鄰 line 的間距
+//     ≥ 左邊那條寬度 × TABLE_ROW_GAP_TO_WIDTH_RATIO（且達 cell 級間距）。
+//     多欄內文的同列各行幾乎填滿欄寬、只隔一道欄間距；儲存格內容短，格與格之間的空白
+//     與內容本身同一個量級。兩欄內文一列只有 2 條 line,不會命中；目錄（標題 + 頁碼）也是。
+//   儲存格續行 = 緊接在表格列（或另一條續行）下方、每條 line 的左緣都對得上該表格列某一格
+//     左緣的列（折行的儲存格）。
+//   整頁不分欄的條件（兩條都要成立）：
+//     1. 表格列 + 續行佔全頁 line ≥ TABLE_PAGE_LINE_RATIO
+//     2. 表格以外的行自己分不出像樣的文字欄（照原本的分欄條件重跑，每欄至少
+//        TABLE_PAGE_MIN_TEXT_COLUMN_LINES 行才算）。雙欄論文裡夾一張大表的頁面，表格外的
+//        內文仍是兩欄 → 維持原本分欄，不可為了表格把內文改成單欄（內文會逐行碎裂）。
+const TABLE_ROW_MIN_CELLS = 3;
+const TABLE_ROW_GAP_TO_WIDTH_RATIO = 0.5;
+const TABLE_PAGE_LINE_RATIO = 0.5;
+const TABLE_PAGE_MIN_TEXT_COLUMN_LINES = 6;
+const TABLE_CONTINUATION_LEFT_TOLERANCE_FACTOR = 0.5;
+
+function groupLinesIntoVisualRows(lines) {
+  const sortedIdx = lines.map((_, i) => i).sort((a, b) => lines[a].bbox[1] - lines[b].bbox[1]);
+  const rows = [];
+  let start = 0;
+  while (start < sortedIdx.length) {
+    let end = start;
+    const refTop = lines[sortedIdx[start]].bbox[1];
+    while (end + 1 < sortedIdx.length &&
+      Math.abs(lines[sortedIdx[end + 1]].bbox[1] - refTop) <= SAME_LINE_Y_TOLERANCE) {
+      end++;
+    }
+    rows.push(sortedIdx.slice(start, end + 1));
+    start = end + 1;
+  }
+  return rows;
+}
+
+// 回傳每條 line 是否屬於表格（表格列成員或儲存格續行）
+function markTableLines(lines, medianLineHeight) {
+  const mlh = medianLineHeight || 12;
+  const minCellGap = TABLE_CELL_GAP_FACTOR * mlh;
+  const leftTol = TABLE_CONTINUATION_LEFT_TOLERANCE_FACTOR * mlh;
+  const tightGap = VERTICAL_GAP_FACTOR * mlh;
+  const isTable = new Array(lines.length).fill(false);
+  let anchorLefts = null;   // 最近一個表格列各格的左緣
+  let prevBottom = -Infinity; // 表格列 / 續行鏈上一列的下緣
+  for (const row of groupLinesIntoVisualRows(lines)) {
+    const sorted = row.slice().sort((a, b) => lines[a].bbox[0] - lines[b].bbox[0]);
+    const top = Math.min(...row.map((i) => lines[i].bbox[1]));
+    const bottom = Math.max(...row.map((i) => lines[i].bbox[3]));
+    let cellLike = false;
+    if (sorted.length >= TABLE_ROW_MIN_CELLS) {
+      for (let i = 0; i + 1 < sorted.length; i++) {
+        const left = lines[sorted[i]];
+        const right = lines[sorted[i + 1]];
+        const gap = right.bbox[0] - left.bbox[2];
+        const width = left.bbox[2] - left.bbox[0];
+        if (gap >= minCellGap && gap >= width * TABLE_ROW_GAP_TO_WIDTH_RATIO) { cellLike = true; break; }
+      }
+    }
+    if (cellLike) {
+      for (const i of row) isTable[i] = true;
+      anchorLefts = sorted.map((i) => lines[i].bbox[0]);
+      prevBottom = bottom;
+      continue;
+    }
+    const isContinuation = anchorLefts !== null
+      && top - prevBottom < tightGap
+      && row.every((i) => anchorLefts.some((x) => Math.abs(x - lines[i].bbox[0]) <= leftTol));
+    if (isContinuation) {
+      for (const i of row) isTable[i] = true;
+      prevBottom = bottom;
+    } else {
+      anchorLefts = null;
+      prevBottom = -Infinity;
+    }
+  }
+  return isTable;
+}
+
+// 表格列 + 續行佔全頁 line 的比例（0–1）
+export function tableRowLineRatio(lines, medianLineHeight) {
+  if (lines.length === 0) return 0;
+  return markTableLines(lines, medianLineHeight).filter(Boolean).length / lines.length;
+}
+
+function detectColumns(lines, pageWidth, medianLineHeight) {
+  const isTable = markTableLines(lines, medianLineHeight);
+  const tableRatio = lines.length > 0 ? isTable.filter(Boolean).length / lines.length : 0;
+  if (tableRatio >= TABLE_PAGE_LINE_RATIO) {
+    const rest = lines.filter((_, i) => !isTable[i]);
+    const restCols = detectColumnsByLeftEdge(rest, pageWidth);
+    let textColumns = false;
+    if (restCols.columnCount >= 2) {
+      const counts = new Array(restCols.columnCount).fill(0);
+      for (const a of restCols.assignment) counts[a]++;
+      textColumns = Math.min(...counts) >= TABLE_PAGE_MIN_TEXT_COLUMN_LINES;
+    }
+    if (!textColumns) {
+      return {
+        columnCount: 1,
+        assignment: lines.map(() => 0),
+        centers: [0],
+        tableLike: true,
+        tableRatio,
+      };
+    }
+  }
+  return detectColumnsByLeftEdge(lines, pageWidth);
+}
+
+function detectColumnsByLeftEdge(lines, pageWidth) {
   // 每條 line 的 left 為 feature
   const xs = lines.map((l) => l.bbox[0]);
 
@@ -971,6 +1331,32 @@ export function splitIntoBlocksByAssignment(lines, assignment, columnCount, medi
   return initialBlocks;
 }
 
+// 點線（leader）結尾：點與點之間有空白的 4 個以上（「. . . .」),或緊連的 8 個以上（「........」）,
+// 後面最多再接頁碼（數字 / 羅馬數字）。目錄條目以點線連到頁碼，點線之後就是條目的結尾——
+// 不論頁碼有沒有被分成另一格。緊連的門檻取 8:引文結尾的「刪節號 + 句號」是 4 個緊連的點
+// （實測參考文獻頁「…and corrupt....」），不可當成點線
+const LEADER_TAIL_RE = /(?:(?:[.·]\s){3,}[.·]|[.…·]{8,})\s*[0-9ivxlcdm]*\s*$/i;
+function endsWithLeader(text) {
+  return LEADER_TAIL_RE.test(text || '');
+}
+
+// colLines 已按 top 升序。prev = colLines[i - 1]。
+// prev 自己以點線結尾，或 prev 是點線那一格右邊的頁碼格（同列、排序上緊接在 prev 之前、
+// 位置在 prev 左邊的那條 line 以點線結尾)→ prev 所在的那一列是一個完整的目錄條目。
+// 只認點線：曾試過「cur 與 prev 同列另一格的水平重疊較多就切」的通用版，語料 254 頁受影響——
+// 內文行被字距切成同列幾段的頁面（兩端對齊的維基、論文公式列）段落會被切碎
+function prevRowEndsWithLeader(colLines, i, medianLineHeight) {
+  const prev = colLines[i - 1];
+  if (endsWithLeader(prev.plainText)) return true;
+  const sameRowTol = (medianLineHeight || 12) * 0.5;
+  for (let k = i - 2; k >= 0; k--) {
+    const mate = colLines[k];
+    if (Math.abs(mate.bbox[1] - prev.bbox[1]) >= sameRowTol) break;
+    if (mate.bbox[2] <= prev.bbox[0] && endsWithLeader(mate.plainText)) return true;
+  }
+  return false;
+}
+
 function splitColumnIntoBlocks(colLines, medianLineHeight, columnIdx) {
   if (colLines.length === 0) return [];
   const blocks = [];
@@ -1016,7 +1402,10 @@ function splitColumnIntoBlocks(colLines, medianLineHeight, columnIdx) {
     // body 中 italic 引文整行(如「Best Places to Live in Texas」)會誤切；且大段 paragraph
     // 內混 italic 變化會把段落切成 3-5 段。取消此規則：接受同 fontSize 不同字型的 heading
     // 跟 body 黏在一起 trade-off，讓 body 段落完整。
-    if (splitOnGap || splitOnFont || splitOnLeftShift || splitOnSameRow) {
+    // 點線（目錄的 leader）結尾的列是一個完整的條目，下一行不會是它的續行。目錄的列距常低於
+    // splitOnGap 門檻（實測 gap 1.2–1.3× mlh），不擋的話「標題…頁碼」會與下一列縱向併成一塊
+    const splitOnLeader = prevRowEndsWithLeader(colLines, i, medianLineHeight);
+    if (splitOnGap || splitOnFont || splitOnLeftShift || splitOnSameRow || splitOnLeader) {
       blocks.push(buildBlockFromLines(currentLines, columnIdx));
       currentLines = [cur];
     } else {
@@ -1238,11 +1627,29 @@ function maybeSplitHeadingsAcrossBlock(block, medianLineHeight) {
 // 大 block 若多數行起首為 list marker，按 marker 切多個 block。
 // 目的：LD750EQF 之類 spec sheet 的「60 行 list-item 段」自動切成多個獨立段落，
 // 翻譯時 LLM 拿到的單元更小、cache hit 更精準。
+// 行首是不是清單 marker。LIST_MARKER_RE 對數字 / 括號序號要求後面有空白字元（「3.5 mm」不是
+// 序號）；但 PDF 常把序號排成獨立的 run、靠位置與內文隔開，run 之間沒有空白字元，行文字變成
+// 「1.Title」。這種行改看 run：最左邊的 run 整個就是序號，且與下一個 run 之間有看得見的間隔
+const LIST_MARKER_RUN_RE = /^\s*(?:\d+[.)]|\([a-zA-Z0-9]+\))\s*$/;
+const LIST_MARKER_RUN_MIN_GAP_FACTOR = 0.25; // × 字級，約一個空白的寬度
+function lineStartsWithListMarker(line) {
+  if (LIST_MARKER_RE.test(line.plainText || '')) return true;
+  const runs = line.runs || [];
+  if (runs.length < 2) return false;
+  let first = runs[0];
+  for (const r of runs) { if (r.bbox[0] < first.bbox[0]) first = r; }
+  if (!LIST_MARKER_RUN_RE.test(first.text || '')) return false;
+  let nextLeft = Infinity;
+  for (const r of runs) { if (r !== first && r.bbox[0] < nextLeft) nextLeft = r.bbox[0]; }
+  const fs = first.fontSize || (first.bbox[3] - first.bbox[1]) || 0;
+  return nextLeft - first.bbox[2] >= LIST_MARKER_RUN_MIN_GAP_FACTOR * fs;
+}
+
 function maybeSubsplitListBlock(block) {
   const lines = block._lines || [];
   if (lines.length < LIST_SUBSPLIT_MIN_LINES) return [block];
 
-  const isMarker = lines.map((l) => LIST_MARKER_RE.test(l.plainText || ''));
+  const isMarker = lines.map(lineStartsWithListMarker);
   // 前導非 marker 行(清單前的引言句「The following items…:」)自成一段,marker 比例
   // 只看引言之後的行——原本「起頭不是 marker 就整塊不切」讓「引言 + 4 個項目」黏成
   // 單一段落送翻,譯文回填時項目換行全失(pdf-synth list-hanging 實測)
@@ -1488,15 +1895,71 @@ function mergeWrapFragments(blocks, medianLineHeight) {
   // 「10/22/2014」+「your sales agent:」曾被誤併——該文件的 form label 小寫開頭,
   // 打穿單靠小寫的判定)。tail 除小寫開頭外須 ≥ 2 詞且非 label-shape
   const wordCount = (b) => ((b.plainText || '').trim().split(/\s+/).filter(Boolean).length);
+  // 點線結尾的 head 是完整的目錄條目（見 endsWithLeader），下一列即使小寫開頭也不是它的續行
   const canBeHead = (b) => (b.type === 'paragraph' || b.type === 'list-item')
     && wordCount(b) >= 4
-    && !(b.plainText || '').includes('://');
+    && !(b.plainText || '').includes('://')
+    && !endsWithLeader(b.plainText);
   const canBeTail = (b) => b.type === 'paragraph'
     && /^[a-z]/.test((b.plainText || '').trim())
     && wordCount(b) >= 2
     && !FORM_LABEL_RE.test((b.plainText || '').trim())
     && !/[:：]\s*$/.test((b.plainText || '').trim())
     && !(b.plainText || '').includes('://');
+
+  // 表格儲存格的續行（不要求小寫開頭、不要求 2 詞）：大寫開頭的續行（專有名詞、標題式大小寫）
+  // 用語意訊號分不出來，改看列的結構。全部成立才算：
+  //   a. head 首行那一列是表格列：同欄有 ≥ 2 個水平不重疊的同列夥伴（= 一列 3 格以上）
+  //   b. cand 那一列只有它自己（整頁沒有任何同列夥伴）——新的一列至少會帶著別格的內容
+  //   c. cand 的第一個詞接在 head 末行後面會超出這一格的右界 → head 末行是「排不下才折行」。
+  //      右界 = head 右側最近一格的左緣 − cell 級間距（再靠近就會被併成同一條 line）;
+  //      右側沒有格子時用同左緣各塊實際出現過的最大右緣
+  //   d. head 不以句末標點結尾、cand 與 head 末行同字型（小標題列多半換字型）
+  //   e. cand 不是 label / URL / 清單項目
+  // 沒有間距訊號可用（實測勘誤表的列距與續行行距同為 12pt），「只有一格有字的獨立列」
+  // 靠 c + d 排除：它上方那一格要剛好是 4 詞以上、排滿、沒有句末標點才會被誤併
+  const minCellGap = TABLE_CELL_GAP_FACTOR * mlh;
+  const rowMatesOf = (lineBBox, pool) => pool.filter((s) => {
+    if (s.bbox === lineBBox) return false;
+    const lh = Math.max(1, lineBBox[3] - lineBBox[1]);
+    const ov = Math.min(s.bbox[3], lineBBox[3]) - Math.max(s.bbox[1], lineBBox[1]);
+    if (ov < lh * 0.6) return false;
+    return s.bbox[0] >= lineBBox[2] - 1 || s.bbox[2] <= lineBBox[0] + 1;
+  });
+  const canBeCellContinuation = (head, cand) => {
+    const candText = (cand.plainText || '').trim();
+    const headText = (head.plainText || '').trim();
+    if (cand.type !== 'paragraph' || !candText) return false;
+    if (FORM_LABEL_RE.test(candText) || candText.includes('://') || LIST_MARKER_RE.test(candText)) return false;
+    if (/[.!?。！？:：;；]["'”’)）]*$/.test(headText)) return false;
+    const headLines = head._lines || [];
+    const candLines = cand._lines || [];
+    if (headLines.length === 0 || candLines.length === 0) return false;
+    const lastLine = headLines[headLines.length - 1];
+    const fontA = lastLine.dominantFontName || '';
+    const fontB = candLines[0].dominantFontName || '';
+    if (fontA && fontB && fontA !== fontB) return false;
+    const headMates = rowMatesOf(headLines[0].bbox, blocks.filter((s) => s !== head && s.column === head.column));
+    if (headMates.length < TABLE_ROW_MIN_CELLS - 1) return false;
+    for (const l of candLines) {
+      if (rowMatesOf(l.bbox, blocks.filter((s) => s !== cand)).length > 0) return false;
+    }
+    const rightMates = headMates.filter((s) => s.bbox[0] >= headLines[0].bbox[2] - 1);
+    let limit;
+    if (rightMates.length > 0) {
+      limit = Math.min(...rightMates.map((s) => s.bbox[0])) - minCellGap;
+    } else {
+      limit = Math.max(...blocks
+        .filter((s) => s.column === head.column && Math.abs(s.bbox[0] - head.bbox[0]) <= leftTol)
+        .map((s) => s.bbox[2]));
+    }
+    const firstWord = candText.split(/\s+/)[0];
+    const candWidth = candLines[0].bbox[2] - candLines[0].bbox[0];
+    const firstLineText = (candLines[0].plainText || candText).trim();
+    const firstWordWidth = candWidth * Math.min(1, firstWord.length / Math.max(1, firstLineText.length));
+    const spaceWidth = 0.25 * (cand.fontSize || mlh);
+    return lastLine.bbox[2] + spaceWidth + firstWordWidth > limit;
+  };
 
   // 同欄由上而下貪婪:每塊只能被併走一次
   const consumed = new Set();
@@ -1519,12 +1982,18 @@ function mergeWrapFragments(blocks, medianLineHeight) {
           const gap = cand.bbox[1] - cur.bbox[3];
           if (gap > gapMax) break; // sorted by top,再往下只會更遠
           if (gap < gapMin) continue;
-          if (!canBeTail(cand)) continue;
-          if (Math.abs(cand.bbox[0] - cur.bbox[0]) > leftTol) continue;
           const overlap = Math.min(cur.bbox[2], cand.bbox[2]) - Math.max(cur.bbox[0], cand.bbox[0]);
           const narrower = Math.min(cur.bbox[2] - cur.bbox[0], cand.bbox[2] - cand.bbox[0]);
+          // 不在同一文字欄（別的 cell、插在中間的序號）或左緣不同（夾在段落中間的小字編號、
+          // 縮排不同的碎塊)→ 跳過繼續往下找
           if (narrower <= 0 || overlap < narrower * WRAP_MERGE_MIN_X_OVERLAP_RATIO) continue;
-          if (Math.abs((cur.fontSize || 0) - (cand.fontSize || 0)) > fontTol) continue;
+          if (Math.abs(cand.bbox[0] - cur.bbox[0]) > leftTol) continue;
+          // 同一文字欄、同左緣、緊接在下方卻不是續行（大寫開頭的下一列、字級不同）→ 它就是
+          // cur 正下方的下一個版面單位，續行不可能隔著它出現，停止往下找。
+          // 沒有這道擋，上一列會越過下一列的首行、把下一列的續行吃走（行距緊的表格：
+          // 「列 A 首行 / 列 B 首行 / 列 B 續行」→ A 併走 B 的續行)
+          if (!canBeTail(cand) && !canBeCellContinuation(cur, cand)) break;
+          if (Math.abs((cur.fontSize || 0) - (cand.fontSize || 0)) > fontTol) break;
           // 併:以兩塊的 _lines 重建(styleSegments 自動接回)
           const mergedBlock = buildBlockFromLines(
             [...(cur._lines || []), ...(cand._lines || [])].map((l) => ({

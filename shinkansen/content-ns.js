@@ -298,6 +298,14 @@ if (window.__shinkansen_loaded) {
   // 改為所有 cue 統一提前 1s：_findActiveCue 以 currentTime + 此值查表，iOS 原生字幕軌
   // 的 VTTCue 時間軸整體前移同值，兩條顯示路徑一致。
   SK.ASR_CUE_LEAD_MS = 1000;
+
+  // 原生字幕軌（VTTCue）的文字會被瀏覽器當成 WebVTT cue 文字解析：`<` 起頭的片段被當成標籤、
+  // `&` 起頭的被當成字元參照。字幕原文 / 譯文是純文字，直接塞進去時「a < b」的 `<` 之後整段不顯示
+  // （實測 Chromium：`x <y z` 只顯示「x 」）。建立 cue 前一律先跳脫；YouTube iOS 全螢幕軌與
+  // X 影片字幕軌共用這一份
+  SK.escapeCueText = function escapeCueText(text) {
+    return String(text == null ? '' : text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  };
   if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
     const markInteraction = () => { SK._lastInteractionT = Date.now(); };
     // capture phase + passive: 確保最早 fire,不阻塞網頁 listener。
@@ -334,6 +342,60 @@ if (window.__shinkansen_loaded) {
       }).catch(() => {}); // fire-and-forget
     } catch { /* 靜默 */ }
   };
+
+  // ─── 自家 UI 容器掛載 + 被頁面移除後自動掛回 ─────────────
+  // toast 與懸浮按鈕各是一個掛在 <html> 底下的 Shadow DOM host（不進 <body>，避免混進
+  // 文章內容）。<html> 的直接子節點不在任何前端框架的管轄範圍內，但「整份文件交給框架
+  // 管」的頁面（root 是 document 的 SSR 框架）在 hydration 失敗改走整頁 client render、
+  // 或頁面腳本重建 <html> 內容時，會把 <head> / <body> 以外的節點清掉——host 一旦被移出
+  // 文件就再也不顯示：按鈕消失、翻譯進度 toast 不出現，但翻譯本身照常（issue #77 的症狀
+  // 組合）。
+  // 修法（結構性通則，不看站點）：所有常駐 host 走這個單一入口掛載，監看 document 與
+  // <html> 的直接子節點變動（不開 subtree，成本只跟 <html> 層級的增刪有關），host 不在
+  // 文件內就掛回目前的 <html>；<html> 本身被換掉時改監看新的那個。
+  // 防互搶：頁面若持續移除，每個視窗期最多掛回 HOST_REMOUNT_MAX 次，超過就等下個視窗期，
+  // 不跟頁面無限來回。orphan（extension context 已死）不掛回，避免舊 instance 的 UI 復活。
+  const HOST_REMOUNT_WINDOW_MS = 10000;
+  const HOST_REMOUNT_MAX = 20;
+  const _persistentHosts = [];
+  let _hostObserver = null;
+  let _hostObservedRoot = null;
+  let _hostRemountWindowStart = 0;
+  let _hostRemountCount = 0;
+  function _observeHostRoot() {
+    if (!_hostObserver) return;
+    const root = document.documentElement;
+    if (root === _hostObservedRoot) return;
+    _hostObserver.disconnect();
+    _hostObservedRoot = root;
+    _hostObserver.observe(document, { childList: true });
+    if (root) _hostObserver.observe(root, { childList: true });
+  }
+  function _remountDetachedHosts() {
+    _observeHostRoot();
+    const root = document.documentElement;
+    if (!root || !SK.isExtensionContextAlive()) return;
+    for (const host of _persistentHosts) {
+      if (host.isConnected) continue;
+      const now = Date.now();
+      if (now - _hostRemountWindowStart > HOST_REMOUNT_WINDOW_MS) {
+        _hostRemountWindowStart = now;
+        _hostRemountCount = 0;
+      }
+      if (_hostRemountCount >= HOST_REMOUNT_MAX) return;
+      _hostRemountCount++;
+      try { root.appendChild(host); } catch (_e) { /* 文件正在重建，下次變動再試 */ }
+    }
+  }
+  SK.mountPersistentHost = function mountPersistentHost(host) {
+    document.documentElement.appendChild(host);
+    _persistentHosts.push(host);
+    if (!_hostObserver && typeof MutationObserver === 'function') {
+      _hostObserver = new MutationObserver(_remountDetachedHosts);
+      _observeHostRoot();
+    }
+  };
+  SK._hostRemountStats = () => ({ count: _hostRemountCount, max: HOST_REMOUNT_MAX });   // regression spec 用
 
   // ─── v1.8.19: 安全版 runtime.sendMessage ─────────────────
   // Extension reload / 更新時， 已載入頁面的 orphan content script 失去 extension
@@ -905,6 +967,13 @@ if (window.__shinkansen_loaded) {
     return true;
   };
 
+  // SVG 命名空間的元素（<svg> 本身與內部的 <title> / <desc> / <text> / 圖形）。
+  // 序列化與注入兩層共用：SVG 內部文字一律不是可翻正文
+  const _SVG_NS = 'http://www.w3.org/2000/svg';
+  SK.isSvgElement = function isSvgElement(el) {
+    return !!el && el.namespaceURI === _SVG_NS;
+  };
+
   // 是否含有需要保留的媒體元素
   SK.containsMedia = function containsMedia(el) {
     return !!el.querySelector('img, picture, video, svg, canvas, audio');
@@ -1166,6 +1235,9 @@ if (window.__shinkansen_loaded) {
         while (p && p !== el) {
           if (SK.HARD_EXCLUDE_TAGS.has(p.tagName)) return NodeFilter.FILTER_REJECT;
           if (p.tagName === 'PRE' && p.querySelector('code')) return NodeFilter.FILTER_REJECT;
+          // SVG 內的 <title> / <desc> 文字不可見也不是正文：算進來的話，title 比可見文字長
+          // 就會被挑成「最長文字節點」，譯文寫進看不見的 <title>
+          if (SK.isSvgElement(p)) return NodeFilter.FILTER_REJECT;
           const cs = p.ownerDocument?.defaultView?.getComputedStyle?.(p);
           if (cs && (cs.display === 'none' || cs.visibility === 'hidden')) {
             return NodeFilter.FILTER_REJECT;
@@ -1544,6 +1616,7 @@ if (window.__shinkansen_loaded) {
     });
     try { if (SK.YT?.active) SK.stopYouTubeTranslation?.(); } catch (_) {}
     try { SK.stopXSubtitles?.(); } catch (_) {}
+    try { SK.stopDriveSubtitles?.(); } catch (_) {}
   }
   window.addEventListener(_INSTANCE_PING, (e) => {
     const d = e.detail;

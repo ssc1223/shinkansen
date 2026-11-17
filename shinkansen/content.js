@@ -135,9 +135,11 @@
           captionLang:     SK.YT.captionLang,
           isAsr:           SK.YT.isAsr,
           displayCuesLen:  SK.YT.displayCues?.length ?? 0,
-          ytConfig:        SK.YT.config,
           overlayProf:     SK.YT._overlayProf || null,   // 批次 7 量測（dev tail 才累積）
         };
+        // GET_STATE 是商店版白名單 action（任何網頁都能問）。ytConfig 含使用者自訂的字幕
+        // prompt 與模型設定，只對 dev tail 回；商店版只留上面那些 runtime 計數
+        if (SK.isDevTailBuild()) out.yt.ytConfig = SK.YT.config;
       }
       respond(out);
     } else if (action === 'GET_STORAGE') {
@@ -205,6 +207,29 @@
         const _storage = (typeof browser !== 'undefined' && browser.storage) || (typeof chrome !== 'undefined' && chrome.storage);
         if (!_storage || !_storage.local) {
           respond({ ok: false, error: 'storage.local unavailable in this context' });
+        } else if (!SK.isDevTailBuild()) {
+          // 商店版只回條數與 bytes（bridge 對任意網頁常開）：不讀整池內容——原本每次請求都把
+          // 整個快取池（可達數 MB）反序列化一遍，網頁可以反覆送請求拖慢分頁；也不回最舊 / 最新
+          // 翻譯時間戳（那是使用者的使用時間資訊）。getKeys 不存在的舊瀏覽器只回 bytes
+          const keysP = typeof _storage.local.getKeys === 'function' ? _storage.local.getKeys() : Promise.resolve(null);
+          keysP.then((keys) => {
+            let stats = null;
+            if (Array.isArray(keys)) {
+              stats = { tc: 0, gloss: 0, bookgloss: 0, other: 0, tcOldestT: null, tcNewestT: null, glossOldestT: null };
+              for (const k of keys) {
+                if (k.startsWith('tc_')) stats.tc++;
+                else if (k.startsWith('gloss_')) stats.gloss++;
+                else if (k.startsWith('bookgloss_')) stats.bookgloss++;
+                else stats.other++;
+              }
+            }
+            const respondWith = (bytes) => respond({ ok: true, bytes, stats });
+            if (typeof _storage.local.getBytesInUse === 'function') {
+              _storage.local.getBytesInUse(null).then(respondWith).catch(() => respondWith(null));
+            } else {
+              respondWith(null);
+            }
+          }).catch((err) => respond({ ok: false, error: err?.message || String(err) }));
         } else {
           _storage.local.get(null)
             .then((all) => {
@@ -299,6 +324,18 @@
       // Debug Bridge:停掉 YouTube 字幕翻譯(乾淨重啟測試循環)
       try { SK.stopYouTubeTranslation?.(); respond({ ok: true }); }
       catch (err) { respond({ ok: false, error: err?.message || String(err) }); }
+    } else if (action === 'X_SET_SUBTITLE') {
+      // Debug Bridge:撥本分頁的 X 影片字幕翻譯開關(等同工具列圖示選單的開關,只影響本分頁、
+      // 不寫 storage)。cage 進不了選單,實機驗「關閉後恢復原文字幕」用
+      if (!SK._xSetTabSubtitle) { respond({ ok: false, error: 'not on X page' }); }
+      else { respond({ ok: true, enabled: SK._xSetTabSubtitle(!!e.detail?.enabled) }); }
+    } else if (action === 'GET_X_DEBUG') {
+      // Debug Bridge:X 影片字幕狀態快照(各影片的字幕軌 mode / cue 數、各 media 的翻譯進度)
+      if (!SK._xDebugState) { respond({ ok: false, error: 'not on X page' }); }
+      else {
+        try { respond({ ok: true, x: SK._xDebugState() }); }
+        catch (err) { respond({ ok: false, error: err?.message || String(err) }); }
+      }
     } else if (action === 'RELOAD_EXTENSION') {
       // DEBUG: hot reload extension(讀磁碟新 code),sendResponse 同步先回再讓
       // background 重啟 SW；此 tab 的 content script 會變成 orphan，下次 navigate
@@ -1151,6 +1188,9 @@
             const u = units[origIdx];
             if (u?.el && _convInjectedEls.has(u.el)) { injectedThisChunk++; continue; }
             if (u?.el) _convInjectedEls.add(u.el);
+            // 簡繁轉換一律原地取代、不跟整頁 / 懸停的雙語對照設定（issue #76）：字形與用詞
+            // 調整後原文沒有對照價值。掛在單元上，注入層以單元自帶的模式優先
+            if (u) u.injectMode = 'single';
             SK.injectTranslation(u, converted, slotsList[origIdx]);
             injectedThisChunk++;
           }
@@ -1414,6 +1454,21 @@
     const markConvertedAgain = () => {
       if (resumeConvertedOnFail) remarkConvertedPage(myAbortController);
     };
+    // 本輪發出的 fire-and-forget 術語表 promise（只清自己的，不踩取消後新一輪的）
+    let myGlossaryPromise = null;
+    // 送翻前（translateUnits 之前）各個 await 之後的取消檢查。這段期間按取消，
+    // abortInProgressTranslation / SPA reset 已當下還原頁面並處理 toast，本輪還沒注入
+    // 任何東西，只需釋放 run state 後結束。少了這道檢查，舊輪會在 await 回來後繼續發
+    // 「建立術語表」與進度的 loading toast（帶計時器、無 auto-hide，蓋掉「已取消」後
+    // 卡在畫面上），並照樣送出術語表請求白花 token。
+    // 不驗：已送出的術語表請求（blocking 路徑）無法從這裡撤回，背景仍會跑完
+    const bailIfAborted = (stage) => {
+      if (!abortSignal.aborted) return false;
+      SK.sendLog('info', 'translate', 'translation aborted before translateUnits', { stage });
+      if (myGlossaryPromise && STATE._glossaryPromise === myGlossaryPromise) STATE._glossaryPromise = null;
+      releaseRunState(myAbortController);
+      return true;
+    };
 
     // v1.7.x instrumentation: 用 entryTime 量化 translatePage 各階段相對時間
     const entryTime = Date.now();
@@ -1423,6 +1478,7 @@
     try {
       settings = await browser.storage.sync.get(null);
     } catch (_) { /* 讀取失敗用 default */ }
+    if (bailIfAborted('storage_loaded')) return;
     SK.sendLog('info', 'translate', 'milestone:storage_loaded', { t: Date.now() - entryTime });
 
     // P1: 注入 STATE.targetLanguage(供 content-detect.js isCandidateText 走 target-aware)
@@ -1434,6 +1490,10 @@
     const convertDirection = TARGET === 'zh-TW' ? 'cn2twp' : (TARGET === 'zh-CN' ? 'twp2cn' : null);
     // convertOnly(簡繁自動互轉 / rescan replay 路徑):只跑免費本地轉換,絕不打 API。
     const convertOnly = !!options.convertOnly;
+    // 純簡繁轉換 run 整輪都是原地取代（issue #76）：本輪模式鎖成 single，後面的 dual 專用
+    // 前處理（inline 單元合併）不跑。混合頁的整頁翻譯維持使用者設定，轉換段在
+    // translateUnits 的 runZhConvert 逐單元標 single
+    if (convertOnly) STATE.translatedMode = 'single';
     if (convertOnly && !convertDirection) {
       // 防禦:toggle 開著但 target 已切到非中文(popup 會藏 toggle,這裡擋 race)
       SK.sendLog('info', 'translate', 'convertOnly: target not Chinese, skip', { target: TARGET });
@@ -1458,7 +1518,9 @@
     // 的 SK.formatMoney 知道用 USD 還是 TWD 顯示。匯率讀 storage.local.exchangeRate
     // (background.js 每天 fetch 一次寫進去），失敗則用 fallback 31.6。
     {
-      const currency = settings.displayCurrency === 'USD' ? 'USD' : 'TWD';
+      // 非繁中介面一律 USD（幣別選項只在繁中介面出現）；單一判斷在 lib/format-currency.js
+      const uiLang = SK.i18n ? SK.i18n.getUiLanguage(settings.uiLanguage || 'auto') : 'zh-TW';
+      const currency = window.__SKFormat.resolveDisplayCurrency(settings.displayCurrency, uiLang);
       let rate = window.__SKFormat.FALLBACK_USD_TWD_RATE;
       try {
         const { exchangeRate } = await browser.storage.local.get('exchangeRate');
@@ -1468,6 +1530,7 @@
       } catch (_) { /* 用 fallback */ }
       SK.currencyState = { currency, rate };
     }
+    if (bailIfAborted('exchange_rate')) return;
 
     const translateStartTime = Date.now();
 
@@ -1651,6 +1714,7 @@
     if (glossaryEnabled && batchCount > skipThreshold && crypto && crypto.subtle) {
       const compressedText = SK.extractGlossaryInput(_isConvertible ? units.filter((_, i) => !_isConvertible[i]) : units);
       const inputHash = await SK.sha1(compressedText);
+      if (bailIfAborted('glossary_hash')) return;
       SK.sendLog('info', 'glossary', 'glossary preprocessing', { batchCount, mode: batchCount > blockingThreshold ? 'blocking' : 'fire-and-forget', compressedChars: compressedText.length, hash: inputHash.slice(0, 8) });
 
       // 依 options.engine 路由（openai-compat → CUSTOM，其餘走 Gemini)。同字幕路徑由
@@ -1679,6 +1743,7 @@
         } catch (err) {
           SK.sendLog('warn', 'glossary', 'glossary failed/timeout, proceeding without', { error: err.message });
         }
+        if (bailIfAborted('glossary_blocking')) return;
       } else {
         // Fire-and-forget:背景抽術語表、不 blocking 首字,但仍顯示「建立術語表」toast
         // 讓使用者知道有在運作(翻譯進度 toast 之前會短等最多 2s,見下方 glossary-await,
@@ -1698,21 +1763,23 @@
           return null;
         });
         STATE._glossaryPromise = glossaryPromise;
+        myGlossaryPromise = glossaryPromise;
       }
     }
 
     // Fire-and-forget 術語表:翻譯前短等(最多 2s)讓它趕上,期間讓上方「建立術語表」
     // toast 維持可見;等到 / 逾時後才切成翻譯進度 toast。移到翻譯進度 toast 之前(原本
     // 在其後)是為了讓中頁的 glossaryBuilding toast 真的被看見。Blocking 路徑 glossary
-    // 已就緒 → 此段 no-op;短頁 / 停用術語表 → STATE._glossaryPromise 為空 → no-op。
-    if (!glossary && STATE._glossaryPromise) {
+    // 已就緒 → 此段 no-op;短頁 / 停用術語表 → myGlossaryPromise 為空 → no-op。
+    if (!glossary && myGlossaryPromise) {
       try {
         glossary = await Promise.race([
-          STATE._glossaryPromise,
+          myGlossaryPromise,
           new Promise(resolve => setTimeout(() => resolve(null), 2000)),
         ]);
       } catch (_) { /* ignore */ }
-      STATE._glossaryPromise = null;
+      if (bailIfAborted('glossary_wait')) return;
+      if (STATE._glossaryPromise === myGlossaryPromise) STATE._glossaryPromise = null;
     }
 
     // 簡繁自動互轉（convertOnly）用獨立的進度文案——「翻譯中⋯」會讓使用者以為觸發了 LLM 翻譯
@@ -2074,6 +2141,16 @@
       _earlyRestoredAborts.add(ac);
       ac.abort();
     }
+    // 取消當下就釋放 run state（與 content-spa.js resetForSpaNavigation 同做法）。原本留給主流程
+    // unwind 的 releaseRunState——非串流批次沒有網路層取消，要等進行中的批次回來（最長 90 秒）
+    // 才清；這段期間頁面已還原、狀態卻仍是「翻譯中」（工具列選單顯示翻譯中、游標懸停翻譯
+    // 被擋）。舊輪 unwind 的各個守衛都以「STATE.abortController 還是不是自己這輪」判斷，
+    // 清成 null 等同已交出頁面所有權，不會重複還原 / 重複跳 toast
+    if (ac && STATE.abortController === ac) {
+      STATE.translating = false;
+      STATE.translatingConvertOnly = false;
+      STATE.abortController = null;
+    }
     restoreOriginalHTMLAndReset();
     // silent：手動翻譯擠掉背景 convertOnly run 時不跳「已取消」——使用者按的是
     // 「翻譯」，看到取消 toast 只會困惑（接著馬上會出現翻譯進度 toast）
@@ -2238,7 +2315,7 @@
           const slots = job.slots[j];
           // 【N】/【/N】/【*N】 換回 ⟦N⟧/⟦/N⟧/⟦*N⟧，走現有 deserializeWithPlaceholders
           let restored = slots?.length
-            ? SK.restoreGoogleTranslateMarkers(tr)
+            ? SK.restoreGoogleTranslateMarkers(tr, slots)
             : tr;
           // CJK↔slot 空格補齊:Google MT 翻成 CJK 時常吃掉 marker 前後空格,
           // 導致譯文跟 URL/mention 視覺黏在一起(「傳聞如下https://…透過@user」)。
@@ -2475,6 +2552,13 @@
     // 繁中偵測（與 Gemini 相同邏輯）
     let settings = {};
     try { settings = await browser.storage.sync.get(null); } catch (_) {}
+    // 送翻前取消檢查（同 translatePage 的 bailIfAborted）：取消方已還原並處理 toast，
+    // 這裡不可再往下發 loading toast
+    if (abortSignal.aborted) {
+      SK.sendLog('info', 'translate', 'google translation aborted before translateUnits', { stage: 'storage_loaded' });
+      releaseRunState(myAbortController);
+      return;
+    }
     // P1: 注入 STATE.targetLanguage + 顯示模式（同 Gemini 路徑，共用 helper）
     SK.applyTranslateDisplaySettings(settings);
     // v1.9.26:整頁同 target skip 移除(同 Gemini 路徑,見上方註解)
@@ -2955,6 +3039,14 @@
   // 掛到 SK 讓 content-spa.js（SPA 導航續翻）也能呼叫
   SK.handleTranslatePreset = handleTranslatePreset;
 
+  // 使用者在本分頁用選單字幕開關表達的意圖，綁當下這支影片：換片後 content-youtube.js 會依
+  // 設定值 / 先前狀態重新決定要不要翻，舊意圖不再適用
+  let _ytSubtitleIntent = null;
+  function _ytVideoKey() {
+    try { return new URL(location.href).searchParams.get('v') || location.pathname; }
+    catch (_) { return location.pathname; }
+  }
+
   browser.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg?.type === 'TRANSLATE_PRESET') {
       handleTranslatePreset(Number(msg.payload?.slot));
@@ -3054,8 +3146,19 @@
       return;
     }
     // v1.4.21: popup 勾選狀態直接決定「應該啟或停」，不再走 toggle 翻面
+    // 工具列圖示選單開啟時查「本分頁」的字幕翻譯狀態（選單開關只影響當前分頁，顯示也要跟著
+    // 分頁走，不是全域設定值）。active → true；否則看使用者在這支影片上最後一次用選單開關的
+    // 意圖；都沒有 → null，選單退回設定值（涵蓋 init 延遲窗口，避免「預設沒開」的錯覺，v1.4.13）
+    if (msg?.type === 'GET_SUBTITLE') {
+      const active = !!(SK.YT && SK.YT.active);
+      const intent = _ytSubtitleIntent && _ytSubtitleIntent.videoKey === _ytVideoKey()
+        ? _ytSubtitleIntent.enabled : null;
+      sendResponse({ enabled: active ? true : intent });
+      return;
+    }
     if (msg?.type === 'SET_SUBTITLE') {
       const enabled = !!msg.payload?.enabled;
+      _ytSubtitleIntent = { enabled, videoKey: _ytVideoKey() };
       const active = !!(SK.YT && SK.YT.active);
       if (enabled && !active) {
         SK.translateYouTubeSubtitles?.().catch(err => {

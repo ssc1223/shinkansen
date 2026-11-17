@@ -1,13 +1,12 @@
 # Shinkansen — 規格文件（SPEC）
 
-> 一款專注於隱私的網頁翻譯 Chrome Extension。
+> 一款專注於隱私的網頁、文件與字幕翻譯瀏覽器擴充功能。
 
 - 文件版本：v2.0
 - 建立日期：2026-04-08
-- 最後更新：2026-09-14（v2.4.19，對照程式碼校正）
-- 目標平台：Chrome（Manifest V3）
-- 作業系統：macOS 26
-- 目前 Extension 版本：2.6.5
+- 最後更新：2026-11-17（v2.7.0）
+- 目標平台：Chrome / Firefox / Safari（macOS）/ Safari（iOS・iPadOS），四平台共用同一份 source（Manifest V3）
+- 目前 Extension 版本：2.7.0
 
 ---
 
@@ -24,7 +23,7 @@
 
 ## 1. 專案目標
 
-Shinkansen 是一款 Chrome 擴充功能，將英文（或其他外語）網頁翻譯成台灣繁體中文，協助使用者流暢閱讀外語內容。名稱「新幹線」象徵快速、平穩、流暢的閱讀體驗。
+Shinkansen 是一款瀏覽器擴充功能（Chrome / Firefox / Safari），將外語網頁、文件與影片字幕翻譯成使用者選定的目標語言（八種，預設依瀏覽器語言推導，見 §3.9），協助使用者流暢閱讀外語內容。名稱「新幹線」象徵快速、平穩、流暢的閱讀體驗。
 
 授權：Elastic License 2.0 (ELv2)。允許查看、學習、修改與個人使用；禁止將本軟體（含改寫版本）作為託管或受管理的服務提供給第三方。完整條款見專案根目錄 `LICENSE`。
 
@@ -32,7 +31,7 @@ Shinkansen 是一款 Chrome 擴充功能，將英文（或其他外語）網頁�
 
 ## 2. 功能範圍
 
-### 2.1 已實作（v2.6.5 為止）
+### 2.1 已實作（v2.7.0 為止）
 
 詳細版本歷史見 [`CHANGELOG.md`](CHANGELOG.md)。
 
@@ -40,8 +39,9 @@ Shinkansen 是一款 Chrome 擴充功能，將英文（或其他外語）網頁�
 |---------|------|------|
 | 網頁翻譯 | ✅ | Option+S / Option+A（Gemini）/ Option+D（Google Translate）三組快速鍵；單語覆蓋 / 雙語對照雙模式；漸進分批注入；還原原文 |
 | 雙語對照模式 | ✅ | 譯文以 wrapper 形式附在原段落後；4 種視覺標記；顯示模式同時決定字幕雙語與否 |
-| YouTube 字幕翻譯 | ✅ | 自動偵測字幕即時翻譯；ASR（自動字幕）AI 分句，譯文字幕統一比語音提前 1 秒出現；時間視窗批次；雙語 overlay；字幕大小與顏色跟隨原生設定；行動版 `m.youtube.com` 支援；`/watch` 與 `/live/<id>`（直播 / 直播存檔分享連結）路徑皆支援 |
-| X（Twitter）影片字幕翻譯 | ✅ | X 自動產生字幕（auto-generated）的影片，開聲音播放時自動翻譯（時間軸上自動靜音播放不翻）；AI 分句後以譯文字幕軌顯示，外觀同 X 原生字幕；X 的 CC 鈕兼當譯文字幕開關；雙語跟隨顯示模式；引擎 / 模型沿用 YouTube 字幕設定；沒有字幕軌的影片不支援 |
+| YouTube 字幕翻譯 | ✅ | 自動偵測字幕即時翻譯；自動以影片原始語言的字幕為翻譯來源（依自動字幕、原音音軌、影片標題判斷，避開 YouTube 自動翻譯與配音語言的字幕）；ASR（自動字幕）AI 分句，譯文字幕統一比語音提前 1 秒出現；時間視窗批次；雙語 overlay；字幕大小與顏色跟隨原生設定；行動版 `m.youtube.com` 支援；`/watch` 與 `/live/<id>`（直播 / 直播存檔分享連結）路徑皆支援 |
+| X（Twitter）影片字幕翻譯 | ✅ | X 自動產生字幕（auto-generated）的影片，開聲音播放時自動翻譯（時間軸上自動靜音播放不翻）；只翻播放位置往後約三分鐘的字幕，隨播放逐段補上，暫停 / 靜音 / 滑走即停；失敗的段落稍後自動重試（最多三次）；AI 分句後以譯文字幕軌顯示，外觀同 X 原生字幕；X 的 CC 鈕兼當譯文字幕開關；雙語跟隨顯示模式；引擎 / 模型沿用 YouTube 字幕設定；沒有字幕軌的影片不支援 |
+| Google Drive 影片字幕翻譯 | ✅ | Google Drive 影片播放頁的字幕翻譯；雙語跟隨顯示模式；工具列圖示選單有開關 |
 | SPA 支援 | ✅ | 站內導航自動偵測；動態載入內容補翻；譯文防覆蓋保護；續翻模式 |
 | 段落偵測 | ✅ | 結構化 DOM walker；技術性排除（code / 表單 / 站底 footer）；尊重頁面宣告的 `translate="no"` / `notranslate` 與 icon 字型；內容品味判斷交給 system prompt |
 | 佔位符序列化 | ✅ | 行內元素（連結 / 粗斜體等）與媒體在譯文中完整保留 |
@@ -50,14 +50,17 @@ Shinkansen 是一款 Chrome 擴充功能，將英文（或其他外語）網頁�
 | 固定術語表 | ✅ | 全域 + 網域兩層（網域可加路徑前綴限定範圍，路徑規則覆蓋整站；設定頁清單對含路徑的網域標「（路徑範圍）」）；設定頁編輯；優先覆蓋 LLM 自動術語 |
 | 翻譯快取 | ✅ | `chrome.storage.local`；SHA-1 key；v1.8.45 起版本變更不清快取 |
 | 設定頁 | ✅ | 8 Tab：一般設定 / YouTube 字幕 / Gemini / 自訂模型 / 術語表 / 禁用詞清單 / 用量紀錄 / Debug；匯入匯出 |
-| Popup 面板 | ✅ | 翻譯/還原；快取/費用統計；自動翻譯開關；YouTube 字幕 toggle |
+| Popup 面板 | ✅ | 翻譯 / 還原；顯示模式與目標語言切換；編輯譯文；簡繁自動互轉、術語表一致化、自動翻譯與字幕翻譯開關；快取 / 費用統計；翻譯文件入口；詳見 §13 |
+| 編輯譯文 | ✅ | 翻譯完成後可直接在頁面上修改譯文，逐段復原；入口在工具列圖示選單（§13.1） |
 | Toast 提示 | ✅ | 進度條 + 計時器；可調透明度與位置；`toastAutoHide` 自動關閉選項 |
 | 懸浮按鈕 | ✅ | 頁面邊緣可拖移「新」icon；短按翻譯、長按選引擎或功能選單；可調透明度與大小；全平台預設開 |
+| 懸停翻譯 | ✅ | 按住修飾鍵、游標停在段落上只翻該段；修飾鍵與雙語 / 單語可選，預設關閉；詳見 §10.2.5 |
 | 用量紀錄 | ✅ | IndexedDB + 折線圖 + CSV 匯出；日期/模型/網域/文字搜尋篩選 |
 | Debug 工具 | ✅ | Log buffer 1000 筆 + 持久化 100 筆（跨 SW 重啟）；設定頁 Debug 分頁瀏覽 |
 | Google Docs 支援 | ✅ | 偵測編輯頁自動導向 `/mobilebasic` 閱讀版再翻譯 |
 | 自動語言偵測 | ✅ | 跳過已是目標語言的頁面；target-aware（各 target 跳對應源語言） |
 | 翻譯目標語言 | ✅ | 8 語：zh-TW / zh-CN / en / ja / ko / es / fr / de；詳見 §3.9 |
+| 自訂模型 | ✅ | OpenAI 相容端點（Chat Completions / Responses 兩種 API 格式、自訂 request headers）；可綁到任一組翻譯預設；詳見 §3.8 |
 | 自動翻譯網站 | ✅ | 網域白名單（支援萬用字元）；`autoTranslate` 總開關 |
 | 簡繁本地互轉 | ✅ | 簡繁段落走本地 OpenCC 字典轉換，免費零 API；`autoConvertZh` 自動模式 |
 | 送到 Instapaper | ✅ | 把已翻譯整頁存進 Instapaper（含 AI 摘要）；popup 按鈕 + Alt+I 快速鍵 |
@@ -66,7 +69,7 @@ Shinkansen 是一款 Chrome 擴充功能，將英文（或其他外語）網頁�
 
 ### 2.3 明確不做
 
-滑鼠懸停顯示、原文樣式客製、輸入框翻譯、劃詞翻譯、DeepL / Yandex 等第三方付費翻譯服務、影片字幕（YouTube / Google Drive / X 除外，已支援）、延遲載入、淺色/深色主題切換。
+不按修飾鍵的純滑鼠懸停即彈出譯文（按住修飾鍵的懸停翻譯已支援，見 §10.2.5）、原文樣式客製、輸入框翻譯、劃詞翻譯、DeepL / Yandex 等第三方付費翻譯服務、影片字幕（YouTube / Google Drive / X 除外，已支援）、延遲載入、淺色/深色主題切換。
 
 > 備注：v1.4.0 起已加入 Google Translate 非官方免費端點（Opt+D，不需 API Key），同時保留 Gemini（Opt+S）。Google 官方 Cloud Translation v2 API（付費）不在支援範圍內。
 
@@ -85,10 +88,10 @@ API key 一律走 `x-goog-api-key` request header，不放 URL query string（�
 ### 3.2 開放使用者微調的參數
 
 - `model`：模型名稱（預設 `gemini-3.1-flash-lite`，與主要預設 slot 2 一致；可改為其他 Gemini 模型或自行輸入模型 ID）
-- `serviceTier`：推論層級（DEFAULT / FLEX / STANDARD / PRIORITY），設定頁存大寫短形式，API 送出時轉小寫，DEFAULT 時不送此欄位
+- `serviceTier`：推論層級（DEFAULT / FLEX / STANDARD / PRIORITY），設定頁存大寫短形式，API 送出時轉小寫，DEFAULT 時不送此欄位。顯示的費用依層級換算：FLEX 為內建單價的 50%、PRIORITY 為 1.8 倍（PRIORITY 請求被伺服器降級為 Standard 處理時照 Standard 計），DEFAULT / STANDARD 不變
 - `temperature`：創造性，範圍 0–2，預設 1.0（Gemini 3 官方建議值）
 - `topP` / `topK`：保留欄位（預設 0.95 / 40），僅對仍接受取樣參數的舊模型送出；設定頁已無輸入欄，使用者不可編輯
-- **取樣參數模型 gating**：官方已淘汰取樣參數的新模型（Gemini 3.6 Flash／3.5 Flash-Lite 起）一律不送 `temperature`／`topP`／`topK`；Gemini 3 世代維持只送 `temperature`。設定欄位保留，對淘汰取樣參數的模型不生效
+- **取樣參數模型 gating**：官方已淘汰取樣參數的新模型（Gemini 3.6 Flash／3.5 Flash-Lite 起）一律不送 `temperature`／`topP`／`topK`；Gemini 3 世代維持只送 `temperature`。設定欄位保留，對淘汰取樣參數的模型不生效：設定頁各 Temperature 欄位（網頁翻譯／術語表／字幕／文件翻譯）依實際套用的模型判斷，全部不支援時停用並註明，部分不支援時註明只對哪些模型生效；這些模型的翻譯快取也不因 temperature 設定值而分開
 - `maxOutputTokens`：最大輸出長度，預設 8192
 - `systemInstruction`：系統提示詞（見 3.3）
 - `safetySettings`：安全過濾等級（預設 BLOCK_NONE 四大類別全開）
@@ -151,8 +154,10 @@ client 端不做預防性節流，配額由 API 端 429 回應把關：
 除 Gemini 與 Google Translate 外，使用者可設定**一組** OpenAI-compatible 端點，接 OpenRouter / Ollama 本機 / Together / Groq / Fireworks / OpenAI 等。`translatePresets` 任一 slot 的 `engine` 設成 `'openai-compat'` 即可由對應快速鍵啟動。
 
 - **設定欄位**：`baseUrl`（預設 OpenRouter）、`model`（預設 `openai/gpt-5.4-mini`；留空 = 不送 model 欄位，配合 Ollama / llama.cpp 單模型 server）、獨立 `systemPrompt`、`temperature`（留空 = 不送，配合只接受自家預設的 reasoning model）、計價（`inputPerMTok` / `outputPerMTok`，USD / 1M tokens，填 0 = 不顯示費用）
-- **Cache 命中折扣** `cachedDiscount`（0–1，預設 0.90）：空白時依 baseUrl 自動推導各家折扣
+- **Cache 命中折扣** `cachedDiscount`（0–1，預設 0.90）：空白時依 baseUrl 自動推導各家折扣（OpenAI / Anthropic 命中部分付 10%、DeepSeek 2%、xAI 20%、其他端點 50%）；填 0 才是「沒有折扣」
+- **API 格式** `apiFormat`（`chat` 預設 / `responses`）：決定請求的路徑與格式。`chat` = Chat Completions，送往 `<baseUrl>/chat/completions`，幾乎所有相容端點都支援；`responses` = Responses API，送往 `<baseUrl>/responses`，給只開放這種格式的端點或模型使用。翻譯、術語表抽取與設定頁「測試」按鈕都依這個設定；Base URL 若貼了完整端點（結尾已是 `/chat/completions` 或 `/responses`），路徑仍以這個設定為準。選 `responses` 時：請求一律帶 `store: false`（不讓供應商保存請求內容）、思考強度改以 `reasoning.effort` 送出、輸出上限的欄位名是 `max_output_tokens`（要調整時填在 `extraBodyJson`）；不走串流、不使用伺服器端對話狀態。端點或模型回 400 表示不接受自動帶上的 `reasoning` 或 `temperature` 時，會拿掉該參數自動重試一次
 - **Thinking 控制** `thinkingLevel`（auto / off / low / medium / high，預設 off）：自動翻譯成各家 provider 的對應參數；`extraBodyJson` 供進階使用者透傳自訂欄位
+- **自訂 request headers**（選填，JSON 物件）：給「除了 API Key 還要求額外 header」的端點使用（session id、`api-key`、gateway 路由標記等），翻譯、術語表抽取與設定頁「測試」按鈕的每個請求都會帶上。自行填了 `Authorization` 時取代 API Key 產生的那一個；`Content-Type` / `Content-Length` 不可覆寫。格式有誤時：「測試」按鈕直接回報且不送出請求，正式翻譯則略過有問題的項目並在 Debug 分頁記一條 warn。值可能含憑證，保存方式比照 API Key（見 §5 機密）
 - **強化段序號標記** `useStrongSegMarker`（預設開）：防本機量化模型把段落標記誤譯進譯文；商用 LLM 使用者可關閉省 token
 - **API 逾時** `fetchTimeoutSec`（預設 90 秒，範圍 5–600）：本機 LLM 冷啟動可調高
 - **API Key**：存 `chrome.storage.local`，不跨裝置同步、不在匯出範圍
@@ -178,7 +183,11 @@ client 端不做預防性節流，配額由 API 端 429 回應把關：
 
 **來源語言偵測 target-aware**：已是目標語言的段落自動跳過（zh-TW 跳繁中、zh-CN 跳簡中、en 跳英文）；es / fr / de 等拉丁字母 target 文字級無法區分，一律送 LLM 判斷。簡繁特徵字集由 OpenCC 字典完備生成。偵測演算法細節見 SPEC-PRIVATE §32。
 
-**YouTube 字幕「已是目標語言」跳過**：字幕語言命中 target 對應集合時不啟動翻譯（target=zh-TW 時簡中字幕也跳——繁中使用者可直讀，不花 API；僅字幕路徑，整頁翻譯的簡中段落照翻或走本地轉換）。
+**影片字幕「已是目標語言」跳過**：YouTube、Google Drive 與 X 的字幕語言命中 target 對應集合時不啟動翻譯（target=zh-TW 時簡中字幕也跳——繁中使用者可直讀，不花 API；僅字幕路徑，整頁翻譯的簡中段落照翻或走本地轉換）。Google Drive 的字幕語言取自字幕網址，網址沒有標明時由字幕文字判斷。
+
+**YouTube 廣告期間不顯示譯文字幕**：廣告播放時字幕 overlay 清空，廣告結束後自動恢復。
+
+**文件翻譯頁不載入檔案內的外部資源**：上傳的 HTML / EPUB 檔內指向外部主機的圖片、影音、樣式表與內嵌框架一律不載入（頁面層 Content Security Policy）。
 
 **禁用詞清單依 target 預設**：未客製時 zh-TW 吃 26 條預設清單、其他 target 空清單；使用者編輯過則完全尊重 saved 值。
 
@@ -189,7 +198,7 @@ client 端不做預防性節流，配額由 API 端 429 回應把關：
 擴充功能 UI 字串支援 8 語（與翻譯目標語種對齊）。UI 語言由獨立的 `settings.uiLanguage` 偏好控制，**跟翻譯目標解耦**——可以「英文介面 + 翻譯目標繁中」等任意組合。
 
 - `uiLanguage = 'auto'`（預設）：依 `navigator.language` 推導；或強制鎖任一語言
-- 自製 dict（`lib/i18n.js`，約 950 條 entry × 8 語，zh-TW 為 source of truth）而非 `chrome.i18n`（後者綁瀏覽器 locale 無法獨立切換）；缺 key 三層 fallback 保證不顯示空字串
+- 自製 dict（`lib/i18n.js`，約 1,000 條 entry × 8 語，zh-TW 為 source of truth）而非 `chrome.i18n`（後者綁瀏覽器 locale 無法獨立切換）；缺 key 三層 fallback 保證不顯示空字串
 - `_locales/` 8 語 `messages.json`（`extName` / `extDescription`）：manifest 的 `name` / `description` 以 `__MSG_*__` 引用，瀏覽器擴充功能管理頁、Safari 設定頁與商店 listing 短描述隨系統 / 瀏覽器語言顯示；`default_locale: zh_TW` 為 fallback。`extDescription` 每語 ≤ 112 字元（各平台取最嚴：Apple 驗 112、Chrome 為 132）
 - popup / options / content toast / 文件翻譯頁全面走 dict；regression 由 `test/regression/i18n-*.spec.js` 8 檔覆蓋
 
@@ -217,6 +226,8 @@ target 為中文變體時，偵測為**相反變體**的段落不送 LLM，改�
 | 其他 | 不分流，全走 LLM |
 
 - 混合頁兩路並存：可轉段落走本地轉換、其餘照走 LLM；轉換結果不寫翻譯快取、不記用量（零 API）
+- **一律原地取代，不跟雙語對照設定**：本地轉換的段落不論整頁 `displayMode` 或懸停翻譯的 `hoverTranslateMode` 設成什麼，都直接取代原文、不產生譯文 wrapper（字形與用詞調整後原文沒有對照價值）。顯示模式設雙語對照的混合頁上，轉換段原地取代、其餘語言的段落照雙語對照顯示。走 Google Translate 引擎時不經本地轉換，照顯示模式設定
+- **日文 / 韓文不做簡繁轉換**：頁面宣告為日文或韓文、或整頁以假名 / 諺文為主時，自動模式不改動任何文字；含假名 / 諺文的段落一律不走本地轉換（手動翻譯時照常送 LLM）。日文漢字與簡體字、繁體字大量同形，只看字形會把日文當成中文變體改字
 - **自動模式**（`settings.autoConvertZh`，預設開）：頁面載入 / SPA 導航自動轉換（只跑本地轉換、絕不打 API）；popup toggle「簡繁自動互轉（免費）」只在 target 為中文變體時顯示，切換即時生效（取消時僅還原本地轉換結果，LLM 翻譯成果不受影響）
 - toast 文案與 LLM 翻譯完全分開：進行中「簡繁本地轉換中⋯（不使用 AI 翻譯）」、完成「簡繁本地轉換完成」+「只做字典簡繁轉換，未觸發 AI 翻譯 · 免費」、SPA 新內容「簡繁本地轉換新內容⋯」/「已本地轉換 N 段新內容（未使用 AI）」；混合頁完整翻譯時標示其中 N 段是字典轉換未經 AI。完成通知預設不顯示（`hideZhConvertToast: true`，設定頁可關閉此隱藏），進行中 toast 仍顯示
 - 轉換後按翻譯：自動轉換是背景行為，不算「已翻譯」狀態——工具列 icon 不亮紅點；頁面只被本地轉換過（`translatedBy = 'opencc-local'`）且還有任何未翻段落時，按翻譯（快速鍵 / 工具列圖示選單按鈕 / 懸浮按鈕）第一下就直接翻譯剩餘內容、已轉換段不還原，工具列圖示選單的按鈕也顯示「翻譯本頁」；再按一次才整頁還原（含轉換段）。整頁完全沒有其他可翻內容（純簡體頁）才維持 toggle 還原
@@ -232,6 +243,8 @@ target 為中文變體時，偵測為**相反變體**的段落不送 LLM，改�
 
 - **`single`（預設，單語覆蓋）**：原文段落的文字節點替換成譯文，元素本身保留不動（字體 / 大小 / 顏色 / 排版全部沿用原文）
 - **`dual`（雙語對照）**：原文保留，譯文以 `<shinkansen-translation>` wrapper 附在原段落之後（列表 / 表格等特殊元素內嵌避免破版）。原段落內容完全不動
+
+例外：簡繁本地轉換的段落一律原地取代，不受 `displayMode` 影響（§3.12）。
 
 **視覺標記**（`translationMarkStyle`，dual 模式譯文標記）：
 
@@ -256,7 +269,7 @@ target 為中文變體時，偵測為**相反變體**的段落不送 LLM，改�
 
 ### 4.2 替換策略
 
-single 模式譯文**一律注入回原 element**（不做 sibling overlay——下游 reader / scraper 擷取才乾淨）。行內元素（連結 / 粗斜體 / 行內 code 等）與媒體（圖片 / 影片 / SVG）以佔位符序列化協定在譯文中完整保留；含媒體的段落走「保留媒體 + 替換文字」路徑；不含文字、只包著媒體或字型圖示的行內外框連同外框原樣保留，圖示尺寸與位置不變。序列化 / 反序列化協定與注入演算法見 SPEC-PRIVATE §32。
+single 模式譯文**一律注入回原 element**（不做 sibling overlay——下游 reader / scraper 擷取才乾淨）。行內元素（連結 / 粗斜體 / 行內 code 等）與媒體（圖片 / 影片 / SVG）以佔位符序列化協定在譯文中完整保留；含媒體的段落走「保留媒體 + 替換文字」路徑；不含文字、只包著媒體或字型圖示的行內外框連同外框原樣保留，圖示尺寸與位置不變。行內 SVG 內的無障礙文字（`<title>` / `<desc>`）不送翻、不改寫。序列化 / 反序列化協定與注入演算法見 SPEC-PRIVATE §32。
 
 ### 4.3 還原機制
 
@@ -304,7 +317,7 @@ shinkansen/
 ├── content.js                # 主協調層（translatePage、Debug API、初始化）
 ├── content-shortcuts.js      # 自訂快速鍵 keydown capture 比對 → 本地 dispatch（§10.1）
 ├── content-hover.js          # 懸停翻譯：修飾鍵 + 游標停留只翻該段（§10.2.5）
-├── content-floating-icon.js  # 懸浮翻譯控制按鈕
+├── content-floating-icon.js  # 懸浮按鈕
 ├── content.css
 ├── background.js             # Service Worker（ES module）
 ├── LICENSE                   # ELv2
@@ -348,7 +361,7 @@ shinkansen/
 │   ├── welcome-notice.js     # 自動更新後「歡迎升級」提示寫入邏輯
 │   ├── zh-convert.js         # 簡繁本地互轉（§3.12）
 │   └── vendor/               # 第三方程式庫（pdfjs／pdf-lib + fontkit／chart.min.js／fflate／Noto Sans TC 字型／opencc 簡繁字典）
-├── translate-doc/            # 文件翻譯：PDF + EPUB + TXT / MD / HTML + 字幕檔（§17，web_accessible_resources）
+├── translate-doc/            # 文件翻譯：PDF + EPUB + Word + TXT / MD / HTML + 字幕檔（§17，web_accessible_resources）
 │   ├── index.html / index.js / index.css
 │   ├── settings.html / settings.js
 │   ├── block-types.js        # block type 共用常數
@@ -487,6 +500,8 @@ shinkansen/
   "floatingIconPos": { "edge": "right", "offsetY": 1 },
   "fourFingerGesture": true,
   "touchGestureFingers": 4,
+  "hoverTranslateModifier": "off",
+  "hoverTranslateMode": "dual",
   "iosPromoDismissed": false,
   "autoTranslateSlot": 2,
   "modelPricingOverrides": {},
@@ -501,15 +516,16 @@ shinkansen/
     "thinkingLevel": "off",
     "extraBodyJson": "",
     "useStrongSegMarker": true,
-    "fetchTimeoutSec": 90
+    "fetchTimeoutSec": 90,
+    "apiFormat": "chat"
   }
 }
 ```
 
-註：`customProvider.apiKey` **不存** sync，存 `chrome.storage.local`（key `customProviderApiKey`），與主 Gemini `apiKey` 設計一致。`customProvider.temperature` 可為 `null`（options 欄位留空）＝ 請求不送 `temperature`，見 §3.8。`ytSubtitle.bilingualMode` 已於 v2.0.85 移除——字幕雙語跟隨 `displayMode === 'dual'`（§4.1），舊版寫入的殘留 key 讀取時忽略、匯入時 sanitize 丟棄。
+註：`customProvider.apiKey` **不存** sync，存 `chrome.storage.local`（key `customProviderApiKey`），與主 Gemini `apiKey` 設計一致；自訂 request headers 同樣只存 local（key `customProviderHeaders`，JSON 字串）。`customProvider.temperature` 可為 `null`（options 欄位留空）＝ 請求不送 `temperature`，見 §3.8。`ytSubtitle.bilingualMode` 已於 v2.0.85 移除——字幕雙語跟隨 `displayMode === 'dual'`（§4.1），舊版寫入的殘留 key 讀取時忽略、匯入時 sanitize 丟棄。
 
 - **API Key** 存 `chrome.storage.local`（key `apiKey`），不跨裝置同步。舊版（≤v0.61）存在 sync 的 Key 會自動遷移至 local
-- manifest `commands` 預設快捷鍵由 Chrome 原生管理不存設定；三組 preset 的**自訂**鍵位存 `customShortcuts`（in-page recorder，§10.1）
+- manifest `commands` 預設快速鍵由 Chrome 原生管理不存設定；三組 preset 的**自訂**鍵位存 `customShortcuts`（in-page recorder，§10.1）
 - `maxTranslateUnits`：單頁翻譯段落數上限，超過截斷（0 = 不限制）
 - **Legacy key sweep**：已移除的設定欄位一次性從 sync 刪除，避免長期佔 quota
 
@@ -519,7 +535,7 @@ shinkansen/
 - **術語表快取**：key `gloss_<sha1>` → 術語對照 JSON
 - **版本標記**：key `__cacheVersion` → manifest version（v1.8.45 起版本變更**不**清快取，只更新標記）
 - **累計費用顯示基準點**：key `usageResetAt` → ms epoch。popup「累計費用」的「清除」寫入；popup 只加總此時間點之後的 usage-db 紀錄。usage-db 與此 key 同為裝置本機，不跨裝置同步
-- **機密**：`apiKey`（Gemini）、`customProviderApiKey`（自訂 Provider）、`instapaperToken` / `instapaperTokenSecret`（Instapaper OAuth）——不跨裝置同步、不在匯出範圍
+- **機密**：`apiKey`（Gemini）、`customProviderApiKey`（自訂 Provider）、`customProviderHeaders`（自訂 Provider 的額外 request headers）、`instapaperToken` / `instapaperTokenSecret`（Instapaper OAuth）——不跨裝置同步、不在匯出範圍
 - **大項設定**：`fixedGlossary`（固定術語表）、`forbiddenTerms`（禁用詞清單）——sync 每個 key 上限 8,192 bytes，術語表百餘條即超限；改存 local 後不跨裝置同步，匯出 / 匯入 JSON 仍包含。舊版寫在 sync 的值於下次讀取設定時自動搬到 local 並從 sync 移除（`lib/storage.js` `LOCAL_SETTINGS_KEYS`）
 - **通知狀態**：`welcomeNotice`（升級歡迎橫幅）、`updateAvailable`（`lib/update-check.js` 寫入的新版資訊）
 - **其他**：`exchangeRate`（匯率 cache）、`translateDocPresetSlot`（文件翻譯頁上次選的 preset）、`hostSettingsConsumedSeq`（Safari host app 設定交接序號）、`yt_debug_log` / `anomaly_log`（持久 log ring，§12）
@@ -528,7 +544,8 @@ shinkansen/
 
 - `chrome.storage.sync` 自動跨裝置同步設定（不含 API Key，也不含固定術語表 / 禁用詞清單——兩者存 local，§8.2）
 - 翻譯快取與術語表快取只存 local，不同步
-- 設定頁提供匯出/匯入 JSON（API Key 不含在匯出範圍），匯入時 `sanitizeImport()` 驗證所有欄位；匯入檔把自訂模型 `customProvider.baseUrl` 換到不同 origin（scheme + host + port）時，既有的自訂模型 API Key 會被清除並提示使用者重新輸入（只改 path 視為同一服務、金鑰保留），避免匯入檔把金鑰導到別的主機
+- 設定頁提供匯出/匯入 JSON（API Key 與自訂模型的自訂 request headers 不含在匯出範圍，匯入檔若帶了也不採用），匯入時 `sanitizeImport()` 驗證所有欄位；設定子物件（`geminiConfig` / `pricing` / `domainRules` / `glossary` / `ytSubtitle` / `partialMode` / `customProvider` / `translateDoc`）以「現值 ← 匯入值」逐欄合併，匯入檔沒列到的欄位維持原值（陣列與表格型設定如 `translatePresets`、術語表、禁用詞、自訂快速鍵仍整份取代）；匯入檔把自訂模型 `customProvider.baseUrl` 換到不同 origin（scheme + host + port）時，先跳確認框顯示新舊端點網址，取消則整份匯入不寫入，繼續則既有的自訂模型 API Key 與自訂 request headers 會被清除並提示使用者重新輸入（只改 path 視為同一服務、不跳確認、金鑰保留），避免匯入檔把金鑰或網頁內容導到別的主機
+- 「回復預設設定」保留 Gemini API Key；自訂模型端點會回到預設主機，原端點若在別的主機，自訂模型 API Key 與自訂 request headers 一併清除並提示（原本就在預設主機則保留）
 
 ---
 
@@ -558,11 +575,11 @@ shinkansen/
 
 ---
 
-## 10. 快捷鍵
+## 10. 快速鍵
 
 三組 preset 快速鍵（v1.4.12 起），每組對應 options「翻譯快速鍵」一張 preset card（slot 1／2／3，可自訂 label／engine／model）：
 
-| 快捷鍵 | command id | slot | 預設 engine / model |
+| 快速鍵 | command id | slot | 預設 engine / model |
 |---|---|---|---|
 | Alt+S（Opt+S） | `translate-preset-0` | 2 | Gemini Flash Lite（主要預設） |
 | Alt+A（Opt+A） | `translate-preset-1` | 1 | Gemini 3.8 Flash（次要預設，多指長按亦走此組） |
@@ -662,11 +679,12 @@ iOS Safari 背景 event page 掛起的續命處理（長批次翻譯期間保持
 - 術語表一致化 toggle
 - YouTube 字幕翻譯 toggle + 字幕大小 select（YouTube 影片頁顯示）
 - Drive 影片字幕翻譯 toggle（Drive 影片頁顯示）
-- X 影片字幕翻譯 toggle（X 推文頁顯示，與 YouTube / Drive 共用同一個字幕自動翻譯設定）
+- X 影片字幕翻譯 toggle（X 推文頁顯示）
+- 三個字幕 toggle 都只影響當前分頁、不改設定，選單開啟時顯示的也是當前分頁的實際狀態（分頁尚未啟動且未手動切換過時顯示設定值）；預設是否自動翻譯字幕由設定頁的 `ytSubtitle.autoTranslate` 決定（三站共用）
 - 快取統計 + 清除快取按鈕
 - 累計費用 / token 顯示 +「清除」按鈕（只重設顯示基準點，不刪用量紀錄）
 - 狀態列（未設 Gemini API Key 且有 preset 用 Gemini 時顯示提示，該列可點，點了直接開設定頁）
-- Footer：設定按鈕 +「翻譯文件」按鈕（§17）+ 快捷鍵提示（動態讀取）
+- Footer：設定按鈕 +「翻譯文件」按鈕（§17）+ 快速鍵提示（動態讀取）
 
 ### 13.2 版本顯示
 
@@ -697,6 +715,9 @@ iOS Safari 背景 event page 掛起的續命處理（長批次翻譯期間保持
 `lib/usage-db.js` 使用 IndexedDB 儲存每次翻譯的詳細紀錄（時間、URL、模型、token 數、費用、段落數等）。
 
 - 設定頁「用量」分頁：彙總卡片（總費用/token/筆數/最常用模型）、折線圖（日/週/月粒度）、明細表格
+- **金額幣別**：`displayCurrency`（USD / TWD，預設 TWD）的選項只在繁中介面出現；非繁中介面的翻譯完成通知、工具列圖示選單累計、用量分頁、文件翻譯頁一律以美金顯示，繁中介面照使用者選擇
+- **內建單價的有期限促銷價**：`gemini-3.8-flash` 在 2026-12-31 前以 $0.75 / $3.75 計，2027-01-01 起自動改用 $1.50 / $7.50，設定頁的價格字樣同步切換；使用者在「模型計價」自訂過的單價不受影響
+- **紀錄範圍為單一裝置**：用量存在各裝置本機、不跨裝置同步；同一把 API Key 用在多台裝置時，單一裝置顯示的金額會低於實際帳單，分頁頂端的說明文字有註明並連到 Gemini API Spend
 - 支援日期範圍篩選、CSV 匯出、清除——清除有兩種語意：options 的清除真刪紀錄；popup 的「清除」只重設顯示基準點，不刪任何紀錄
 - 費用計算套用 cache 命中折扣後的實付值
 - 字幕翻譯逐批合併成單筆（YouTube / Drive 各自合併不互混）；Google MT 整頁翻譯亦合併
@@ -776,7 +797,7 @@ iOS Safari 背景 event page 掛起的續命處理（長批次翻譯期間保持
 
 與 PDF 共用同一頁，依副檔名自動分流。
 
-**限制**：檔案硬上限 100MB；全書字數超過 50 萬字時顯示成本警告。
+**限制**：檔案硬上限 100MB；解壓後總大小上限 1GB（超過視為壞檔、不開啟）；全書字數超過 50 萬字時顯示成本警告。
 
 **使用者可見功能**：
 
@@ -792,7 +813,7 @@ iOS Safari 背景 event page 掛起的續命處理（長批次翻譯期間保持
 - **術語表譯名不被加註原文**：翻譯完成後，術語表 target 為純譯名的條目，譯文中出現「譯名（該條 source）」一律還原成純譯名（確定性後處理；target 本身含括號對照的條目照表輸出，要對照請把譯名寫成「譯名（原文）」並搭配「對照一次」選項；手動編輯過的段落不動；原文本身就帶括號對照的段落——例 “FBI (Federal Bureau of Investigation)”——該條不清理；快取命中的舊譯文重跑零費用即治癒）。通用 prompt 的「特殊詞彙首次出現加註原文」規則會讓模型對純譯名條目自行加註（實測同一份內容段落版 91 段 33 處），術語表是單一事實來源
 - **輸出格式**：EPUB 2 來源可選升級輸出 EPUB 3；譯本內容可選單語譯文或雙語對照（切換重新下載零重翻費用）
 - **段落間距至少 0.5em**（`translateDoc.epubParagraphSpacing`，預設關）：改善 `margin:0` 傳統排版的段落擁擠
-- **譯後一致性掃描**（`translateDoc.consistencyScan`，預設開）：翻譯完成後掃描「同一原文多譯名 / 指定譯名缺席」並列出可一鍵取代的違規清單。注意訊號層：掃的是譯名一致性，不驗「單一譯名但翻得差」（品質歸 prompt / 模型）
+- **譯後一致性掃描**（`translateDoc.consistencyScan`，預設開）：翻譯完成後掃描「同一原文多譯名 / 指定譯名缺席」並列出可一鍵取代的違規清單。注意訊號層：掃的是譯名一致性，不驗「單一譯名但翻得差」（品質歸 prompt / 模型）。「同一原文多譯名」這一層需要 Gemini API Key；未設定時結果頁會提示這次只檢查了指定譯名
 
 解析 / 序列化 / 譯本重建（writer）/ 掃描演算法等實作細節見 SPEC-PRIVATE §32。
 
@@ -801,8 +822,8 @@ iOS Safari 背景 event page 掛起的續命處理（長批次翻譯期間保持
 與 EPUB 共用同一條「書籍式文件」管線（章節清單 / 術語表 / 譯後一致性掃描 / 預覽編輯 / 工作階段存檔 / 費用預估 / 術語表譯名不被加註原文的後處理全部沿用），只有解析與譯文檔重建按格式分流：
 
 - **TXT**：按空行分段為翻譯單位；空白行、純標點 / 數字段（分隔線、頁碼）原樣保留。無章節結構——整份單一「章節」，不出章節勾選 UI，主按鈕為「開始翻譯」
-- **Markdown**：按 ATX 標題（`#` / `##`）切章，比照 EPUB 出章節勾選清單；標題 / 清單 / 引用的標記前綴由重建端保留，fenced code block 不翻譯原樣帶過；無標題檔視同單章
-- **HTML**：整份單一章節，段落偵測與行內標記序列化沿用 EPUB 章節引擎（粗斜體 / 連結等 inline 標記保留），`<script>` / 樣式 / 其餘結構原樣帶過；輸出時更新 `<html lang>` 為目標語言，來源未宣告 charset 時補 `<meta charset="utf-8">`
+- **Markdown**：按 ATX 標題（`#` / `##`）切章，比照 EPUB 出章節勾選清單；標題 / 清單 / 引用的標記前綴由重建端保留，檔案開頭的 front matter、fenced code block（含清單內縮排的）、縮排程式碼區塊、連結參照定義（`[id]: url`）不翻譯原樣帶過，清單內續段的縮排保留；無標題檔視同單章
+- **HTML**：整份單一章節，段落偵測與行內標記序列化沿用 EPUB 章節引擎（粗斜體 / 連結等 inline 標記保留），`<script>` / 樣式 / 其餘結構原樣帶過；輸出時更新 `<html lang>` 為目標語言，並把檔內的編碼宣告（`<meta charset>` / `http-equiv="Content-Type"` 的 charset）一律改成 utf-8，來源未宣告時補 `<meta charset="utf-8">`；非 UTF-8 的 HTML 讀入時以檔內宣告的編碼為準
 - **限制**：檔案硬上限與 EPUB 相同（100 MB）；已選字數超過 50 萬字時顯示成本警告
 - **檔案編碼**：讀入時自動判斷編碼——UTF-8（含 BOM）/ UTF-16（BOM）/ Big5 / GBK / Shift_JIS / EUC-KR / Windows-1252（以目標語言決定舊編碼的優先順序，並以常用字比例防止 Big5 ⇄ GBK 互判錯）；譯文檔一律以 **UTF-8** 輸出（來源有 BOM 才帶 UTF-8 BOM）
 - **格式列**：章節清單資訊列的「格式」欄顯示 EPUB 版本或 TXT / Markdown / HTML
@@ -832,10 +853,11 @@ iOS Safari 背景 event page 掛起的續命處理（長批次翻譯期間保持
 
 - **章節切分**：內文依標題樣式（Heading 1 / Heading 2）切章，比照 Markdown 出章節勾選清單；無標題檔視同單章。頁首與頁尾、註腳與章節附註、文件註解各自成附加章節，可獨立勾選
 - **格式保留**：段落樣式、對齊、清單編號、粗斜體 / 底線 / 刪除線 / 上下標 / 色字 / 螢光標記 / 字型等行內格式，以及超連結（外部與文件內錨點）全數往返；行內圖片、定位鍵、分頁符、數學公式、內容控制項原樣保留不送翻
+- **文字方塊**：文字方塊內的段落各自翻譯；文字方塊所錨定的段落若自己也有文字（例如文件標題），該段文字同樣翻譯，雙語對照時譯文段不重複文字方塊
 - **欄位（field）**：PAGE / TOC 等 Word 欄位整塊原樣保留不翻譯——目錄在 Word 內更新欄位後即以譯後標題重算
 - **書籤與註解錨點**：書籤、註解範圍錨點與參照全數保留；註解（comments）內容一併翻譯，在 Word 註解面板顯示譯文；超連結的全部屬性（提示文字等）原樣保留
 - **雙語對照**（下載時「譯本內容」select 可選）：原文段落原樣保留，譯文段落接在每段後面（清單項的譯文段不重複編號、段落層分節與文字框定位屬性不複製；頁首頁尾 / 註腳 / 註解維持單語）；切換模式重新下載零重翻費用
 - **不支援場景**（上傳時偵測 + 明確提示）：加密（密碼保護）docx 擋下；含未接受追蹤修訂的檔案擋下並提示先在 Word 接受修訂；`.doc` 舊格式與 `.docm` 巨集檔不支援
-- **限制**：檔案硬上限與 EPUB 相同（100 MB）；已選字數超過 50 萬字時顯示成本警告；格式列顯示「Word (DOCX)」
+- **限制**：檔案硬上限與解壓後總大小上限與 EPUB 相同（100 MB / 1 GB）；已選字數超過 50 萬字時顯示成本警告；格式列顯示「Word (DOCX)」
 - **重建不變量**：未翻 / 失敗段落與所有未動檔案區塊逐位元組保留；重複下載輸出一致
 - 解析 / OOXML 寫回 / island 協定等實作細節見 SPEC-PRIVATE §32

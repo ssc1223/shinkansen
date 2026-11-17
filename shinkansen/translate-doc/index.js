@@ -6,11 +6,11 @@
 
 import { parsePdf, preflightFile, renderPageToCanvas, closeDocument, PdfParseError } from './pdf-engine.js';
 import { analyzeLayout } from './layout-analyzer.js';
-import { translateDocument, segmentsToMarkdown, markdownToSegments, collectGlossaryInputParts, clearTcCacheForTexts, stripPlaceholderTokens } from './translate.js';
+import { translateDocument, segmentsToMarkdown, markdownToSegments, collectGlossaryInputParts, clearTcCacheForTexts, clearTcCacheForDoc, stripPlaceholderTokens } from './translate.js';
 import { TRANSLATABLE_TYPES } from './block-types.js';
-import { renderReader, buildPlainTextDump } from './reader.js';
+import { renderReader, buildPlainTextDump, cancelPendingReaderRender } from './reader.js';
 import { downloadBilingualPdf, buildBilingualPdf } from './pdf-renderer.js';
-import { formatMoney } from '../lib/format.js';
+import { formatMoney, resolveDisplayCurrency } from '../lib/format.js';
 import { getCachedRate, FALLBACK_USD_TWD_RATE } from '../lib/exchange-rate.js';
 // EPUB 翻譯（v2.0.11）
 import {
@@ -145,7 +145,7 @@ let glossaryEntryStage = 'result';
 let epubCumulativeCostUSD = 0;
 // 譯後一致性掃描（v2.0.11）：結果不持久化，每輪翻譯完成後重掃
 // （對照抽取有 scanr_ 內容快取，重掃不重複計費）
-let epubScanState = null; // { running, tier1: [violations], cases: [drift], autoFixes }
+let epubScanState = null; // { running, tier1: [violations], cases: [drift], autoFixes, tier2Unavailable }
 let epubScanGen = 0;      // 換檔 / 放棄時 ++，讓 in-flight 掃描丟棄結果
 // 略過清單（2026-07-10 Jimmy 指示）：人工 review 後認定不需替換的術語表違規
 // entry（source→expected），隨工作階段持久化——重掃不再列出、自動替換也不碰
@@ -165,6 +165,14 @@ let currentDocExtraPrompt = '';
 // EPUB 預覽狀態：原文對照 toggle + 目前預覽範圍（章節物件或 'all'）
 let epubPreviewCompare = false;
 let epubPreviewScope = null;
+
+// 解析警告 code → 介面語言字串。未知 code 退回引擎給的 message（至少看得到內容）
+function parseWarningText(w) {
+  if (!w) return '';
+  if (w.code === 'garbled-fonts') return t('doc.parsing.warn.garbledFonts');
+  if (w.code === 'rotated-text-dropped') return t('doc.parsing.warn.rotatedDropped', { n: w.count });
+  return w.message || '';
+}
 
 function showStage(name) {
   for (const [key, el] of Object.entries(stages)) {
@@ -240,6 +248,8 @@ function releaseCurrentDoc() {
   // render 可達 10 秒+,await 期間 currentReaderHandle 是 null，這裡摸不到它)——
   // gen 失配讓那輪完成後自行 destroy，不把舊檔的 handle / DOM 寫進新檔的欄位
   readerGeneration++;
+  // 骨架迴圈還在跑的那一輪直接作廢（它停在已關閉 PDF 的 getPage 上，自己不會醒來）
+  cancelPendingReaderRender();
   if (currentReaderHandle) {
     try { currentReaderHandle.destroy(); } catch (_) { /* ignore */ }
     currentReaderHandle = null;
@@ -376,6 +386,7 @@ async function handleFile(file) {
         medianLineHeight: p.medianLineHeight,
         bodyFontSize: p.bodyFontSize,
         mayHaveColoredBackground: p.mayHaveColoredBackground,   // 批次 7 §6.4（解析階段旗標，harness 驗用）
+        imageRects: p.imageRects,   // 點陣圖外框（harness / spec 驗用）
         blocks: p.blocks,
       })),
     };
@@ -411,11 +422,12 @@ async function handleFile(file) {
     $('result-chars').textContent = doc.stats.totalChars.toLocaleString('en-US');
     resetPageRange(doc.meta.pageCount);
 
-    if (doc.warnings.length > 0) {
-      const warnEl = $('upload-error');
-      warnEl.textContent = doc.warnings.map((w) => t('doc.parsing.warn', { message: w.message })).join(' / ');
-      warnEl.hidden = false;
-    }
+    // 解析警告顯示在結果畫面（原本寫進 #upload-error，但上傳畫面此時已隱藏，使用者看不到；
+    // 訊息也改依 code 查字典，不直接顯示引擎內的繁中字串）
+    const warnEl = $('result-warning');
+    const warnTexts = doc.warnings.map(parseWarningText).filter(Boolean);
+    warnEl.textContent = warnTexts.map((m) => t('doc.parsing.warn', { message: m })).join(' / ');
+    warnEl.hidden = warnTexts.length === 0;
 
     showStage('result');
   } catch (err) {
@@ -729,6 +741,14 @@ function bindUploadUI() {
   dropzone.addEventListener('drop', (e) => {
     const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
     if (file) handleFile(file);
+  });
+  // 拖放區以外（或拖放區已隱藏的翻譯 / 結果階段）把檔案拖進頁面：瀏覽器預設會直接導向那個檔案，
+  // 頁面被換掉、還沒下載的翻譯成果全部消失。整頁擋掉預設行為（拖放區自己的 handler 已 stopPropagation）
+  ['dragover', 'drop'].forEach((evt) => {
+    window.addEventListener(evt, (e) => {
+      const types = e.dataTransfer && e.dataTransfer.types;
+      if (types && Array.prototype.includes.call(types, 'Files')) e.preventDefault();
+    });
   });
 }
 
@@ -1118,53 +1138,11 @@ function bindSettingsDialogUI() {
 // 清除本篇 PDF 對應的所有譯文快取(prefix tc_<sha1> match,不限 suffix)。
 // 不動其他 PDF / 網頁 / 字幕快取。同時把 currentDoc 內已有 translation 的
 // block 重置成 pending,讓使用者下次重新翻譯會真的呼叫 LLM。
-//
-// Cache key 結構(見 lib/cache.js):
-//   tc_<sha1(plainText)><suffix>
-// suffix 包含 cacheTag('_doc') / glossary hash / forbidden hash / model id,
-// 所以同一段 plainText 在不同 model / glossary 設定下會有不同 key。我們以
-// `tc_<sha1>` 為 prefix 一次掃掉所有 suffix 變體 — 比對單一 suffix 來得徹底
+// 實作在 translate.js clearTcCacheForDoc：取文字必須與送翻同一個函式（buildMarkedText），
+// 本檔不再自己算 hash（先前用 plainText 算，帶粗體 / 斜體 / 連結的段落清不掉）
 async function clearCurrentDocCache() {
   if (!currentDoc) return { removedKeyCount: 0, translatableSegmentCount: 0 };
-  const segTexts = [];
-  for (const page of currentDoc.pages) {
-    for (const block of page.blocks) {
-      if (!TRANSLATABLE_TYPES.has(block.type)) continue;
-      const t = block.plainText && block.plainText.trim();
-      if (!t) continue;
-      segTexts.push({ block, text: block.plainText });
-    }
-  }
-  if (segTexts.length === 0) return { removedKeyCount: 0, translatableSegmentCount: 0 };
-  // 算每段 sha1 → 構造 prefix
-  const prefixes = await Promise.all(
-    segTexts.map(async (s) => 'tc_' + (await sha1(s.text))),
-  );
-  const prefixSet = new Set(prefixes);
-  // v1.10.39(code review 2026-06-09 L4):只需比對 key prefix,不需 value。網頁翻譯快取
-  // (tc_ 前綴)也存在 storage.local,重度使用者可能累積數千~數萬條 → get(null) 會把
-  // 整份快取(可能數十 MB)反序列化進記憶體只為比 key。優先用 getKeys()(Chrome 130+,
-  // 只回 key 不載 value);舊瀏覽器 fallback get(null)。
-  const allKeys = (typeof chrome.storage.local.getKeys === 'function')
-    ? await chrome.storage.local.getKeys()
-    : Object.keys(await chrome.storage.local.get(null));
-  const matchedKeys = [];
-  for (const key of allKeys) {
-    if (!key.startsWith('tc_')) continue;
-    // tc_<40 char sha1>... — 取前 43 字當 prefix 比對
-    const prefix = key.slice(0, 43);
-    if (prefixSet.has(prefix)) matchedKeys.push(key);
-  }
-  if (matchedKeys.length > 0) {
-    await chrome.storage.local.remove(matchedKeys);
-  }
-  // 重置 block 翻譯狀態,讓 reader / debug overlay 看起來「重新可翻」
-  for (const { block } of segTexts) {
-    block.translation = undefined;
-    block.translationStatus = undefined;
-    block.translationError = undefined;
-  }
-  return { removedKeyCount: matchedKeys.length, translatableSegmentCount: segTexts.length };
+  return clearTcCacheForDoc(currentDoc);
 }
 
 function bindSummaryDialogUI() {
@@ -1648,7 +1626,9 @@ async function saveEdits() {
 
 function bindEditUI() {
   $('edit-cancel-btn').addEventListener('click', () => {
-    if (currentDoc && currentReaderHandle) showStage('reader');
+    // 回閱讀頁的條件是「有開著的 PDF」，不是「閱讀器建置成功」：建置失敗（閱讀頁顯示失敗原因）時
+    // 使用者仍可從閱讀頁進編輯頁改譯文再重建，按取消卻被丟回上傳頁 = 看起來像整份翻譯不見了
+    if (currentDoc && currentPdfDoc) showStage('reader');
     else showStage('upload');
   });
   $('edit-save-btn').addEventListener('click', async () => {
@@ -2024,6 +2004,9 @@ async function _startTranslateImpl() {
 //   2.「取消」→ 回 reader / result stage,currentArticleGlossary 不動
 // 持久化:無。靠 user 自行匯出 / 匯入 JSON 跨次保存
 
+// 正在替哪一份文件抽取術語表（null = 沒有在跑）。防重入與「抽取中換檔 / 放棄」用
+let _glossaryExtractDoc = null;
+
 async function openGlossaryEditor(fromStage = 'result') {
   if (!currentDoc) return;
   glossaryEntryStage = fromStage;
@@ -2042,20 +2025,33 @@ async function openGlossaryEditor(fromStage = 'result') {
   showStage('glossary');
   // 若還沒建術語表(null)→ 顯 loading + 自動跑 EXTRACT_GLOSSARY 拿初始值。
   // 若已有(包含空 [])→ 直接 show table 讓使用者編輯
+  // 抽取進行中主要按鈕停用：這時按「用此術語表翻譯」會拿空表開始翻譯，抽取回來又把術語表換掉
+  actionBtn.disabled = _glossaryExtractDoc === currentDoc;
   if (currentArticleGlossary === null) {
     setGlossaryState(t('doc.glossary.state.loading'), 'is-loading');
+    // 同一份文件的抽取已在跑（取消後再點一次進來）：不重複開第二輪（重複計費），等那一輪回來建表
+    if (_glossaryExtractDoc === currentDoc) return;
+    const docAtStart = currentDoc;
+    _glossaryExtractDoc = docAtStart;
+    actionBtn.disabled = true;
+    let extracted = null;
     try {
       // 書籍式文件走全書逐章分輪抽取（覆蓋全書，不是只抽開頭 60K 字）
-      const extracted = isBook
-        ? await extractGlossaryForBook(currentDoc)
-        : await extractGlossaryForDoc(currentDoc);
-      currentArticleGlossary = Array.isArray(extracted) ? extracted : [];
-      if (isBook && currentArticleGlossary.length > 0) {
-        await savePersistedBookGlossary(currentArticleGlossary);
-      }
+      extracted = isBook
+        ? await extractGlossaryForBook(docAtStart)
+        : await extractGlossaryForDoc(docAtStart);
     } catch (err) {
       console.warn('[Shinkansen] glossary extract failed', err && err.message);
-      currentArticleGlossary = [];
+    } finally {
+      if (_glossaryExtractDoc === docAtStart) _glossaryExtractDoc = null;
+    }
+    // 抽取期間文件已放棄 / 換檔：結果整個丟掉。原本會照樣寫進 currentArticleGlossary 並重建表格，
+    // 等於把上一份文件的術語表（或一個空表）套到新開的文件上，新文件還因此不再自動抽取
+    if (currentDoc !== docAtStart) return;
+    actionBtn.disabled = false;
+    currentArticleGlossary = Array.isArray(extracted) ? extracted : [];
+    if (isBook && currentArticleGlossary.length > 0) {
+      await savePersistedBookGlossary(currentArticleGlossary);
     }
   }
   buildGlossaryTable(currentArticleGlossary);
@@ -2470,9 +2466,12 @@ async function reextractGlossary() {
   try {
     // 「重新抽取」語意 = 強制重跑（forceRefresh 繞過 gloss_ 快取讀取，
     // 否則同文字同 hash 秒回快取，按了形同沒按——2026-07-10 Jimmy 回報）
-    const extracted = isBookDoc(currentDoc)
-      ? await extractGlossaryForBook(currentDoc, { forceRefresh: true })
-      : await extractGlossaryForDoc(currentDoc, { forceRefresh: true });
+    const docAtStart = currentDoc;
+    const extracted = isBookDoc(docAtStart)
+      ? await extractGlossaryForBook(docAtStart, { forceRefresh: true })
+      : await extractGlossaryForDoc(docAtStart, { forceRefresh: true });
+    // 抽取期間文件已放棄 / 換檔：不把結果畫到新文件的術語表頁上（同 openGlossaryEditor）
+    if (currentDoc !== docAtStart) return;
     if (Array.isArray(extracted) && extracted.length > 0) {
       buildGlossaryTable(extracted);
     } else {
@@ -2570,11 +2569,14 @@ async function fillSummaryDialog(summary) {
 
 async function formatCostStr(usd) {
   try {
-    const [{ displayCurrency = 'TWD' }, rateInfo] = await Promise.all([
-      chrome.storage.sync.get('displayCurrency'),
+    const [{ displayCurrency, uiLanguage }, rateInfo] = await Promise.all([
+      chrome.storage.sync.get(['displayCurrency', 'uiLanguage']),
       getCachedRate(),
     ]);
-    return formatMoney(usd, { currency: displayCurrency, rate: rateInfo?.rate || FALLBACK_USD_TWD_RATE });
+    // 非繁中介面一律 USD（幣別選項只在繁中介面出現，lib/format.js resolveDisplayCurrency）
+    const I18N = window.__SK?.i18n;
+    const uiLang = I18N ? I18N.getUiLanguage(uiLanguage || 'auto') : 'zh-TW';
+    return formatMoney(usd, { currency: resolveDisplayCurrency(displayCurrency, uiLang), rate: rateInfo?.rate || FALLBACK_USD_TWD_RATE });
   } catch (_) {
     return formatMoney(usd, { currency: 'USD' });
   }
@@ -2693,6 +2695,19 @@ async function handleBookFile(file, kind, subtitleFormat = null) {
     if (myGen !== parseGeneration) return;
     if (session) {
       const restored = hydrateSessionBlocks(doc, session.blocks);
+      // 存檔裡有哪些段落要讓差異存檔知道：persistEpubSession 只會移除「簽章表裡有、現在不是已翻」的
+      // 段落，重開頁面後簽章表是空的——匯入舊工作階段 / 清掉譯文之後，存檔裡的舊段落刪不掉，
+      // 下次開書又回來。值放不會與任何欄位相等的佔位（首次存檔仍全量寫一次）。
+      // 只記這次有還原到的段落；存檔裡對不到段落的紀錄不動
+      if (session.blocks) {
+        for (const ch of doc.chapters) {
+          for (const b of ch.blocks) {
+            if (session.blocks[b.blockId] && !_sessionSavedSig.has(b.blockId)) {
+              _sessionSavedSig.set(b.blockId, { raw: undefined, plain: undefined, edited: undefined });
+            }
+          }
+        }
+      }
       // 空陣列也要接受——「清空過」（[]）跟「沒建過」（null）是不同狀態；
       // 只接受非空會讓清空後重開掉進 legacy fallback 撈回舊術語表
       //（2026-07-10 Jimmy 回報 bug）
@@ -2734,6 +2749,10 @@ async function handleBookFile(file, kind, subtitleFormat = null) {
   } catch (err) {
     if (myGen !== parseGeneration || (err && err.code === 'aborted')) return;
     console.error('[Shinkansen] 書籍式文件解析失敗', kind, err);
+    // 解析後段（算書指紋 / 還原工作階段 / 畫章節清單）才失敗時，currentDoc、書指紋、還原到一半的
+    // 術語表與禁用詞已經寫進頁面狀態；畫面回到上傳頁但狀態還掛著這本開失敗的書（離開頁面的確認、
+    // 之後的存檔都會拿它當目前文件）。失敗一律清回「沒有文件」
+    releaseCurrentDoc();
     if (err && err.name === 'EpubParseError') {
       showError(t('doc.epub.error.' + err.code));
     } else if (err instanceof DocxParseError) {
@@ -3612,6 +3631,9 @@ async function runConsistencyScan(doc) {
   const batches = buildScanBatches(candidates, blockById);
 
   const collected = [];
+  // 第二層只有 Gemini 路徑：沒有 Gemini 金鑰時整層做不了。記下原因讓結果頁告知使用者
+  //（原本只有 console 警告，只設自訂模型的使用者不知道少了一層檢查）
+  let tier2Unavailable = null;
   for (const batch of batches) {
     if (gen !== epubScanGen || currentDoc !== doc) return;
     // 內容指紋進 scanr_ 快取：同 payload 同結果，續翻後重掃不重複計費
@@ -3635,12 +3657,17 @@ async function runConsistencyScan(doc) {
       }
     } else if (res && !res.ok) {
       console.warn('[Shinkansen] scan batch not ok', res.error);
+      if (res.errorCode === 'apiKeyMissing') {
+        // 缺金鑰每一批都會同樣失敗，不必繼續送
+        tier2Unavailable = 'apiKeyMissing';
+        break;
+      }
     }
   }
   if (gen !== epubScanGen || currentDoc !== doc) return;
 
   const cases = aggregateRenderings(collected);
-  epubScanState = { running: false, tier1, cases, autoFixes };
+  epubScanState = { running: false, tier1, cases, autoFixes, tier2Unavailable };
   console.log('[Shinkansen] consistency scan done', {
     glossaryViolations: tier1.length, driftCases: cases.length,
     autoFixedEntries: autoFixes.length,
@@ -3703,9 +3730,14 @@ function renderScanBanner() {
     : 0;
   btn.hidden = false;
   btn.disabled = false;
-  if (findings > 0) {
+  // 第二層沒做成時即使零發現也讓入口開結果頁——提示只顯示在結果頁，
+  // 走「手動掃描」模式的話使用者永遠看不到（結果頁仍有「重新掃描」）
+  if (findings > 0 || epubScanState?.tier2Unavailable) {
     btn.dataset.skMode = 'results';
-    btn.textContent = t('doc.epub.scan.banner', { n: findings });
+    // 少查一層又零發現時不可寫「0 個發現」（讀起來像全部查過沒問題）
+    btn.textContent = findings > 0
+      ? t('doc.epub.scan.banner', { n: findings })
+      : t('doc.epub.scan.bannerPartial');
   } else {
     btn.dataset.skMode = 'manual';
     btn.textContent = t('doc.epub.scan.manual');
@@ -4024,6 +4056,13 @@ function renderScanResults() {
     compList.appendChild(row);
   }
 
+  const tier2Note = $('scan-tier2-note');
+  if (tier2Note) {
+    tier2Note.hidden = state.tier2Unavailable !== 'apiKeyMissing';
+    if (!tier2Note.hidden) tier2Note.textContent = t('doc.epub.scan.tier2NeedsGeminiKey');
+  }
+  // 少查一層時空狀態只能替查過的那層下結論，不可寫成總結論
+  setI18nText($('scan-empty'), state.tier2Unavailable ? 'doc.epub.scan.emptyComplianceOnly' : 'doc.epub.scan.empty');
   $('scan-empty').hidden = visibleCases.length > 0 || tier1.length > 0
     || autoFixes.length > 0 || skippedEntries.length > 0 || epubScanIgnoredDrift.size > 0;
 }
@@ -4570,8 +4609,11 @@ async function clearBookGlossaryExtractionCache(doc) {
     const rounds = buildBookGlossaryRounds(doc);
     if (rounds.length === 0) return;
     const prefixes = await Promise.all(rounds.map(async (text) => 'gloss_' + await bookGlossaryRoundHash(text)));
-    const all = await chrome.storage.local.get(null);
-    const toRemove = Object.keys(all).filter((k) => prefixes.some((p) => k.startsWith(p)));
+    // 只需要 key：有 getKeys 就不讀整池內容（量測：9MB 的池 get(null) 約 70ms、getKeys 約 6ms）
+    const allKeys = typeof chrome.storage.local.getKeys === 'function'
+      ? await chrome.storage.local.getKeys()
+      : Object.keys(await chrome.storage.local.get(null));
+    const toRemove = allKeys.filter((k) => prefixes.some((p) => k.startsWith(p)));
     if (toRemove.length) await chrome.storage.local.remove(toRemove);
     console.log('[Shinkansen] book glossary extraction cache cleared', { removed: toRemove.length });
   } catch (err) {
