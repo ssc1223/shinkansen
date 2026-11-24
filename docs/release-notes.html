@@ -99,6 +99,40 @@
   <h1>商店上架版本更新紀錄</h1>
   <p class="subtitle">給 Chrome Web Store、Firefox Add-ons、Mac App Store 與 App Store（iOS / iPadOS）使用者的更新摘要，只列出對使用者直接有感的功能變更與重要修正。完整的版本歷史（含每一個 patch 與技術細節）請見 GitHub <a href="https://github.com/jimmysu0309/shinkansen/blob/main/CHANGELOG.md" target="_blank" rel="noopener">CHANGELOG.md</a></p>
 
+  <h2>v2.7.7 <span class="release-date">2026-11-23 上架</span></h2>
+  <p class="release-meta">相對於上一個商店版本 v2.7.1</p>
+
+  <p class="lead">重翻與晚載內容不再重複計費、慢模型不再被中斷後白付費；雙語對照模式下原文被蓋掉、譯文過幾秒消失的問題修正；iPad 與 iPhone（橫向）開放文件翻譯</p>
+
+  <ul>
+    <li><strong>重翻更省錢</strong>：開了術語表時，還原後再翻不再整頁重新計費；網頁晚一點才載入的區塊不再被同時送翻兩次；作者列這類翻完幾乎都是英文名字的人名清單，翻一次後就從快取取用，不再每次重翻都計費</li>
+
+    <li><strong>慢模型不再白付費</strong>：網頁翻譯單批等待上限從 15 秒放寬到 45 秒，逾時後只重試 1 次。原本較慢的模型遇到長段落常被中斷，中斷的請求照樣計費、譯文卻沒存進快取</li>
+
+    <li><strong>雙語對照修正</strong>：文字裡夾著 emoji 圖片、粗體字或換行的段落（例如 YouTube 留言）不再被譯文直接蓋掉原文，改為原文加下方譯文；同一區塊內另有原地翻譯的文字（例如留言標頭的作者、時間）時，雙語譯文不再過幾秒就消失。區塊內只有一部分是這類文字時（例如多段留言的第一段），仍會以譯文取代原文</li>
+
+    <li><strong>譯文編輯頁「搜尋取代」按鈕</strong>：文件翻譯的編輯頁工具列新增按鈕，搜尋取代列預設收起，<code>⌘F</code> / <code>Ctrl+F</code> 照常可開</li>
+
+    <li><strong>iPad 與 iPhone 文件翻譯</strong>（App Store 版）：工具列圖示選單新增「翻譯文件」，功能與電腦版相同；iPhone 需橫向使用。下載譯文檔、術語表等檔案時改開系統分享面板，選「儲存到檔案」即可。iPad 直立時閱讀器自動縮到螢幕寬度</li>
+  </ul>
+
+  <h2>v2.7.1 <span class="release-date">2026-11-20 上架</span></h2>
+  <p class="release-meta">相對於上一個商店版本 v2.7.0</p>
+
+  <p class="lead">網頁上的數學公式整顆保留不翻；修正 YouTube 留言回覆展開後的大段空白與錯誤文字、點擊內文時譯文變回原文等問題。<strong>若 YouTube 留言仍顯示怪異譯文，請在設定頁清除一次翻譯快取</strong></p>
+
+  <ul>
+    <li><strong>數學公式完整保留</strong>：以 MathML、MathJax、KaTeX 排版的公式（含化學式）不再拆成一個個符號送翻譯；段落內的行內公式原封不動留在譯文中，只有公式、沒有文字的表格格子或獨立公式區塊不翻</li>
+
+    <li><strong>YouTube 留言</strong>：展開回覆後，以 @ 提及開頭的回覆不再在譯文上方出現大段空白，開頭的 @ 提及連結也不再被換成一段不相干的文字。原因是留言捲進畫面時 YouTube 會重建這個連結，過去會被誤當成新段落單獨送翻</li>
+
+    <li><strong>點擊內文不再還原成原文</strong>：部分網站點一下已翻譯的內文、或拖曳選取文字時，譯文會變回原文、選不到譯文；現在只有點連結、按鈕這類會觸發頁面動作的位置才會還原</li>
+
+    <li><strong>YouTube 字幕</strong>：影片原音已經是目標語言（例如中文影片、目標繁體中文），卻沒有目標語言字幕、只剩自動配音字幕時，不再翻譯並關掉字幕，不浪費 API 費用</li>
+
+    <li><strong>中文網頁的語言判斷</strong>：以「語言-字體-地區」三段寫法宣告為繁體或簡體中文的網頁，過去被當成外語網頁，連很短的英文連結和標籤都拿去翻譯；現在與一般中文網頁的處理一致</li>
+  </ul>
+
   <h2>v2.7.0 <span class="release-date">2026-11-17 上架</span></h2>
   <p class="release-meta">相對於上一個商店版本 v2.6.0</p>
 

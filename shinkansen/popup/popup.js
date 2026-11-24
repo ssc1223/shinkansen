@@ -47,11 +47,10 @@ if (IS_PANEL) {
 }
 
 // iOS build（SPEC-PRIVATE §26）。build 屬性 vs 平台屬性分離見 lib/platform.js：
-//   - body.runtime-ios（build 屬性，不論 host OS）：CSS 隱藏「翻譯文件」入口
-//     （iOS build 已 strip translate-doc/，留著是死按鈕）
+//   - body.runtime-ios（build 屬性，不論 host OS）：iOS 專屬版面
 //   - body.runtime-ios-touch（平台屬性，只在真觸控裝置）：popup 撐滿放大。
 //     iOS build 可透過「iPhone 與 iPad App 在 Mac 上執行」裝在 macOS，此時要
-//     尊重 macOS popover 尺寸 → 不放大，只保留 runtime-ios 的死按鈕隱藏。
+//     尊重 macOS popover 尺寸 → 不放大。
 if (IS_IOS_BUILD) {
   document.body.classList.add('runtime-ios');
   if (isTouchScreenDevice()) {

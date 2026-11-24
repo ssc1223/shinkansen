@@ -337,7 +337,8 @@
     // textContent 純讀字串樹不 force layout。差異：textContent 包含 display:none
     // 子樹文字；但 isVisible 在多處已過濾隱藏祖先，剩餘 edge case 僅是「父可見、
     // 子隱藏」混排（極罕見），對長度/語言判斷不足以改變結果。
-    const text = el.textContent?.trim();
+    // 公式子樹內的符號不算可翻文字（只裝公式的格子 / 外框不成為 unit），見 SK.textExcludingMath
+    const text = SK.textExcludingMath(el).trim();
     if (!text || text.length < 2) return false;
     if (!/[\p{L}]/u.test(text)) return false;
     // P1: target-aware「已是目標語言」跳過。STATE.targetLanguage 由 content.js translatePage
@@ -528,6 +529,8 @@
         }
         if (cur === el && SK.isIconFontLigature(cur)) { result = true; break; }
       }
+      // 數學公式子樹（MathML / MathJax / KaTeX）整顆不翻，判斷本體 SK.isMathElement
+      if (SK.isMathElement(cur)) { result = true; break; }
       if (tag === 'FOOTER' && isContentFooter(cur)) {
         cur = cur.parentElement;
         continue;
@@ -1027,8 +1030,10 @@
         if (t === 'zh-CN' && detected === 'zh-Hant') return true;
         return false;
       }
-      if (t === 'zh-TW' && /^zh-(hant|tw|hk|mo)$/i.test(hl)) return false;
-      if (t === 'zh-CN' && (hl === 'zh' || /^zh-(hans|cn|sg)$/i.test(hl))) return false;
+      // 三段 BCP 47（zh-Hant-TW / zh-Hans-CN）也要認得，否則繁中介面的頁面被當外語頁、
+      // 短文字門檻整批放寬（判斷本體 SK.zhScriptOfLang）
+      if (t === 'zh-TW' && SK.zhScriptOfLang(hl) === 'hant') return false;
+      if (t === 'zh-CN' && SK.zhScriptOfLang(hl) === 'hans') return false;
       if (t !== 'zh-TW' && t !== 'zh-CN') {
         if (hl.startsWith(t.split('-')[0].toLowerCase())) return false;
       }
@@ -1148,6 +1153,31 @@
     // 共用 seen / excludedMemo / fragmentExtracted / blockAncestorMemo,避免 host
     // 與 shadow 重複計算或 inject 衝突。
     function processScope(scopeRoot, _includeRootCandidate) {
+    // 「已翻譯單元內的子孫不是新段落」——walker 在 data-shinkansen-translated 元素整棵
+    // REJECT，但下方各補抓 pass（BUTTON / INCLUDE_BY_SELECTOR / inline prose / leaf anchor
+    // / leaf div·span / grid td）用 querySelectorAll 繞過 walker，過去只查元素自己有沒有
+    // 標記。框架把已譯段落內的 inline 子節點換成新元素（YouTube 留言捲進畫面時重建
+    // @提及連結 <a>）後，新元素不帶標記、祖先帶標記，補抓 pass 就把它當成獨立新段落
+    // 收走：單獨送出的短 handle 讓 LLM 憑空編出長文或塞空白換行，再經 by-text reuse
+    // 套進連結本體。補抓 pass 一律改查「自己或範圍內祖先帶標記」，與 walker 語意對齊。
+    // 祖先只看到 scopeRoot 為止：A7 scoped rescan 的 root 本來就位於已譯容器內
+    //（晚載 append 內容），範圍外的祖先標記不得擋掉它。
+    const _translatedMemo = new Map();
+    function isTranslatedOrInsideTranslated(el) {
+      if (el.hasAttribute('data-shinkansen-translated')) return true;
+      const chain = [];
+      let cur = el.parentElement;
+      let result = false;
+      while (cur) {
+        if (_translatedMemo.has(cur)) { result = _translatedMemo.get(cur); break; }
+        chain.push(cur);
+        if (cur.hasAttribute('data-shinkansen-translated')) { result = true; break; }
+        if (cur === scopeRoot || cur === document.body) break;
+        cur = cur.parentElement;
+      }
+      for (const n of chain) _translatedMemo.set(n, result);
+      return result;
+    }
     const _walkerFilter = {
       acceptNode(el) {
         // opts.pathTo：不在目標節點祖先鏈上的子樹整段 REJECT（見 _collectParagraphsImpl 開頭）
@@ -1814,7 +1844,7 @@
       if (isCoveredByCollectedAncestor(btn)) return;
       const text = (btn.textContent || '').trim();
       if (text.length < _buttonThreshold(text)) return;
-      if (btn.hasAttribute('data-shinkansen-translated')) return;
+      if (isTranslatedOrInsideTranslated(btn)) return;
       if (!SK.isVisible(btn)) return;
       if (isInsideExcludedContainer(btn, excludedMemo)) return;
       // widget 祖先檢查:按鈕在 widget 容器內不偵測（Twitter Follow 等）
@@ -1887,7 +1917,7 @@
     qsaOnPath(scopeRoot, SK.INCLUDE_BY_SELECTOR).forEach(el => {
       if (!onPath(el)) return;
       if (seen.has(el)) return;
-      if (el.hasAttribute('data-shinkansen-translated')) return;
+      if (isTranslatedOrInsideTranslated(el)) return;
       // v1.10.1: 已被 Case F(walker 非-block 分支)處理過的 multi-segment block 容器
       // 不再整顆當 unit — Case F 已把 descendant leaf SPAN 各拆成獨立 unit。
       // 對應 X 主推文 [data-testid="tweetText"] 場景:Case F 觸發後 tweetText DIV 不該
@@ -1999,7 +2029,7 @@
     qsaOnPath(scopeRoot, INLINE_PROSE_WRAPPER_SELECTOR).forEach(el => {
       if (!onPath(el)) return;
       if (seen.has(el)) return;
-      if (el.hasAttribute('data-shinkansen-translated')) return;
+      if (isTranslatedOrInsideTranslated(el)) return;
       if (hasBlockAncestor(el)) return;
       if (hasAncestorExtracted(el)) return;
       if (SK.containsBlockDescendant(el)) return;
@@ -2023,7 +2053,7 @@
       if (!(a instanceof HTMLElement)) return;
       if (!onPath(a)) return;
       if (seen.has(a)) return;
-      if (a.hasAttribute('data-shinkansen-translated')) return;
+      if (isTranslatedOrInsideTranslated(a)) return;
       if (hasBlockAncestor(a)) return;
       // D-2：連結位於祖先 fragment run 或 element 單元內 → 已涵蓋，不再單獨收
       //（放在有 memo 的 hasBlockAncestor 之後：段落內連結佔大宗，先被那條擋掉）
@@ -2084,7 +2114,7 @@
       // run),這裡漏查會產生「同 el fragment+element 雙 unit」→ 同 text dedup 歸同
       // entry → broadcast 雙注入 → 第二次被 echo 判定沖回原文
       if (fragmentExtracted.has(d)) return;
-      if (d.hasAttribute('data-shinkansen-translated')) return;
+      if (isTranslatedOrInsideTranslated(d)) return;
       // d.children.length > 0 過濾已由 :not(:has(*)) selector 取代，移除
       if (hasBlockAncestor(d)) return;
       // D-2：leaf 位於祖先 fragment run 或 element 單元內 → 已涵蓋，不再單獨收
@@ -2141,12 +2171,12 @@
       // v1.6.9: textContent 取代 innerText
       const tdText = (td.textContent || '').trim();
       if (tdText.length < 20) return;
-      if (td.hasAttribute('data-shinkansen-translated')) return;
+      if (isTranslatedOrInsideTranslated(td)) return;
 
       qsaOnPath(td, '*').forEach(el => {
         if (!onPath(el)) return;
         if (seen.has(el)) return;
-        if (el.hasAttribute('data-shinkansen-translated')) return;
+        if (isTranslatedOrInsideTranslated(el)) return;
         // 2026-09-11 code review §3.2-2：本 pass 用 querySelectorAll 繞過 TreeWalker，
         // 之前完全沒走 isInsideExcludedContainer——grid 內的 translate="no" / notranslate /
         // dual wrapper / contenteditable / code 容器全部失效（上方 leaf DIV / anchor 補抓
@@ -2193,6 +2223,13 @@
     if (!units || units.length === 0) return units;
     const win = document.defaultView;
     if (!win) return units;
+
+    // 整顆容器 fragment 升格為 element unit:fragment 在 dual 沒有插 wrapper 的位置,
+    // injectDual 會 fallback 走 single 原地取代 → 雙語模式下原文被譯文蓋掉(YouTube
+    // 留言帶 emoji 圖 / 粗體 / <br> 的 yt-attributed-string host span 實測)。fragment
+    // 範圍若已涵蓋容器全部有內容的子節點(範圍外只剩空白文字 / 註解),整顆容器就是
+    // 這個段落,改當 element unit 走正常 dual wrapper。部分範圍的 fragment 維持原行為。
+    units = promoteWholeContainerFragments(units);
 
     // block ancestor → [index in units]
     const groups = new Map();
@@ -2243,6 +2280,47 @@
     });
     return result;
   };
+
+  function promoteWholeContainerFragments(units) {
+    const fragCount = new Map();
+    const elementEls = new Set();
+    for (const u of units) {
+      if (u.kind === 'fragment' && u.el) fragCount.set(u.el, (fragCount.get(u.el) || 0) + 1);
+      else if (u.el) elementEls.add(u.el);
+    }
+    if (fragCount.size === 0) return units;
+    const coversWhole = (u) => {
+      const { el, startNode, endNode } = u;
+      if (!el || !startNode || !endNode || startNode.parentNode !== el) return false;
+      let inRange = false;
+      let reachedEnd = false;
+      for (let n = el.firstChild; n; n = n.nextSibling) {
+        if (n === startNode) inRange = true;
+        if (!inRange || reachedEnd) {
+          if (n.nodeType === 3 && (n.nodeValue || '').trim() === '') continue;
+          if (n.nodeType === 8) continue;
+          return false;
+        }
+        if (n === endNode) reachedEnd = true;
+      }
+      return reachedEnd;
+    };
+    let promoted = 0;
+    const result = [];
+    for (const u of units) {
+      if (u.kind === 'fragment' && fragCount.get(u.el) === 1 && !elementEls.has(u.el) && coversWhole(u)) {
+        const { startNode: _s, endNode: _e, ...rest } = u;
+        result.push({ ...rest, kind: 'element', el: u.el });
+        promoted++;
+        continue;
+      }
+      result.push(u);
+    }
+    if (promoted > 0) {
+      SK.sendLog?.('info', 'detect', 'dual: whole-container fragments promoted to element units', { promoted });
+    }
+    return result;
+  }
 
   // v1.9.13: 找出 root subtree 內所有 open shadow root,遞迴進去再找(shadow 內可能還有
   // shadow)。closed shadow root 受 web spec 安全限制,從 JS 完全不可達,只能跳過。
